@@ -1389,6 +1389,17 @@ impl SimSqlite {
         self.with(|state| state.commit_by(Conn::OtherWriter, pages, db_size))
     }
 
+    /// The engine's writer connection commits `pages` with database size `db_size`, under
+    /// that connection's checkpoint count (a TRUNCATE runs there): a bump frame real SQLite
+    /// wrote, replayed. `None` while another writer holds the lock.
+    pub fn engine_writer_commit(
+        &self,
+        pages: &[(PageNo, Vec<u8>)],
+        db_size: u32,
+    ) -> Option<AppCommit> {
+        self.with(|state| state.commit_by(Conn::Writer, pages, db_size))
+    }
+
     /// Arms a commit the app makes inside the engine's next tick, at `site`.
     /// `created_at` is read at that moment, so the harness can tell what
     /// happened before the commit and what after. It replaces any armed
@@ -2220,8 +2231,9 @@ impl PageSource for SimPages {
     }
 }
 
-/// Our checkpoint connections: [`Checkpointer`] over the shared state. Checkpoints run on our
-/// read connection; the barrier and `bump_seq` on our writer connection.
+/// Our checkpoint connections: [`Checkpointer`] over the shared state. PASSIVE and FULL
+/// checkpoints run on our read connection; TRUNCATE, the barrier and `bump_seq` on our writer
+/// connection.
 #[derive(Clone, Debug)]
 pub struct SimCheckpointer {
     state: Arc<Mutex<State>>,
@@ -2259,6 +2271,26 @@ impl Checkpointer for SimCheckpointer {
         let mut state = lock(&self.state);
         state.app_call(Some(SourceOp::Checkpoint));
         state.writes_allowed()?;
+        // lsr-sqlite runs a TRUNCATE on the writer connection and leaves the read transaction
+        // alone.
+        if mode == CheckpointMode::Truncate {
+            state.faults.take(SourceOp::Checkpoint)?;
+            if state.barrier.is_some() {
+                return Err(SourceError::Io(io::ErrorKind::InvalidInput));
+            }
+            let failing = state.faults.truncate_fails;
+            let numbers = state.checkpoint(Conn::Writer, mode.into());
+            if failing && !state.faults.truncate_fails {
+                return Err(SourceError::Io(io::ErrorKind::Other));
+            }
+            return Ok(CheckpointRun {
+                busy: numbers.busy,
+                log: numbers.log,
+                checkpointed: numbers.checkpointed,
+                epoch: state.epoch,
+                one_sqlite: true,
+            });
+        }
         // lsr-sqlite releases the read transaction before it asks SQLite and takes it again
         // after, whatever SQLite answered: a failed checkpoint still starts a new hold. A lost
         // retake ran the checkpoint and leaves the read transaction lapsed, for the next read
@@ -2287,6 +2319,7 @@ impl Checkpointer for SimCheckpointer {
             log: numbers.log,
             checkpointed: numbers.checkpointed,
             epoch: state.epoch,
+            one_sqlite: true,
         })
     }
 

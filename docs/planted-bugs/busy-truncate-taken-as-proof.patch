@@ -1,0 +1,19 @@
+diff --git a/crates/core/src/checkpoint.rs b/crates/core/src/checkpoint.rs
+index 59870002b..79218eaa0 100644
+--- a/crates/core/src/checkpoint.rs
++++ b/crates/core/src/checkpoint.rs
+@@ -697,9 +697,6 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
+             self.release_read_lock();
+             return Err(Fault::ReadTxLost);
+         }
+-        if run.busy {
+-            return Ok(false);
+-        }
+         // The TRUNCATE reset the generation the seal staged, and nothing reset it in between:
+         // a restart by a writer that then died before clearing the backfill count could make
+         // frames nobody copied look copied. And no other copy of SQLite in the process could
+@@ -821,3 +818,4 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
+ 
+ #[cfg(test)]
+ mod tests;
++

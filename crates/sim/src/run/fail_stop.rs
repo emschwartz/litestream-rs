@@ -192,11 +192,10 @@ const fn breaks_continuity(cause: SnapshotCause) -> bool {
         SnapshotCause::StagedUnverified { .. }
         | SnapshotCause::LocalRewound { .. }
         | SnapshotCause::AheadOfReplica { .. } => true,
-        // No replica yet, or one ahead of us (D81 keeps it out); a checkpoint is a mid-run
-        // cause; the rest the engine never counts as lag.
+        // No replica yet, or one ahead of us (D81 keeps it out); the rest the engine never
+        // counts as lag.
         SnapshotCause::FirstSync
         | SnapshotCause::BehindRemote { .. }
-        | SnapshotCause::CheckpointBoundary
         | SnapshotCause::OperatorRequested
         | SnapshotCause::GenerationChanged
         | SnapshotCause::WalMissing

@@ -1,0 +1,9 @@
+# A TRUNCATE checkpoint taken as proof without checking that it reset the generation the seal
+# staged and nothing reset it in between. A writer that restarted the WAL and died before
+# clearing the backfill count leaves frames nobody copied counted as copied; SQLite's TRUNCATE
+# then succeeds over them, and the engine follows a generation that dropped a commit
+# (docs/decisions/D263.md).
+name = "truncate-proof-after-an-unseen-reset"
+fix = "claude/truncate-proof"
+package = "lsr-core"
+tests = ["an_unproven_truncate_leaves_the_next_sync_to_snapshot"]

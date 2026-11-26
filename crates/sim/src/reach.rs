@@ -45,8 +45,8 @@ pub const REQUIRED: &[&str] = &[
     "staged.apart",
     "staged.moved_up",
     // Every snapshot cause the needless-snapshot check maps to its forcings; a cause no run
-    // reaches is a row of that map nothing tests. CheckpointBoundary and OperatorRequested have
-    // no event of their own and are counted when staged (`snapshot.staged.*`).
+    // reaches is a row of that map nothing tests. OperatorRequested has no event of its own and
+    // is counted when staged (`snapshot.staged.*`).
     "snapshot.FirstSync",
     "snapshot.BehindRemote",
     "snapshot.NewestStagedFileUnreadable",
@@ -127,10 +127,6 @@ pub const UNREQUIRED: &[(&str, &str)] = &[
     (
         "check.damaged",
         "a restore stopped by a file a corrupt publish damaged; rare in 64 seeds",
-    ),
-    (
-        "snapshot.staged.CheckpointBoundary",
-        "the engine's own TRUNCATE checkpoint, never judged",
     ),
     (
         "snapshot.LocalRewound",

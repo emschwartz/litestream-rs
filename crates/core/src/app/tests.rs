@@ -34,6 +34,7 @@ fn ran(log: u32, checkpointed: u32) -> Option<CheckpointRun> {
         log,
         checkpointed,
         epoch: ReadLockHold::first().next(),
+        one_sqlite: true,
     })
 }
 

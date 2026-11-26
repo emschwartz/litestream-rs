@@ -245,7 +245,10 @@ fn a_checkpoint_blocked_by_readers_reports_busy_in_the_run() {
         .unwrap();
     let run = live.checkpoint(CheckpointMode::Truncate).unwrap();
     assert!(run.busy, "{run:?}");
-    assert_eq!(run.epoch, first.next());
+    assert_eq!(
+        run.epoch, first,
+        "a TRUNCATE keeps the engine's read transaction"
+    );
 }
 
 /// The setup a replicator on `database` hands out, its writes never held.

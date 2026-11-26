@@ -196,10 +196,10 @@ fn the_barrier_holds_the_writer() {
         Err(SourceError::Io(std::io::ErrorKind::InvalidInput)),
         "the writer connection is in the barrier's transaction"
     );
-    let run = ck.checkpoint(CheckpointMode::Truncate).unwrap();
-    assert!(
-        run.busy,
-        "TRUNCATE degrades to PASSIVE under another writer"
+    assert_eq!(
+        ck.checkpoint(CheckpointMode::Truncate),
+        Err(SourceError::Io(std::io::ErrorKind::InvalidInput)),
+        "a TRUNCATE runs on the writer connection, which is in the barrier's transaction"
     );
     ck.end_barrier(barrier).unwrap();
     assert!(db.commit(&tx(&[2], 1), 4).is_some());

@@ -1,8 +1,0 @@
-# The simulator looks for a staged file that holds every page at level 0 only, so the boundary
-# snapshot a local course's TRUNCATE stages in its slot is a snapshot the engine counted and the
-# checks saw no file for. A plant in a checker.
-name = "sim-course-file-not-read-in-slot"
-fix = "claude/boot-local"
-package = "lsr-sim"
-test_bin = "sim"
-tests = ["faults::store_down_and_the_course_truncates"]

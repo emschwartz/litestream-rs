@@ -1,12 +1,17 @@
 diff --git a/crates/core/src/checkpoint.rs b/crates/core/src/checkpoint.rs
-index 4b74f5864..b93355e3a 100644
+index 59870002b..ab1ca5f8f 100644
 --- a/crates/core/src/checkpoint.rs
 +++ b/crates/core/src/checkpoint.rs
-@@ -636,6 +636,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
-         let run = sealed?;
+@@ -640,6 +640,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
          released.map_err(Fault::from_source)?;
+         let truncated = truncate && self.truncate_held()?;
          if !self.bump()? {
 +            self.release_read_lock();
              return Ok(CheckpointOutcome::Overtaken);
          }
          if self.header()? == before {
+@@ -821,3 +822,4 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
+ 
+ #[cfg(test)]
+ mod tests;
++

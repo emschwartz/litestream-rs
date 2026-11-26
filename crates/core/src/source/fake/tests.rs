@@ -154,22 +154,38 @@ fn an_uncommitted_spill_is_in_the_file_below_no_committed_end() {
     assert_eq!(frames, 2);
 }
 
+/// A TRUNCATE after a PASSIVE that copied everything empties the file and keeps the read
+/// transaction the PASSIVE retook on mark 0.
 #[test]
-fn a_truncating_checkpoint_empties_the_file_and_retakes_the_read_transaction() {
+fn a_truncating_checkpoint_empties_the_file_and_keeps_the_read_transaction() {
     let fake = wal();
     fake.append_tx(&tx(1), size(2));
     fake.hold_reader();
     let mut checkpointer = FakeCheckpointer::new(fake.clone());
+    checkpointer.checkpoint(CheckpointMode::Passive).unwrap();
     let before = fake.epoch();
     let run = checkpointer.checkpoint(CheckpointMode::Truncate).unwrap();
     assert!(!run.busy);
-    assert_eq!(run.epoch, before.next());
-    assert_eq!(fake.epoch(), run.epoch);
+    assert_eq!(run.epoch, before);
+    assert_eq!(fake.epoch(), before);
     assert!(fake.file_bytes().is_empty());
     assert_eq!(fake.restarts(), 1);
     assert_eq!(fake.read_mark(), Some(0));
     fake.append_tx(&tx(2), size(2));
     assert_eq!(fake.committed_end().frame_count(), 1);
+}
+
+/// A TRUNCATE while our read holds a mark above 0 is busy and changes nothing.
+#[test]
+fn a_truncating_checkpoint_behind_our_mark_is_busy() {
+    let fake = wal();
+    fake.append_tx(&tx(1), size(2));
+    fake.hold_reader();
+    let mut checkpointer = FakeCheckpointer::new(fake.clone());
+    let run = checkpointer.checkpoint(CheckpointMode::Truncate).unwrap();
+    assert!(run.busy);
+    assert_eq!(fake.restarts(), 0);
+    assert!(!fake.file_bytes().is_empty());
 }
 
 #[test]

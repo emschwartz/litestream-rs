@@ -1,0 +1,8 @@
+# A TRUNCATE checkpoint taken as proof that no commit slipped in although another copy of SQLite
+# in the process had the wal-index open. That copy keeps its own locks, which the engine's read
+# cannot hold back, so it can backfill and truncate a commit no step staged; the engine then
+# follows the new generation and the replica never has that commit (docs/decisions/D263.md).
+name = "truncate-proof-beside-a-second-sqlite"
+fix = "claude/truncate-proof"
+package = "lsr-core"
+tests = ["an_unproven_truncate_leaves_the_next_sync_to_snapshot"]

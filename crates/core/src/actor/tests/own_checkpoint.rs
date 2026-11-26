@@ -176,10 +176,11 @@ fn an_overtaken_checkpoint_reports_what_sqlite_said_of_busy() {
     );
 }
 
-/// A TRUNCATE that emptied the WAL and was overtaken at its bump leaves the boundary snapshot
-/// to the next sync, which stages and counts it under that cause.
+/// A TRUNCATE that emptied the WAL and was overtaken at its bump leaves the position pinned:
+/// the writer that held the lock starts the new generation, and the next sync follows it with
+/// no snapshot.
 #[test]
-fn a_truncate_overtaken_at_its_bump_snapshots_on_the_next_sync() {
+fn a_truncate_overtaken_at_its_bump_follows_the_next_generation() {
     let mut config = cfg();
     config.checkpoint = CheckpointConfig {
         interval: None,
@@ -216,14 +217,12 @@ fn a_truncate_overtaken_at_its_bump_snapshots_on_the_next_sync() {
         }),
         "{truncate:?}"
     );
-    assert_eq!(
-        actor.pending_snapshot(),
-        Some(SnapshotCause::CheckpointBoundary)
-    );
-    let counted = |actor: &Actor| actor.snapshots().get(SnapshotCauseKind::CheckpointBoundary);
-    let before = counted(&actor);
+    assert_eq!(actor.pending_snapshot(), None);
+    let before = actor.snapshots().total();
+    // The writer that held the lock commits the new generation's first frames.
+    rig.commit(3);
     let seen = rig.settle(&mut actor, T0 + 3);
-    assert_eq!(counted(&actor), before + 1, "{seen:?}");
+    assert_eq!(actor.snapshots().total(), before, "{seen:?}");
     assert_eq!(actor.pending_snapshot(), None);
     assert!(
         !seen.iter().any(|tick| matches!(

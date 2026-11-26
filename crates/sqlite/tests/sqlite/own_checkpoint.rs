@@ -19,7 +19,7 @@ use lsr_sqlite::testing::{Rig, RigConfig};
 use rusqlite::Connection;
 use tempfile::TempDir;
 
-use crate::boundary_snapshot::{HOOK, Hooked, connect};
+use crate::truncate_proof::{HOOK, Hooked, connect};
 
 /// What the application's second connection did at the engine's calls.
 #[derive(Debug, Default)]
@@ -247,12 +247,14 @@ fn a_write_lock_held_at_every_barrier_defers_the_checkpoint_and_fails_nothing() 
 }
 
 /// Arms the hook for a TRUNCATE whose bump is overtaken: a reader at the WAL's end keeps the
-/// PASSIVE's bump from restarting it, so the TRUNCATE comes due; the reader ends before the
-/// TRUNCATE; and the writer takes the write lock right before the TRUNCATE's bump, once, and
-/// commits at the engine's next call.
+/// threshold PASSIVE from copying everything, so the TRUNCATE comes due; the reader ends at the
+/// next barrier, the TRUNCATE's own; and the writer takes the write lock right before the
+/// TRUNCATE's bump (the bump after two checkpoint calls), once, and commits at the engine's
+/// next call.
 fn arm_truncate_overtaken(writer: Connection, reader: Connection) -> Rc<RefCell<Seen>> {
     let seen = Rc::new(RefCell::new(Seen::default()));
     let state = Rc::clone(&seen);
+    let (mut reads, mut calls) = (0_u32, 0_u32);
     HOOK.with(|hook| {
         *hook.borrow_mut() = Some(Box::new(move |op: SourceOp| {
             let mut seen = state.borrow_mut();
@@ -263,20 +265,20 @@ fn arm_truncate_overtaken(writer: Connection, reader: Connection) -> Rc<RefCell<
             }
             match op {
                 SourceOp::BeginBarrier => {
-                    seen.barrier = true;
-                    if !seen.reading && seen.began == 0 {
-                        reader
+                    calls = 0;
+                    match reads {
+                        0 => reader
                             .execute_batch("BEGIN; SELECT count(*) FROM t")
-                            .unwrap();
-                        seen.reading = true;
+                            .unwrap(),
+                        1 => reader.execute_batch("COMMIT").unwrap(),
+                        _ => {}
                     }
+                    seen.reading = reads == 0;
+                    reads = reads.saturating_add(1).min(2);
                 }
-                SourceOp::Checkpoint if !seen.barrier && seen.reading => {
-                    reader.execute_batch("COMMIT").unwrap();
-                    seen.reading = false;
-                }
+                SourceOp::Checkpoint => calls = calls.saturating_add(1),
                 SourceOp::BumpSeq => {
-                    if !seen.barrier && seen.began == 0 {
+                    if calls == 2 && seen.began == 0 {
                         writer
                             .execute_batch(
                                 "BEGIN IMMEDIATE; INSERT INTO t(v) VALUES (randomblob(700))",
@@ -285,10 +287,8 @@ fn arm_truncate_overtaken(writer: Connection, reader: Connection) -> Rc<RefCell<
                         seen.holding = true;
                         seen.began = seen.began.saturating_add(1);
                     }
-                    seen.barrier = false;
                 }
-                SourceOp::Checkpoint
-                | SourceOp::Open
+                SourceOp::Open
                 | SourceOp::Len
                 | SourceOp::Committed
                 | SourceOp::Sync
@@ -303,12 +303,11 @@ fn arm_truncate_overtaken(writer: Connection, reader: Connection) -> Rc<RefCell<
     seen
 }
 
-/// A TRUNCATE empties the WAL, and a writer takes the write lock before the sequence bump:
-/// the generation that writer starts has no header to snapshot under yet. The boundary
-/// snapshot is taken by the next sync under its own cause; the engine does not fail the
-/// checkpoint and later find a WAL it cannot explain.
+/// A TRUNCATE empties the WAL, and a writer takes the write lock before the sequence bump: the
+/// generation that writer starts is followed or, when nothing proves it continues the sealed
+/// one, snapshotted; the engine fails nothing and the replica restores every commit.
 #[test]
-fn a_truncate_overtaken_at_its_bump_takes_its_boundary_snapshot_on_the_next_sync() {
+fn a_truncate_overtaken_at_its_bump_fails_nothing() {
     let dir = TempDir::new().unwrap();
     let mut rig = rig(
         &dir,
@@ -321,7 +320,6 @@ fn a_truncate_overtaken_at_its_bump_takes_its_boundary_snapshot_on_the_next_sync
     let writer = connect(rig.db(), rig.vfs().name());
     let reader = connect(rig.db(), rig.vfs().name());
     let from = rig.ticks().len();
-    let before = rig.actor().snapshots();
     let seen = arm_truncate_overtaken(writer, reader);
     let _generations = rounds(&mut rig, 3);
     disarm();
@@ -337,18 +335,17 @@ fn a_truncate_overtaken_at_its_bump_takes_its_boundary_snapshot_on_the_next_sync
         "the TRUNCATE ran"
     );
     assert_eq!(rig.faults(), &[], "a refused bump is not a failure");
-    assert_eq!(
-        snapshots(&rig, from),
-        vec![],
-        "no snapshot for a WAL that moved"
-    );
-    let after = rig.actor().snapshots();
-    let grew = |kind| after.get(kind) - before.get(kind);
+    // The writer's first frame after the TRUNCATE may carry fresh salts (SQLite picks new ones
+    // when that connection has run no checkpoint itself), and then nothing proves the new
+    // generation continues the sealed one: at most that one snapshot.
+    let taken = snapshots(&rig, from);
     assert!(
-        grew(lsr_core::SnapshotCauseKind::CheckpointBoundary) >= 1,
-        "the boundary snapshot was staged: {after:?}"
+        taken
+            .iter()
+            .all(|cause| *cause == SnapshotCause::GenerationChanged)
+            && taken.len() <= 1,
+        "{taken:?}"
     );
-    assert_eq!(grew(lsr_core::SnapshotCauseKind::GenerationChanged), 0);
     let checked = rig.check().unwrap();
     assert_eq!(checked.latest, rig.acked(), "{checked:?}");
 }
