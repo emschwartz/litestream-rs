@@ -11,7 +11,10 @@ Claude models wrote the code and these documents under the repository owner's di
 - **In-process.** The library replicates from a thread it starts inside the application, so there is no second process to deploy and supervise. The binary runs the same engine as a sidecar.
 - **Tested against Go.** A nightly job compares restores page for page with Go Litestream's, for each of the 19 releases from v0.5.0 to v0.5.18. Three more checks: a deterministic fault simulator, real SQLite under a power-loss model, and a rig that kills and partitions the real binary (one counted run: 1,000 cycles, 0 failing anomalies, 151 excused under [#346](https://github.com/emschwartz/litestream-rs/issues/346)).
 - **Visible failures.** `Replicator::health()` takes one lock and does no I/O. Every failure that lasts is a named state in the handle, in `/healthz` and in `/metrics`, never only a log line.
-- **Bounded memory.** A test pins each buffer and fails when it grows. An upload holds 26 MiB of parts at the default settings.
+- **Faster, with less memory and fewer requests.** On one 4-core Linux VM against MinIO on loopback, a first start of a 4 GiB database of random pages, at the default part settings ([docs/performance.md](docs/performance.md)):
+  - **Faster:** 34.6 s against Go's 59.6 s (three paired runs).
+  - **Less memory:** a peak of 55 MiB against Go's 171 MiB (215 against 824 MiB at a large part size).
+  - **Fewer requests:** 1,680 against Go's 3,809 in one counted run, though 40 LISTs against Go's 33 or 34.
 - **No silent short restores.** A restore verifies every file before it uses it, and fails rather than hand back a shorter history.
 
 ## Run the binary
@@ -91,7 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-No async runtime is needed, and nothing runs on the application's threads. Until `wait_booted` returns `Booted`, writes from any connection fail with "database is locked". The `lsr-replica` crate docs (`cargo doc -p lsr-replica --open`) cover connections, the TLS provider, which SQLite builds it accepts, restore and the memory bounds.
+No async runtime is needed, and nothing runs on the application's threads. Until the replicator reports that it is ready, writes from any connection fail with "database is locked". The `lsr-replica` crate docs (`cargo doc -p lsr-replica --open`) cover connections, the TLS provider, which SQLite builds it accepts, restore and the memory bounds.
 
 ## How it differs from Go
 
@@ -103,6 +106,7 @@ The replica format is the same. Where Go would carry on, `lsr` stops or refuses:
 - [docs/running.md](docs/running.md) and [docs/config-keys.md](docs/config-keys.md): running the binary, and every `litestream.yml` key.
 - [docs/differences-from-go.md](docs/differences-from-go.md) and [docs/go-terms.md](docs/go-terms.md): differences from Go, and a vocabulary map.
 - [docs/limitations.md](docs/limitations.md) and [docs/release-bar.md](docs/release-bar.md): what is not done, and what must be true before first use.
+- [docs/performance.md](docs/performance.md): measurements against Go and how they were taken.
 - [docs/BEHAVIOR.md](docs/BEHAVIOR.md): every circumstance the code distinguishes, what it does, and which test shows it.
 - [docs/PLAN.md](docs/PLAN.md) and `docs/decisions/`: the design, the crate map (section 3) and one file per trade-off.
 - [docs/developing.md](docs/developing.md): the land gate (`just check`) and which tests need Docker, Go or a real provider.
