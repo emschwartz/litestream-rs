@@ -202,12 +202,13 @@ fn restore_reads_chunks_side_by_side() {
     assert!(tally.widest <= width, "{} in flight", tally.widest);
 }
 
-// A multipart upload sends its full parts `concurrency` at a time. Requests:
-// create, one per part, complete. Depth: create, ceil(parts / concurrency)
-// batches, complete. Memory: never more than `concurrency` parts buffered.
+// A multipart upload keeps up to `concurrency` parts in flight while it fills the next.
+// Requests: create, one per part, complete. Depth: create, ceil(parts / concurrency)
+// waves of parts (the link lands every part in flight when the upload has to wait for
+// one), complete. Memory: never more than `concurrency` parts in flight and one more.
 // A serial upload is parts + 2 round trips (11 here).
 #[test]
-fn multipart_upload_sends_parts_in_batches() {
+fn multipart_upload_keeps_parts_in_flight() {
     let concurrency = std::num::NonZeroUsize::new(4).unwrap();
     let part = PartSize::MIN;
     let link = Link::new(fake());
@@ -256,9 +257,9 @@ fn multipart_upload_sends_parts_in_batches() {
         tally.widest
     );
     assert!(
-        peak <= concurrency.get() * part_bytes,
+        peak <= (concurrency.get() + 1) * part_bytes,
         "{peak} bytes buffered, bound {} parts of {part_bytes}",
-        concurrency.get()
+        concurrency.get() + 1
     );
 }
 

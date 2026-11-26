@@ -17,7 +17,7 @@ use crate::plan::RestoreTarget;
 use crate::restore::{MemSink, restore};
 use crate::source::{CheckpointCall, FakeCheckpointer, FakeDb, FakeWal, SourceError, SourceOp};
 use crate::store::WriteMode;
-use crate::store::{Listing, PageLimit, ReadLen, StoreError, StoreOp, Upload};
+use crate::store::{Flight, Listing, PageLimit, ReadLen, Rest, StoreError, StoreOp, Upload};
 
 mod after_delete;
 mod ahead;
@@ -61,6 +61,8 @@ struct CountingUpload {
     inner: <MemStore as ObjectStore>::Upload,
     /// The created-at time a commit answers with as exact, if the store does that.
     created: Option<Timestamp>,
+    /// What the next questions about the upload's parts are answered, in order.
+    flights: Arc<std::sync::Mutex<std::collections::VecDeque<Flight>>>,
 }
 
 impl CountingUpload {
@@ -88,13 +90,13 @@ impl Upload for CountingUpload {
         self.inner.write_from(chunk, again)
     }
 
-    async fn commit(self) -> Result<FileInfo, StoreError> {
-        let info = self.inner.commit().await?;
-        Ok(Self::answer(self.created, info))
+    fn flight(&mut self, _rest: Rest) -> impl Future<Output = Result<Flight, StoreError>> + Send {
+        let flight = self.flights.lock().unwrap().pop_front();
+        async move { Ok(flight.unwrap_or(Flight::Idle)) }
     }
 
-    async fn commit_from(self, again: &dyn crate::store::Reread) -> Result<FileInfo, StoreError> {
-        let info = self.inner.commit_from(again).await?;
+    async fn commit(self) -> Result<FileInfo, StoreError> {
+        let info = self.inner.commit().await?;
         Ok(Self::answer(self.created, info))
     }
 
@@ -156,6 +158,9 @@ struct Counting {
     scratch_error: Arc<std::sync::Mutex<Option<StoreError>>>,
     /// `remove_scratch` calls made.
     scratch_calls: Arc<AtomicU32>,
+    /// What an upload's next questions about its parts are answered, in order; with none
+    /// left, that no part is in flight.
+    flights: Arc<std::sync::Mutex<std::collections::VecDeque<Flight>>>,
 }
 
 impl Counting {
@@ -371,6 +376,7 @@ impl ObjectStore for Counting {
         let refused = self.refuse_uploads.load(Ordering::SeqCst);
         let begun = self.inner.begin_sized_upload(key, created_at, mode, len);
         let created = self.commit_says_created.then_some(created_at);
+        let flights = Arc::clone(&self.flights);
         async move {
             if refused {
                 return Err(StoreError::Transient {
@@ -378,9 +384,11 @@ impl ObjectStore for Counting {
                     kind: ErrorKind::ConnectionReset,
                 });
             }
+            let inner = begun.await?;
             Ok(CountingUpload {
-                inner: begun.await?,
+                inner,
                 created,
+                flights,
             })
         }
     }

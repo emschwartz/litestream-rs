@@ -369,12 +369,14 @@ impl Witnesses {
 
     /// How many tokens are held.
     #[must_use]
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.by_txid.len()
     }
 
     /// Whether none is.
     #[must_use]
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.by_txid.is_empty()
     }

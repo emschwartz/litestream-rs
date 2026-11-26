@@ -12,7 +12,9 @@ use crate::inventory::Inventory;
 use crate::layout::{CreatedAt, FileInfo};
 use crate::layout::{FileKey, Level};
 use crate::plan::RestoreTarget;
-use crate::restore::{DatabaseSink, RestoreError, RestoreOptions, Restored, restore_from};
+use crate::restore::{
+    DatabaseSink, MAX_ATTEMPTS, RestoreError, RestoreOptions, Restored, restore_within,
+};
 use crate::store::{Listing, ObjectStore, PageLimit, ReadLen, StoreError, WriteMode};
 
 /// A [DatabaseSink] that keeps each page's checksum and nothing else: 8 bytes
@@ -191,12 +193,13 @@ pub(super) async fn digest_restore<S: ObjectStore>(
         files: AtomicUsize::new(0),
         bytes: AtomicU64::new(0),
     };
-    let result = restore_from(
+    let result = restore_within(
         &counting,
         Some(listed),
         target,
         RestoreOptions::default(),
         DigestSink { pages, keep: None },
+        MAX_ATTEMPTS,
     )
     .await;
     (

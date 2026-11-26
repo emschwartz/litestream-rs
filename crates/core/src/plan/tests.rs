@@ -83,6 +83,17 @@ fn retention_replica() -> Vec<FileInfo> {
 }
 
 #[test]
+fn only_a_plan_gives_its_chain() {
+    let files = [at(9, 1, 3)];
+    let planned = plan(&inv(&files), KeyTarget::Latest);
+    assert_eq!(planned.chain().map(|c| c.files().len()), Some(1));
+    assert_eq!(planned.into_chain().map(|c| c.reaches()), Ok(txid(3)));
+    let refused = gap(3, 7);
+    assert_eq!(refused.chain(), None);
+    assert_eq!(refused.clone().into_chain(), Err(refused));
+}
+
+#[test]
 fn a_stray_file_before_the_instant_is_not_a_gap_and_the_straddler_still_shows() {
     let files = retention_replica();
     let as_of = plan_reference(

@@ -267,6 +267,7 @@ impl CompactJob {
 
     /// The key the output is published under.
     #[must_use]
+    #[cfg(test)]
     pub fn output_key(&self) -> FileKey {
         FileKey::new(self.level, self.inputs.range())
     }

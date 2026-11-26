@@ -7,7 +7,7 @@
 use crate::duration::GoDuration;
 use crate::error::{Expected, KeyClass, KeyPath, Problem, ProblemKind, Warning, WarningKind};
 use crate::keys::{self, Key, OffValue, Read, Rule, Section};
-use crate::value::{self, found};
+use crate::value;
 use crate::yaml::{Node, NodeKind};
 
 /// A value as Go's type for its key reads it. `Null` is the key present with
@@ -218,15 +218,8 @@ impl Walk {
             NodeKind::Map(entries) => entries,
             NodeKind::Scalar { .. } | NodeKind::Seq(_) => {
                 if !node.is_null() {
-                    let found = found(node, false);
-                    self.problem(
-                        path.clone(),
-                        Some(node.line),
-                        ProblemKind::WrongType {
-                            expected: Expected::Mapping,
-                            found,
-                        },
-                    );
+                    let kind = value::wrong(Expected::Mapping, node, false);
+                    self.problem(path.clone(), Some(node.line), kind);
                 }
                 return fields;
             }
@@ -297,15 +290,8 @@ impl Walk {
             return None;
         }
         let NodeKind::Seq(items) = &node.kind else {
-            let found = found(node, false);
-            self.problem(
-                path.clone(),
-                Some(node.line),
-                ProblemKind::WrongType {
-                    expected: Expected::ListOfMappings,
-                    found,
-                },
-            );
+            let kind = value::wrong(Expected::ListOfMappings, node, false);
+            self.problem(path.clone(), Some(node.line), kind);
             return Some(Value::Maps(Vec::new()));
         };
         let mut out = Vec::new();

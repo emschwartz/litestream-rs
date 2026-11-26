@@ -452,23 +452,10 @@ pub async fn restore_with<S: ObjectStore, K: DatabaseSink>(
     options: RestoreOptions,
     sink: K,
 ) -> Result<Restored, RestoreError> {
-    restore_from(store, None, target, options, sink).await
+    restore_within(store, None, target, options, sink, MAX_ATTEMPTS).await
 }
 
-/// [restore], whose first attempt plans over the borrowed `listed` when given instead of
-/// listing again. A retry after a vanished file always lists afresh. A caller that hands a
-/// listing is checking those files.
-pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
-    store: &S,
-    listed: Option<&Inventory>,
-    target: RestoreTarget,
-    options: RestoreOptions,
-    sink: K,
-) -> Result<Restored, RestoreError> {
-    restore_within(store, listed, target, options, sink, MAX_ATTEMPTS).await
-}
-
-/// [restore_from] for a caller that retries itself: one attempt, so a replica that does not plan
+/// [restore] for a caller that retries itself: one attempt, so a replica that does not plan
 /// or a file that vanishes is an error at once, not a listing again. The boot's identity check is
 /// one: its refusal stands and the next boot checks afresh.
 pub(crate) async fn restore_once<S: ObjectStore, K: DatabaseSink>(
@@ -480,8 +467,10 @@ pub(crate) async fn restore_once<S: ObjectStore, K: DatabaseSink>(
     restore_within(store, None, target, options, sink, 1).await
 }
 
-/// [restore_from], with each reason to list again allowed `limit` attempts.
-async fn restore_within<S: ObjectStore, K: DatabaseSink>(
+/// [restore], with each reason to list again allowed `limit` attempts. Its first attempt plans over
+/// the borrowed `listed` when given instead of listing again. A retry after a vanished file always
+/// lists afresh. A caller that hands a listing is checking those files.
+pub(crate) async fn restore_within<S: ObjectStore, K: DatabaseSink>(
     store: &S,
     mut listed: Option<&Inventory>,
     target: RestoreTarget,
@@ -603,22 +592,16 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
             &loaded
         }
     };
-    let (chain, inside_file) = match plan_target(store, inventory, target, created_at_read).await? {
-        PlanOutcome::Plan(chain) => (chain, None),
-        PlanOutcome::AsOfInsideFile { chain, file }
+    let planned = plan_target(store, inventory, target, created_at_read).await?;
+    let (chain, inside_file) = match planned.into_chain() {
+        Ok(chain) => (chain, None),
+        Err(PlanOutcome::AsOfInsideFile { chain, file })
             if options.as_of_inside == AsOfInside::TakeEarlier =>
         {
             (chain, Some(file))
         }
-        gap @ PlanOutcome::Gap { .. } => return Err(Abort::Gap(gap)),
-        other @ (PlanOutcome::EmptyReplica
-        | PlanOutcome::NoSnapshot { .. }
-        | PlanOutcome::BeyondNewest { .. }
-        | PlanOutcome::AsOfInsideFile { .. }
-        | PlanOutcome::InsideFile { .. }
-        | PlanOutcome::MalformedSnapshot { .. }) => {
-            return Err(RestoreError::NoPlan(NoPlan(other)).into());
-        }
+        Err(gap @ PlanOutcome::Gap { .. }) => return Err(Abort::Gap(gap)),
+        Err(other) => return Err(RestoreError::NoPlan(NoPlan(other)).into()),
     };
     let last = apply_chain(store, &chain, sink, bytes_read).await?;
     Ok((chain, last, inside_file))

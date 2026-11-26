@@ -847,7 +847,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestReplicaClient_PITR_ManyLTXFiles" = { counterpart = "lsr-store-s3::store-s3::request_counts::cases::as_of_heads_are_bounded" }
 "TestReplicaClient_PITR_TimestampFiltering" = { counterpart = "lsr-core::core::plan_lazy::lazy::plan_as_of_equals_the_exact_planner" }
 "TestReplicaClient_S3_BucketValidation" = { counterpart = "lsr-config::config::s3url::each_bad_shape_is_refused" }
-"TestReplicaClient_S3_ConcurrencyLimits" = { counterpart = "lsr-store-s3::store-s3::store::cases::memory_is_at_most_the_concurrency_in_parts" }
+"TestReplicaClient_S3_ConcurrencyLimits" = { counterpart = "lsr-store-s3::store-s3::flight::no_more_parts_are_in_flight_than_the_setting_and_one_waits" }
 "TestReplicaClient_S3_ErrorContext" = { counterpart = "lsr-store-s3::response::tests::response_faults_map_to_store_errors" }
 "TestReplicaClient_S3_MultipartThresholds" = { counterpart = ["lsr-store-s3::store-s3::store::cases::exactly_part_size_uses_multipart", "lsr-store-s3::store-s3::store::cases::one_below_part_size_uses_put"] }
 "TestReplicaClient_S3_UnsignedPayloadRoundTrip" = { counterpart = "lsr-store-s3::store-s3::fake::cases::signing_rule_is_enforced_both_ways" }
@@ -1123,7 +1123,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestReplicaClient_PutObjectContentMD5OtherOperations/Region" = { reason = "@go-aws-sdk" }
 "TestReplicaClient_PutObjectContentMD5OtherOperations/Snapshots" = { reason = "@v03-layout" }
 "TestReplicaClient_PutObjectContentMD5OtherOperations/WALSegments" = { reason = "@v03-layout" }
-"TestReplicaClient_R2ConcurrencyDefault" = { counterpart = "lsr-store-s3::store-s3::store::cases::memory_is_at_most_the_concurrency_in_parts" }
+"TestReplicaClient_R2ConcurrencyDefault" = { counterpart = "lsr-store-s3::store-s3::limits::parts_follow_the_concurrency_setting_per_provider" }
 "TestReplicaClient_RetriesThrottledList" = { counterpart = "lsr-cli::bin/lsr::run::tests::a_throttled_listing_is_retried" }
 "TestReplicaClient_RetryerSurvivesSustainedFailures" = { counterpart = ["lsr-core::retry::tests::calls_and_waits_stay_within_the_policy", "lsr-core::actor::tests::retry_backs_off_per_task"] }
 "TestReplicaClient_S3DebugEnvVar" = { reason = "Go-only: an environment variable that turns on the AWS SDK's request logging. lsr-store-s3's errors and debug output never carry secrets (lsr-store-s3 secrets::credentials_never_print) and there is no SDK log." }
@@ -1158,9 +1158,9 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestReplicaClient_WriteLTXFile_PutObjectContentMD5" = { counterpart = ["lsr-store-s3::request::tests::put_carries_length_md5_and_created_at", "lsr-store-s3::store-s3::minio::wrong_content_md5_is_refused_by_minio"] }
 "TestReplicaClient_WriteLTXFile_SinglePutKnownSize" = { counterpart = "lsr-store-s3::request::tests::put_carries_length_md5_and_created_at" }
 "TestReplicaClient_WriteLTXFile_SinglePutRetries" = { counterpart = "lsr-store-s3::store-s3::store::cases::throttle_then_success_under_retrying" }
-"TestReplicaClient_WriteLTXFile_SmallUploadAllocations" = { counterpart = "lsr-store-s3::store-s3::store::cases::memory_is_at_most_the_concurrency_in_parts" }
-"TestReplicaClient_WriteLTXFile_SmallUploadAllocations/KnownSizeFile" = { counterpart = "lsr-store-s3::store-s3::store::cases::memory_is_at_most_the_concurrency_in_parts" }
-"TestReplicaClient_WriteLTXFile_SmallUploadAllocations/UnknownSizeStream" = { counterpart = "lsr-store-s3::store-s3::store::cases::memory_is_at_most_the_concurrency_in_parts" }
+"TestReplicaClient_WriteLTXFile_SmallUploadAllocations" = { counterpart = "lsr-store-s3::store-s3::flight::an_upload_that_holds_its_parts_holds_those_in_flight_and_one_more" }
+"TestReplicaClient_WriteLTXFile_SmallUploadAllocations/KnownSizeFile" = { counterpart = "lsr-store-s3::store-s3::flight::an_upload_that_holds_its_parts_holds_those_in_flight_and_one_more" }
+"TestReplicaClient_WriteLTXFile_SmallUploadAllocations/UnknownSizeStream" = { counterpart = "lsr-store-s3::store-s3::flight::an_upload_that_holds_its_parts_holds_those_in_flight_and_one_more" }
 "TestReplicaClient_WriteLTXFile_StreamLargeMultipartRoundTrip" = { counterpart = "lsr-store-s3::store-s3::store::cases::multipart_round_trip_keeps_bytes_and_created_at" }
 "TestReplicaClient_WriteLTXFile_StreamSmallSinglePut" = { counterpart = "lsr-store-s3::store-s3::store::cases::one_below_part_size_uses_put" }
 "TestTransportRetryer_RetriesProviderThrottleResponses" = { counterpart = ["lsr-store-s3::store-s3::faults::cases::status_408_is_transient", "lsr-store-s3::classify::tests::classify_success_retry_and_throttle"] }
