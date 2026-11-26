@@ -407,4 +407,66 @@ mod scenarios {
             assert!(report.reach.get("parts.landed") > 0, "{fault:?}");
         }
     }
+
+    /// The run ends with many staged files the replica never took, sent in small parts: the
+    /// replica refused every request while they were staged, so the drain stops for its deadline
+    /// with the backlog still owed, and the engine started again sends it a slice a tick. Ticks
+    /// that wait for a part to land are slices of the same sending, bounded as slices are, not
+    /// ticks spent unsettled after the boot (a 5,000-step large-profile seed, shrunk).
+    #[test]
+    fn ticks_waiting_for_parts_after_the_last_boot_count_as_slices() {
+        use lsr_sim::generate::Hold;
+        let big = || Op::Commit {
+            pages: 32,
+            grow: true,
+        };
+        let mut ops = vec![big()];
+        ops.extend(ticks(4));
+        for _ in 0..48 {
+            ops.extend([big(), Op::Tick]);
+        }
+        ops.push(Op::Hold {
+            hold: Hold::CredentialsRevoked,
+            ticks: 8,
+        });
+        // Met by the drain's first upload: the engine waits out the refusal past the drain's
+        // deadline, so the backlog is still owed when the engine starts again.
+        ops.extend((0..3).map(|ahead| Op::StoreFault {
+            target: lsr_sim::Target::Remote,
+            op: lsr_core::StoreOp::Upload,
+            ahead,
+            shape: lsr_sim::FaultShape::Error(lsr_core::StoreError::Denied {
+                op: lsr_core::StoreOp::Upload,
+                why: lsr_core::Denied::BucketMissing,
+            }),
+        }));
+        let opts = Opts {
+            slice_bytes: NonZeroU64::new(64),
+            remote_s3: true,
+            remote_parts: Parts::new(64, 1),
+            trace: true,
+            ..Opts::default()
+        };
+        let report = match run_ops(Seed::new(1), &ops, &opts) {
+            Ok(report) => report,
+            Err(failure) => panic!(
+                "step {}: {}\n{:#?}",
+                failure.step, failure.violation, failure.trace
+            ),
+        };
+        // The drain ended with the backlog owed, and the engine waited for parts sending it.
+        assert!(
+            report
+                .trace
+                .iter()
+                .any(|line| line.contains("DeadlineReached(Unfinished")),
+            "{:#?}",
+            report.trace
+        );
+        assert!(
+            report.reach.get("parts.tick_waited") > 0,
+            "{:#?}",
+            report.trace
+        );
+    }
 }
