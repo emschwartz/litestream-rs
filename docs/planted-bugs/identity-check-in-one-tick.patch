@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/restore.rs b/crates/core/src/restore.rs
+index dd456e511..e8e1df0f5 100644
+--- a/crates/core/src/restore.rs
++++ b/crates/core/src/restore.rs
+@@ -794,7 +794,7 @@ impl<K: DatabaseSink> Stepped<K> {
+     ) -> Result<Stepping<K>, RestoreError> {
+         let mut spent = 0_u64;
+         let mut slot: Option<Box<dyn ReadStream + '_>> = None;
+-        while spent < budget {
++        while spent < u64::MAX {
+             let key = self.key;
+             let before = self.read.bytes_read();
+             let stream: &mut (dyn ReadStream + '_) = match self.held.as_mut() {

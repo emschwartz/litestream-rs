@@ -47,9 +47,9 @@ use thiserror::Error;
 use crate::created_at::{ResolveError, resolve_counted};
 use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey};
-use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, ReadFault, check_link};
+use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, Next, ReadFault, check_link};
 use crate::plan::{AsOfPlanner, ContiguousChain, KeyTarget, PlanOutcome, RestoreTarget, plan};
-use crate::store::{ObjectStore, ReadLen, StoreError};
+use crate::store::{ObjectStore, ReadLen, ReadStream, StoreError};
 
 #[cfg(any(test, feature = "testing"))]
 mod mem_sink;
@@ -73,6 +73,10 @@ const CHUNK_BYTES: u32 = 4 * 1024 * 1024;
 // `ReadLen::or_chunk` falls back to 1 MiB for a size it refuses, which would
 // silently change the memory per file this constant states.
 const _: () = assert!(CHUNK_BYTES >= 1 && CHUNK_BYTES <= ReadLen::MAX_RAW);
+
+/// The fewest bytes one read of a [Stepped] restore asks for, however small a step's budget: a
+/// read that asks for less only costs more requests on a store that cannot hold a stream.
+const MIN_STEP_READ: u32 = 256 * 1024;
 
 /// What a restore does when an `AsOf` instant falls inside a compacted file
 /// ([PlanOutcome::AsOfInsideFile]).
@@ -455,18 +459,6 @@ pub async fn restore_with<S: ObjectStore, K: DatabaseSink>(
     restore_within(store, None, target, options, sink, MAX_ATTEMPTS).await
 }
 
-/// [restore] for a caller that retries itself: one attempt, so a replica that does not plan
-/// or a file that vanishes is an error at once, not a listing again. The boot's identity check is
-/// one: its refusal stands and the next boot checks afresh.
-pub(crate) async fn restore_once<S: ObjectStore, K: DatabaseSink>(
-    store: &S,
-    target: RestoreTarget,
-    options: RestoreOptions,
-    sink: K,
-) -> Result<Restored, RestoreError> {
-    restore_within(store, None, target, options, sink, 1).await
-}
-
 /// [restore], with each reason to list again allowed `limit` attempts. Its first attempt plans over
 /// the borrowed `listed` when given instead of listing again. A retry after a vanished file always
 /// lists afresh. A caller that hands a listing is checking those files.
@@ -656,15 +648,33 @@ async fn apply_chain<S: ObjectStore, K: DatabaseSink>(
     for info in chain.files().iter().skip(1) {
         last = apply_file(store, info, Some(&last), sink, bytes_read).await?;
     }
+    let key = chain.files().last().map_or(chain.snapshot().key, |f| f.key);
+    not_empty(key, &last)?;
+    Ok(last)
+}
+
+/// A chain whose last file, `key`, leaves no database is refused.
+fn not_empty(key: FileKey, last: &Verified) -> Result<(), RestoreError> {
     if last.header().commit() == 0 {
-        let key = chain.files().last().map_or(chain.snapshot().key, |f| f.key);
         return Err(RestoreError::File {
             key,
             fault: FileFault::EmptyDatabase,
-        }
-        .into());
+        });
     }
-    Ok(last)
+    Ok(())
+}
+
+/// What a failed read of `key` means for the attempt.
+fn read_abort(key: FileKey, fault: ReadFault<RestoreError>) -> Abort {
+    match fault {
+        ReadFault::Store(StoreError::NotFound { .. }) => Abort::Vanished(key),
+        ReadFault::Store(err) => Abort::Fatal(RestoreError::Store(err)),
+        ReadFault::Decode(err) => Abort::Fatal(RestoreError::File {
+            key,
+            fault: FileFault::Decode(err),
+        }),
+        ReadFault::Rejected(err) => Abort::Fatal(err),
+    }
 }
 
 async fn apply_file<S: ObjectStore, K: DatabaseSink>(
@@ -684,19 +694,170 @@ async fn apply_file<S: ObjectStore, K: DatabaseSink>(
         })
         .await;
     *bytes_read = bytes_read.saturating_add(read.bytes_read());
-    let verified = applied.map_err(|fault| match fault {
-        ReadFault::Store(StoreError::NotFound { .. }) => Abort::Vanished(key),
-        ReadFault::Store(err) => Abort::Fatal(RestoreError::Store(err)),
-        ReadFault::Decode(err) => Abort::Fatal(RestoreError::File {
-            key,
-            fault: FileFault::Decode(err),
-        }),
-        ReadFault::Rejected(err) => Abort::Fatal(err),
-    })?;
+    let verified = applied.map_err(|fault| read_abort(key, fault))?;
     let header = verified.header();
     sink.truncate(header.pages(), header.page_size())
         .map_err(sink_fault(SinkOp::Truncate))?;
     Ok(verified)
+}
+
+/// A restore to transaction `tip` read a budget of bytes at a time, for a caller that gives its
+/// tick back between reads (the boot's identity check, `crate::identity`): [restore]'s
+/// rules, files applied oldest first through the same checks, with only the place it stops
+/// between reads kept. A file gone, a plan with a gap, or any other fault ends it, as one
+/// attempt of [restore] ends; the caller begins again on a fresh listing. Nothing is
+/// published. A file is one stream held between steps where the store can hold one
+/// ([ObjectStore::hold_stream]).
+pub(crate) struct Stepped<K> {
+    /// The file being read, and those after it.
+    key: FileKey,
+    rest: std::vec::IntoIter<FileInfo>,
+    read: LtxRead,
+    held: Option<Box<dyn ReadStream>>,
+    previous: Option<Verified>,
+    sink: K,
+    /// Bytes one read asks for: a step's budget, within [MIN_STEP_READ] and [CHUNK_BYTES].
+    len: ReadLen,
+}
+
+impl<K> std::fmt::Debug for Stepped<K> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Stepped")
+            .field("key", &self.key)
+            .field("rest", &self.rest.len())
+            .field("read", &self.read.bytes_read())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Where a step of a [Stepped] restore left it.
+#[derive(Debug)]
+pub(crate) enum Stepping<K> {
+    /// The budget is spent and files are left.
+    Going(Box<Stepped<K>>),
+    /// Every file verified: the sink holds the database, and this is the last file.
+    Done {
+        /// The database.
+        sink: K,
+        /// The last file applied.
+        last: Verified,
+    },
+}
+
+impl<K: DatabaseSink> Stepped<K> {
+    /// Lists `store` and plans the restore to `tip` into `sink`; nothing is read yet.
+    ///
+    /// # Errors
+    /// [RestoreError] as one attempt of [restore] gives it.
+    pub(crate) async fn begin<S: ObjectStore>(
+        store: &S,
+        tip: Txid,
+        sink: K,
+        budget: u64,
+    ) -> Result<Self, RestoreError> {
+        let inventory = Inventory::load(store)
+            .await
+            .map_err(RestoreError::Inventory)?;
+        let chain = plan(&inventory, KeyTarget::Txid(tip))
+            .into_chain()
+            .map_err(|outcome| RestoreError::NoPlan(NoPlan(outcome)))?;
+        let len = u32::try_from(budget.clamp(u64::from(MIN_STEP_READ), u64::from(CHUNK_BYTES)))
+            .ok()
+            .and_then(ReadLen::new)
+            .unwrap_or_else(chunk_len);
+        let key = chain.snapshot().key;
+        let held = store
+            .hold_stream(key, 0)
+            .await
+            .map_err(|err| once(read_abort(key, ReadFault::Store(err))))?;
+        Ok(Self {
+            key,
+            rest: chain
+                .files()
+                .iter()
+                .skip(1)
+                .copied()
+                .collect::<Vec<_>>()
+                .into_iter(),
+            read: LtxRead::new(key, len),
+            held,
+            previous: None,
+            sink,
+            len,
+        })
+    }
+
+    /// Reads on until `budget` bytes were read in this step.
+    ///
+    /// # Errors
+    /// [RestoreError] as one attempt of [restore] gives it.
+    pub(crate) async fn step<S: ObjectStore>(
+        mut self: Box<Self>,
+        store: &S,
+        budget: u64,
+    ) -> Result<Stepping<K>, RestoreError> {
+        let mut spent = 0_u64;
+        let mut slot: Option<Box<dyn ReadStream + '_>> = None;
+        while spent < budget {
+            let key = self.key;
+            let before = self.read.bytes_read();
+            let stream: &mut (dyn ReadStream + '_) = match self.held.as_mut() {
+                Some(held) => &mut **held,
+                None => &mut **slot.get_or_insert_with(|| store.read_stream(key, before)),
+            };
+            let (previous, sink) = (self.previous.as_ref(), &mut self.sink);
+            let next = self
+                .read
+                .next(stream, |event| match event {
+                    Event::Header(header) => check_header(key, &header, previous)
+                        .map_err(|fault| RestoreError::File { key, fault }),
+                    Event::Page(page) => {
+                        sink.write_page(page).map_err(sink_fault(SinkOp::WritePage))
+                    }
+                })
+                .await;
+            spent = spent.saturating_add(self.read.bytes_read().saturating_sub(before));
+            let verified = match next {
+                Ok(Next::Event(())) => continue,
+                Ok(Next::End(verified)) => verified,
+                Err(fault) => return Err(once(read_abort(key, fault))),
+            };
+            let header = verified.header();
+            self.sink
+                .truncate(header.pages(), header.page_size())
+                .map_err(sink_fault(SinkOp::Truncate))?;
+            let Some(info) = self.rest.next() else {
+                not_empty(key, &verified)?;
+                verify_end_state(&mut self.sink, &verified)?;
+                return Ok(Stepping::Done {
+                    sink: self.sink,
+                    last: verified,
+                });
+            };
+            self.previous = Some(verified);
+            self.key = info.key;
+            self.read = LtxRead::new(info.key, self.len);
+            slot = None;
+            self.held = store
+                .hold_stream(info.key, 0)
+                .await
+                .map_err(|err| once(read_abort(info.key, ReadFault::Store(err))))?;
+        }
+        Ok(Stepping::Going(self))
+    }
+}
+
+/// What an attempt's abort is for a caller that makes one attempt: a file gone is a replica
+/// that changed under it, as [restore] reports it.
+fn once(abort: Abort) -> RestoreError {
+    match abort {
+        Abort::Fatal(err) => err,
+        Abort::Vanished(missing) => RestoreError::Unstable {
+            attempts: 1,
+            missing,
+        },
+        Abort::Gap(outcome) => RestoreError::NoPlan(NoPlan(outcome)),
+    }
 }
 
 /// Every check that must pass before the first page of a file is written.
