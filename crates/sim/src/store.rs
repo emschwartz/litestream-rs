@@ -147,6 +147,9 @@ struct FaultState {
     rejected: Vec<FileKey>,
     // Objects a size mismatch left one byte short, while they are.
     short: Vec<FileKey>,
+    // Short objects whose delete has begun and not returned: a crash that drops the call
+    // leaves them in the store, as a failed delete would.
+    deleting: Vec<FileKey>,
     // Objects a flipped byte reached on a read, once per such read.
     flipped: Vec<FileKey>,
     // Reads, listings and created-at times one batch may hold.
@@ -263,11 +266,17 @@ impl FaultHandle {
     /// The objects a [`FaultShape::CorruptPublish`] changed, and those a
     /// [`FaultShape::SizeMismatch`] left short that the engine keeps: after a
     /// level-0 replace, which it must not delete, or after any other write whose
-    /// delete failed. In order: where the damage really landed, whatever the
+    /// delete failed or was cut off by a crash before it returned. In order: where the damage really landed, whatever the
     /// scenario meant to hit.
     #[must_use]
     pub fn damaged(&self) -> Vec<FileKey> {
-        lock(&self.state).damaged.clone()
+        let state = lock(&self.state);
+        state
+            .damaged
+            .iter()
+            .chain(&state.deleting)
+            .copied()
+            .collect()
     }
 
     /// Every scheduled fault that failed or changed at least one call, with
@@ -400,6 +409,7 @@ impl<S> Faults<S> {
             rng: SeededEntropy::new(seed),
             damaged: Vec::new(),
             short: Vec::new(),
+            deleting: Vec::new(),
             flipped: Vec::new(),
             rejected: Vec::new(),
             widths: [NonZeroUsize::MIN; 2],
@@ -623,7 +633,18 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
             state.damaged.extend(kept);
             return Err(err);
         }
-        if let Err(err) = self.inner.delete(keys).await {
+        {
+            let mut state = lock(&self.state);
+            let begun: Vec<FileKey> = keys
+                .iter()
+                .filter(|key| state.short.contains(key))
+                .copied()
+                .collect();
+            state.deleting.extend(begun);
+        }
+        let deleted = self.inner.delete(keys).await;
+        lock(&self.state).deleting.retain(|key| !keys.contains(key));
+        if let Err(err) = deleted {
             // The store under the fault layer failed it (an S3 store's request met a provider
             // fault): a short object it was asked to remove is damage it may keep.
             let mut state = lock(&self.state);
@@ -826,7 +847,7 @@ impl<U: Upload> FaultsUpload<U> {
                 // deletes it in its commit; a compaction output or a snapshot is
                 // removed under the engine's own reason, its inputs or the chain
                 // below still covering it), so a restore that meets it stays
-                // judged unless that delete failed.
+                // judged unless that delete failed or a crash cut it off.
                 if let Some(raw) = &self.raw {
                     truncate(raw, &info).await?;
                     let mut state = lock(&self.state);
