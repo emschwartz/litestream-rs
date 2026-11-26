@@ -647,7 +647,7 @@ impl Actor {
         match self.kept.staging_short {
             Some(since) if task == Task::Sync && own.is_none() && !self.caught_up() => {
                 Some(Degraded {
-                    cause: PersistentCause::Stalled(Stall::LocalDiskFull),
+                    cause: DegradedCause::Stalled(Stall::LocalDiskFull),
                     since,
                     retries: 1,
                 })

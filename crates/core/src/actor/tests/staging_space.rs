@@ -82,10 +82,7 @@ fn the_report_is_the_local_disk_full_stall_dated_from_the_copy() {
     let Some(degraded) = actor.degraded(Task::Sync) else {
         panic!("not degraded: {:?}", rig.short);
     };
-    assert_eq!(
-        degraded.cause,
-        PersistentCause::Stalled(Stall::LocalDiskFull)
-    );
+    assert_eq!(degraded.cause, DegradedCause::Stalled(Stall::LocalDiskFull));
     assert_eq!(degraded.since, ts(T0));
     assert_eq!(degraded.retries, 1);
     assert_eq!(actor.degraded(Task::Upload), None);
