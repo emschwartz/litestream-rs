@@ -4,4 +4,4 @@ fix = "claude/own-checkpoint"
 package = "lsr-sqlite"
 test_bin = "sqlite"
 patch = "busy-bump-fails-the-checkpoint"
-tests = ["own_checkpoint::a_truncate_overtaken_at_its_bump_takes_its_boundary_snapshot_on_the_next_sync"]
+tests = ["own_checkpoint::a_truncate_overtaken_at_its_bump_fails_nothing"]

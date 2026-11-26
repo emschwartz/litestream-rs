@@ -1,12 +1,9 @@
-# The database pages of a snapshot read with no read transaction held. Once the boundary
-# snapshot after a TRUNCATE holds no write lock, the read transaction is all that stops another
-# connection's checkpoint from backfilling a commit made during the copy into a page the copy
-# then reads from the database file: the snapshot mixes two states, and nothing reports it.
+# The database pages of a snapshot read with no read transaction held. A snapshot holds no write
+# lock, so the read transaction is all that stops another connection's checkpoint from
+# backfilling a commit made during the copy into a page the copy then reads from the database
+# file: the snapshot mixes two states, and nothing reports it.
 name = "copy-without-read-transaction"
 fix = "plant"
 package = "lsr-sqlite"
 test_bin = "sqlite"
-tests = [
-    "a_write_commits_while_the_boundary_snapshot_is_copied",
-    "a_commit_anywhere_around_the_boundary_snapshot_restores_whole",
-]
+tests = ["truncate_proof::a_commit_anywhere_around_a_truncate_restores_whole"]

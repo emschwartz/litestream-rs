@@ -1,0 +1,8 @@
+# The same plant on real SQLite: a second descriptor on the wal-index, held while the engine
+# truncates.
+name = "truncate-proof-beside-a-second-sqlite-sqlite"
+fix = "claude/truncate-proof"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+patch = "truncate-proof-beside-a-second-sqlite"
+tests = ["truncate_proof::a_second_opener_of_the_wal_index_voids_the_proof"]

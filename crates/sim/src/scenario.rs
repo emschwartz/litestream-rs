@@ -244,7 +244,6 @@ pub fn scenario_of(cause: SnapshotCause) -> &'static [fn() -> Scenario] {
             &[wal_regrown_same_salts_diff_bytes, meta_wiped_wal_regrown]
         }
         SnapshotCause::LocalRewound { .. } => &[power_loss_wal_rewind],
-        SnapshotCause::CheckpointBoundary => &[truncate_threshold_crossed],
         SnapshotCause::OperatorRequested => &[cli_snapshot],
         SnapshotCause::StagedUnverified { .. } => &[pending_file_that_does_not_chain],
         SnapshotCause::AheadOfReplica { .. } => &[

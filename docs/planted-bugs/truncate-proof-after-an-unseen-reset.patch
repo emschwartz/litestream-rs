@@ -1,0 +1,18 @@
+diff --git a/crates/core/src/checkpoint.rs b/crates/core/src/checkpoint.rs
+index 59870002b..917849fbb 100644
+--- a/crates/core/src/checkpoint.rs
++++ b/crates/core/src/checkpoint.rs
+@@ -711,7 +711,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
+             .map_err(Fault::from_source)?
+             .end()
+             .salts();
+-        if !run.one_sqlite || now.salt1 != sealed.salt1.wrapping_add(1) {
++        if !run.one_sqlite {
+             self.release_read_lock();
+         }
+         Ok(true)
+@@ -821,3 +821,4 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
+ 
+ #[cfg(test)]
+ mod tests;
++

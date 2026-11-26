@@ -304,6 +304,12 @@ mod rules {
         }
 
         fn our_checkpoint(&mut self, mode: CheckpointMode) -> (Option<Numbers>, Option<Numbers>) {
+            // A TRUNCATE runs on the writer connection and leaves our read as it is.
+            if mode == CheckpointMode::Truncate {
+                let real = pragma(&self.writer, mode.into());
+                let run = self.sim.checkpointer().checkpoint(mode).unwrap();
+                return (Some(real), Some((run.busy, run.log, run.checkpointed)));
+            }
             if self.real_ours {
                 self.ours.execute_batch("COMMIT").unwrap();
             }

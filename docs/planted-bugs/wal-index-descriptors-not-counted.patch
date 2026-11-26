@@ -1,0 +1,13 @@
+diff --git a/crates/sqlite/src/checkpoint.rs b/crates/sqlite/src/checkpoint.rs
+index d79699108..753d7fab1 100644
+--- a/crates/sqlite/src/checkpoint.rs
++++ b/crates/sqlite/src/checkpoint.rs
+@@ -100,7 +100,7 @@ impl Checkpointer for Sqlite {
+             let shm = inner.shm_path();
+             let alone = descriptors_on(&shm) == Some(1);
+             let (rc, log, checkpointed) = wal_checkpoint(inner.free_writer()?, mode);
+-            let one_sqlite = alone && descriptors_on(&shm) == Some(1);
++            let one_sqlite = true;
+             // The writer inside a transaction: SQLite ran nothing.
+             if rc & 0xff == ffi::SQLITE_LOCKED {
+                 return Err(SourceError::Busy);
