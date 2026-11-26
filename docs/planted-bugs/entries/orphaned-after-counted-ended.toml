@@ -1,0 +1,8 @@
+# The last part of a dropped upload tells the store it ended before it lets go of the upload, so
+# its id reaches the orphan list after the wait for parts (the boot sweep's) has returned.
+name = "orphaned-after-counted-ended"
+fix = "plant"
+package = "lsr-store-s3"
+tests = [
+    "upload::part_cap_tests::a_last_part_orphans_its_id_before_the_store_counts_it_ended",
+]
