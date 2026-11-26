@@ -9,8 +9,9 @@
 //!   starve the snapshot and the deletes behind it. A success at the level
 //!   clears it. Go runs each level on its own ticker; this
 //!   is the same independence without a thread.
-//! - Distrusted outputs. A compaction output or a snapshot the store rejected
-//!   (size or checksum mismatch) is deleted at once; when that delete fails the key is
+//! - Distrusted outputs. A compaction output or a snapshot the store took at a size
+//!   other than the one sent is deleted at once (a checksum refusal deletes nothing and
+//!   owes the read-back, `audit`); when that delete fails the key is
 //!   remembered here, [`super::due`] plans its delete before anything else at the
 //!   level, and retention holds until it is gone. A listing cannot tell such an
 //!   object from a good one, and the inputs it "covers" would be deleted.
