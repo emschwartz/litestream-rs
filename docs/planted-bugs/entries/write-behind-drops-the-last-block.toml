@@ -1,0 +1,6 @@
+# The bytes gathered since the last full block never reach the thread, so the file is short;
+# commit's size check would catch it on a real upload, the store's own tests catch it first.
+name = "write-behind-drops-the-last-block"
+fix = "plant"
+package = "lsr-store-fs"
+tests = ["write_behind_writes_every_byte_in_order_in_whole_blocks"]
