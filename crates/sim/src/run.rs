@@ -371,6 +371,8 @@ struct Runner {
     cost: Option<crate::cost::Profile>,
     // What this boot may still spend past a tick's bound (`crate::cost::Spare`).
     spare: crate::cost::Spare,
+    // What the write barrier was held across (`crate::barrier`).
+    barrier: crate::barrier::BarrierWatch,
     // The healthy tail is running (`run::tail`): every tick is charged.
     tail: bool,
     // The S3 replica's part size, when it sends in parts ([`Opts::remote_parts`]).
@@ -576,6 +578,7 @@ impl Runner {
             slice_bytes: None,
             cost: None,
             spare: crate::cost::Spare::default(),
+            barrier: crate::barrier::BarrierWatch::default(),
             tail: false,
             part_bytes: None,
             turns: SendTurns::default(),
@@ -641,6 +644,7 @@ impl Runner {
     }
 
     fn reboot(&mut self) {
+        self.barrier.process_died();
         self.fail_stop.started();
         self.booted = false;
         self.w.start_driver();
@@ -699,7 +703,12 @@ impl Runner {
     fn run_one(&mut self, plan: Option<CrashPlan>) -> TickEnd<Tick> {
         let mut wal = self.w.sqlite.source().with_modified(self.w.modified());
         let mut db = self.w.sqlite.pages();
-        let mut ck = CountingCheckpointer::new(self.w.sqlite.checkpointer(), self.tally.clone());
+        let mut ck = crate::barrier::Watching::new(
+            CountingCheckpointer::new(self.w.sqlite.checkpointer(), self.tally.clone()),
+            self.barrier.clone(),
+            self.w.remote_recorder.clone(),
+            self.w.staging_recorder.clone(),
+        );
         let staging = self.w.staging.clone();
         let remote = self.w.remote.clone();
         let clock = std::sync::Arc::clone(&self.w.sim_clock);
@@ -956,6 +965,7 @@ impl Runner {
         self.denials_baseline();
         let ended = self.run_one(plan);
         self.charge(remote0, staging0);
+        self.judge_barrier(matches!(ended, TickEnd::Done(_)))?;
         if matches!(ended, TickEnd::Done(_)) {
             self.keep_takeover();
         }

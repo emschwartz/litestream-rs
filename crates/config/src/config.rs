@@ -68,6 +68,18 @@ impl GoConfig {
         })
     }
 
+    /// The config with only the entry at `index`, for a command that plans one `dbs` entry (Go's
+    /// `newDBsFromConfig`, which builds a `dir` entry's databases and no other entry's). `None`
+    /// when there is no such entry.
+    #[must_use]
+    pub fn only_entry(&self, index: usize) -> Option<Self> {
+        let db = self.dbs.get(index)?;
+        Some(Self {
+            dbs: vec![db.clone()],
+            ..self.clone()
+        })
+    }
+
     /// `addr`: the metrics listener; `None` serves none.
     #[must_use]
     pub fn addr(&self) -> Option<&str> {
