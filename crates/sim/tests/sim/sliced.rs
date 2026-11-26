@@ -128,8 +128,9 @@ fn commits_between_slices_are_staged_and_checkpointed_while_the_file_goes_up() {
     assert_eq!(sent(&report)[..23], whole_file());
     assert_eq!(report.reach.get("send.commit_between_slices"), 24);
     // With one count of slices ahead of the WAL step for every kind of slice
-    // (docs/decisions/D264.md), the run judges 27 turns, none excused.
-    assert_eq!(report.reach.get("send.turns.judged"), 27);
+    // (docs/decisions/D264.md), and a tick that publishes a file counted as one, the run judges
+    // 43 turns, none excused.
+    assert_eq!(report.reach.get("send.turns.judged"), 43);
     assert_eq!(report.reach.get("send.turns.excused"), 0);
 }
 
