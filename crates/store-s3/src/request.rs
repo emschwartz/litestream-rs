@@ -208,6 +208,13 @@ impl WriteRequest {
     pub fn into_request(self) -> HttpRequest {
         self.request
     }
+
+    /// The request with the body it declares, for the tests and fakes that send one whole.
+    #[cfg(any(test, feature = "testing"))]
+    fn with_body(mut self, body: Vec<u8>) -> Self {
+        self.request.set_body(body);
+        self
+    }
 }
 
 /// A write is a request with a digest: everything a request shows, it shows.
@@ -293,8 +300,15 @@ pub(crate) fn range_header(offset: u64, len: ReadLen) -> String {
     format!("bytes={offset}-{end}")
 }
 
-fn md5_of(body: &[u8]) -> [u8; 16] {
+/// The MD5 a write of `body` declares.
+pub(crate) fn md5_of(body: &[u8]) -> [u8; 16] {
     Md5::digest(body).into()
+}
+
+/// The length and MD5 a write of `body` declares.
+#[cfg(any(test, feature = "testing"))]
+fn sized(body: &[u8]) -> (u64, [u8; 16]) {
+    (u64::try_from(body.len()).unwrap_or(u64::MAX), md5_of(body))
 }
 
 type Headers = Vec<(&'static str, String)>;
@@ -412,28 +426,13 @@ impl RequestBuilder {
         }
     }
 
-    /// A PUT of `body` with `Content-Length` and `Content-MD5` added to `extra`.
-    fn write<'a, A: S3Action<'a>>(
-        &self,
-        action: &mut A,
-        now: Timestamp,
-        body: Vec<u8>,
-        extra: Headers,
-    ) -> Result<WriteRequest, RequestError> {
-        let md5 = md5_of(&body);
-        let len = u64::try_from(body.len()).unwrap_or(u64::MAX);
-        self.write_of(action, now, (len, md5), body, extra)
-    }
-
-    /// A PUT that declares a body of `len` bytes with the digest `md5`: `body` is that body,
-    /// or empty when it is read while the request is sent
-    /// ([`StreamedRequest`](crate::StreamedRequest)).
+    /// A PUT that declares a body of `len` bytes with the digest `md5`. The request has no
+    /// body of its own: the upload gives it one as it is sent (`upload.rs`).
     fn write_of<'a, A: S3Action<'a>>(
         &self,
         action: &mut A,
         now: Timestamp,
         (len, md5): (u64, [u8; 16]),
-        body: Vec<u8>,
         mut extra: Headers,
     ) -> Result<WriteRequest, RequestError> {
         extra.splice(
@@ -445,7 +444,7 @@ impl RequestBuilder {
         );
         let signed = self.sign(action, now, extra)?;
         Ok(WriteRequest {
-            request: Self::finish(Method::Put, signed, body),
+            request: Self::finish(Method::Put, signed, Vec::new()),
             md5,
         })
     }
@@ -639,6 +638,7 @@ impl RequestBuilder {
     ///
     /// # Errors
     /// [`RequestError::ClockOutOfRange`].
+    #[cfg(any(test, feature = "testing"))]
     pub fn put_object_if(
         &self,
         now: Timestamp,
@@ -647,20 +647,17 @@ impl RequestBuilder {
         created_at: Timestamp,
         precondition: Precondition,
     ) -> Result<WriteRequest, RequestError> {
-        let object = self.object(key);
-        let mut action = self.bucket.put_object(Some(&self.credentials), &object);
-        let mut extra = vec![(CREATED_AT_HEADER, created_at.to_string())];
-        extra.extend(precondition.header());
-        self.write(&mut action, now, body, extra)
+        let declared = self.put_object_of(now, key, sized(&body), created_at, precondition)?;
+        Ok(declared.with_body(body))
     }
 
-    /// [`Self::put_object_if`] for a body read while the request is sent: `len` bytes whose
-    /// MD5 is `md5`, taken when the bytes were first handed over. The request has no body
-    /// of its own ([`StreamedRequest`](crate::StreamedRequest)).
+    /// A single PUT of `len` bytes whose MD5 is `md5`, with `precondition` sent (and signed)
+    /// when it names one. The request has no body of its own: the upload gives it one as it
+    /// is sent (`upload.rs`).
     ///
     /// # Errors
     /// [`RequestError::ClockOutOfRange`].
-    pub fn put_object_streamed_if(
+    pub fn put_object_of(
         &self,
         now: Timestamp,
         key: &FileKey,
@@ -672,7 +669,7 @@ impl RequestBuilder {
         let mut action = self.bucket.put_object(Some(&self.credentials), &object);
         let mut extra = vec![(CREATED_AT_HEADER, created_at.to_string())];
         extra.extend(precondition.header());
-        self.write_of(&mut action, now, (len, md5), Vec::new(), extra)
+        self.write_of(&mut action, now, (len, md5), extra)
     }
 
     /// Starts a multipart upload; the created-at time is set here, on the object.
@@ -701,6 +698,7 @@ impl RequestBuilder {
     ///
     /// # Errors
     /// [`RequestError::ClockOutOfRange`].
+    #[cfg(any(test, feature = "testing"))]
     pub fn upload_part(
         &self,
         now: Timestamp,
@@ -709,22 +707,16 @@ impl RequestBuilder {
         part: PartNumber,
         body: Vec<u8>,
     ) -> Result<WriteRequest, RequestError> {
-        let object = self.object(key);
-        let mut action = self.bucket.upload_part(
-            Some(&self.credentials),
-            &object,
-            part.get(),
-            upload.as_str(),
-        );
-        self.write(&mut action, now, body, Vec::new())
+        let declared = self.upload_part_of(now, key, upload, part, sized(&body))?;
+        Ok(declared.with_body(body))
     }
 
-    /// [`Self::upload_part`] for a body read while the request is sent: `len` bytes whose
-    /// MD5 is `md5`, taken when the bytes were first handed over.
+    /// One part of `len` bytes whose MD5 is `md5`. The request has no body of its own: the
+    /// upload gives it one as it is sent (`upload.rs`).
     ///
     /// # Errors
     /// [`RequestError::ClockOutOfRange`].
-    pub fn upload_part_streamed(
+    pub fn upload_part_of(
         &self,
         now: Timestamp,
         key: &FileKey,
@@ -739,7 +731,7 @@ impl RequestBuilder {
             part.get(),
             upload.as_str(),
         );
-        self.write_of(&mut action, now, (len, md5), Vec::new(), Vec::new())
+        self.write_of(&mut action, now, (len, md5), Vec::new())
     }
 
     /// Completes an upload from its parts' ETags, in part order (the n-th is part n).

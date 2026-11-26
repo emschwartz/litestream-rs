@@ -84,7 +84,7 @@ use crate::classify::{classify, invalid_data, is_not_implemented, transient_othe
 use crate::lanes::{Condvar, Mutex, MutexGuard, lock};
 use crate::multipart::{PAYLOAD_TOO_LARGE, Sent, completed_etag_fits, judge_part};
 use crate::part_plan::{MAX_OBJECT, held_width, plan_part_size};
-use crate::request::{Precondition, UploadId};
+use crate::request::{Precondition, RequestBuilder, RequestError, UploadId, WriteRequest, md5_of};
 use crate::response::{EtagCheck, check_etag};
 use crate::store::Inner;
 use crate::transport::{HttpResponse, StreamedRequest, Transport};
@@ -101,6 +101,53 @@ impl Bytes {
         match self {
             Self::Held(buf) => buf.capacity(),
             Self::Again(part) => part.held(),
+        }
+    }
+
+    /// Sends the write `build` makes for these bytes, with them as its body, and returns the
+    /// answer and the length and MD5 the request declared. A buffer is hashed as the request
+    /// is built, after the clock and the credentials are read, and moved into it, never
+    /// copied. A part read again is hashed over a second read and streamed from a third
+    /// (`again.rs`); a read that gave nothing is the result, whatever the request came to.
+    /// Nothing is sent once `stop` is set.
+    fn send_with<T: Transport>(
+        &mut self,
+        inner: &Inner<T>,
+        stop: &AtomicBool,
+        build: impl FnOnce(
+            &RequestBuilder,
+            Timestamp,
+            (u64, [u8; 16]),
+        ) -> Result<WriteRequest, RequestError>,
+    ) -> Result<(HttpResponse, (u64, [u8; 16])), StoreError> {
+        let op = StoreOp::Upload;
+        if stop.load(Ordering::Relaxed) {
+            return Err(StoreError::Transient {
+                op,
+                kind: io::ErrorKind::Interrupted,
+            });
+        }
+        match self {
+            Self::Held(buf) => {
+                let body = std::mem::take(buf);
+                let len = u64::try_from(body.len()).unwrap_or(u64::MAX);
+                let request = inner.request(op, |b, now| build(b, now, (len, md5_of(&body))))?;
+                let sized = (len, request.md5());
+                let mut request = request.into_request();
+                request.set_body(body);
+                Ok((inner.send(op, request)?, sized))
+            }
+            Self::Again(part) => {
+                let sized = (part.len(), part.md5(stop)?);
+                let request = inner.request(op, |b, now| build(b, now, sized))?;
+                let mut body = part.body(stop);
+                let streamed = StreamedRequest::new(request.into_request(), sized.0, &mut body);
+                let sent = inner.send_streamed(op, streamed);
+                if let Some(unread) = body.failed() {
+                    return Err(unread);
+                }
+                Ok((sent?, sized))
+            }
         }
     }
 }
@@ -127,6 +174,15 @@ impl Filling {
 
     const fn sourced(&self) -> bool {
         matches!(self, Self::Again(_))
+    }
+
+    /// The part as it stands, taken out: the filling is left empty and of the same kind, so an
+    /// upload written from a source stays one. `None` for a source not yet read from.
+    fn seal(&mut self) -> Option<Bytes> {
+        match self {
+            Self::Held(buf) => Some(Bytes::Held(std::mem::take(buf))),
+            Self::Again(run) => run.take().map(|run| Bytes::Again(run.seal())),
+        }
     }
 
     #[cfg(feature = "testing")]
@@ -422,50 +478,23 @@ fn append_bounded(buf: &mut Vec<u8>, bytes: &[u8], part: usize) {
 }
 
 impl<T: Transport> Inner<T> {
-    /// One PUT of `body` under `key`; see the module docs for the `ETag` rule.
-    pub(crate) fn put(
+    /// One PUT of `bytes` under `key`; see the module docs for the `ETag` rule. A part read
+    /// again lives until the answer is judged, so its reader outlasts the delete of a wrong
+    /// object.
+    fn put(
         &self,
         key: &FileKey,
         created_at: Timestamp,
-        body: Vec<u8>,
+        mut bytes: Bytes,
         mode: WriteMode,
     ) -> Result<FileInfo, StoreError> {
-        let op = StoreOp::Upload;
-        let wrote = u64::try_from(body.len()).unwrap_or(u64::MAX);
         let precondition = self.precondition(mode);
-        let request = self.request(op, |b, now| {
-            b.put_object_if(now, key, body, created_at, precondition)
-        })?;
-        let sent = request.md5();
-        let response = self.send(op, request.into_request())?;
-        self.judge_put(key, created_at, (wrote, sent), precondition, &response)
-    }
-
-    /// [`Self::put`] of an object the upload let go of: the same request, its MD5 taken over
-    /// a second read and its body a third (`again.rs`), on the calling thread. A read that
-    /// gives nothing is the result, with the source's own error: no request was made, or the
-    /// body ended short, so the store holds no new object.
-    fn put_from(
-        &self,
-        key: &FileKey,
-        created_at: Timestamp,
-        mut whole: Sealed,
-        mode: WriteMode,
-    ) -> Result<FileInfo, StoreError> {
-        let op = StoreOp::Upload;
+        // A commit is never stopped: it is the caller's own call.
         let go = AtomicBool::new(false);
-        let sized = (whole.len(), whole.md5(&go)?);
-        let precondition = self.precondition(mode);
-        let request = self.request(op, |b, now| {
-            b.put_object_streamed_if(now, key, sized, created_at, precondition)
+        let (response, sized) = bytes.send_with(self, &go, |b, now, sized| {
+            b.put_object_of(now, key, sized, created_at, precondition)
         })?;
-        let mut body = whole.body(&go);
-        let streamed = StreamedRequest::new(request.into_request(), sized.0, &mut body);
-        let sent = self.send_streamed(op, streamed);
-        if let Some(unread) = body.failed() {
-            return Err(unread);
-        }
-        self.judge_put(key, created_at, sized, precondition, &sent?)
+        self.judge_put(key, created_at, sized, precondition, &response)
     }
 
     /// What a PUT's answer must prove, for a body of `wrote` bytes whose MD5 is `sent`.
@@ -513,42 +542,17 @@ impl<T: Transport> Inner<T> {
 }
 
 impl<T: Transport> Shared<T> {
-    /// One part's work, on the thread that sends it: the MD5, the request, the answer.
+    /// One part's work, on the thread that sends it: the digest, the request, the answer.
     fn send_part(
         &self,
         number: PartNumber,
-        bytes: Bytes,
+        mut bytes: Bytes,
     ) -> Result<(HttpResponse, [u8; 16]), StoreError> {
-        let op = StoreOp::Upload;
-        let (inner, key, id) = (&self.inner, &self.key, &self.id);
-        if self.stop.load(Ordering::Relaxed) {
-            return Err(StoreError::Transient {
-                op,
-                kind: io::ErrorKind::Interrupted,
-            });
-        }
-        match bytes {
-            Bytes::Held(body) => {
-                let request =
-                    inner.request(op, |b, now| b.upload_part(now, key, id, number, body))?;
-                let md5 = request.md5();
-                Ok((inner.send(op, request.into_request())?, md5))
-            }
-            Bytes::Again(mut part) => {
-                let sized = (part.len(), part.md5(&self.stop)?);
-                let request = inner.request(op, |b, now| {
-                    b.upload_part_streamed(now, key, id, number, sized)
-                })?;
-                let mut body = part.body(&self.stop);
-                let streamed = StreamedRequest::new(request.into_request(), sized.0, &mut body);
-                let sent = inner.send_streamed(op, streamed);
-                // A read that gave nothing is the part's result, whatever the request came to.
-                if let Some(unread) = body.failed() {
-                    return Err(unread);
-                }
-                Ok((sent?, sized.1))
-            }
-        }
+        let (key, id) = (&self.key, &self.id);
+        let (response, (_, md5)) = bytes.send_with(&self.inner, &self.stop, |b, now, sized| {
+            b.upload_part_of(now, key, id, number, sized)
+        })?;
+        Ok((response, md5))
     }
 }
 
@@ -670,12 +674,8 @@ impl<T: Transport> S3Upload<T> {
             return;
         };
         let len = self.filling.len();
-        let bytes = match &mut self.filling {
-            Filling::Held(buf) => Bytes::Held(std::mem::take(buf)),
-            Filling::Again(run) => match run.take() {
-                Some(run) => Bytes::Again(run.seal()),
-                None => return,
-            },
+        let Some(bytes) = self.filling.seal() else {
+            return;
         };
         self.sealed = self.sealed.saturating_add(len);
         multi.ready = Some(bytes);
@@ -879,15 +879,9 @@ impl<T: Transport> Upload for S3Upload<T> {
         }
         self.over = true;
         if self.multi.is_none() {
-            let whole = std::mem::replace(&mut self.filling, Filling::Held(Vec::new()));
-            let (key, created_at) = (&self.key, self.created_at);
-            return match whole {
-                Filling::Held(body) => self.inner.put(key, created_at, body, self.mode),
-                Filling::Again(None) => self.inner.put(key, created_at, Vec::new(), self.mode),
-                Filling::Again(Some(run)) => {
-                    self.inner.put_from(key, created_at, run.seal(), self.mode)
-                }
-            };
+            // Nothing written from a source yet is an empty object.
+            let whole = self.filling.seal().unwrap_or(Bytes::Held(Vec::new()));
+            return self.inner.put(&self.key, self.created_at, whole, self.mode);
         }
         let finished = self.finish();
         if finished.is_err() {
