@@ -11,7 +11,12 @@
 //! the newest.
 //!
 //! The replica's state at T is restored into one checksum a page (`DigestSink`, as the
-//! database-ahead check does, `crate::ahead`). The local state is the database file overlaid
+//! database-ahead check does, `crate::ahead`). The restore reads a tick's bytes at a time ([`Check`]):
+//! it is a whole download of the replica, minutes at tens of gigabytes, and a boot tick that held
+//! it whole could not be stopped. When it has reads left the boot ends its tick, the next ticks
+//! read on, and the boot after them runs again and compares (`docs/decisions/D267.md`). A
+//! replica whose newest transaction moved meanwhile has another writer: this engine writes
+//! nothing there before it boots. The local state is the database file overlaid
 //! with the WAL frames up to the committed end the boot read, the page count that end's last
 //! commit, or the file's length with no frame. A boot holds no read lock, so the wal-index is
 //! read again after the pages: a WAL that moved under them is `WalMoved`, and the boot runs
@@ -43,14 +48,13 @@ pub(crate) mod counter;
 use std::collections::BTreeMap;
 use std::io::{Read, Seek};
 
-use lsr_ltx::{PageChecksum, PageNo, Txid};
+use lsr_ltx::{Header, PageChecksum, PageNo, PageSize, Txid};
 use lsr_wal::WalReader;
 
 use crate::fault::Fault;
 use crate::fault::role::Role;
 use crate::inventory::InventoryError;
-use crate::plan::RestoreTarget;
-use crate::restore::{RestoreError, RestoreOptions, restore_once};
+use crate::restore::{DatabaseSink, RestoreError, Stepped, Stepping};
 use crate::source::{CommittedRead, PageSource, WalSource};
 use crate::store::StoreError;
 use crate::sync::scan_whole;
@@ -111,55 +115,180 @@ pub(crate) enum Identity {
 /// nearly anything of the same schema.
 const AHEAD_MIN_PAGES: u32 = 3;
 
+/// The replica's state at `tip` restored into one checksum a page, with the bytes of the one page
+/// the local counter lives on (`root`): the restore's [`DatabaseSink`].
+/// The local counter (its root page and value) is read once, as the restore begins, so the
+/// restore knows the page to keep.
+#[derive(Debug, Default)]
+pub(crate) struct Image {
+    pages: BTreeMap<u32, PageChecksum>,
+    counter: Option<(PageNo, u64)>,
+    kept: Option<Vec<u8>>,
+}
+
+impl Image {
+    fn digest(&mut self) -> DigestSink<'_> {
+        DigestSink {
+            pages: &mut self.pages,
+            keep: self.counter.map(|(root, _)| (root.get(), &mut self.kept)),
+        }
+    }
+}
+
+impl DatabaseSink for Image {
+    fn write_page(&mut self, page: lsr_ltx::PageRef<'_>) -> std::io::Result<()> {
+        self.digest().write_page(page)
+    }
+
+    fn truncate(&mut self, pages: lsr_ltx::DbPages, page_size: PageSize) -> std::io::Result<()> {
+        self.digest().truncate(pages, page_size)
+    }
+
+    fn reset(&mut self) -> std::io::Result<()> {
+        self.digest().reset()
+    }
+
+    fn checksum(
+        &mut self,
+        pages: lsr_ltx::DbPages,
+        page_size: PageSize,
+    ) -> std::io::Result<lsr_ltx::DbChecksum> {
+        self.digest().checksum(pages, page_size)
+    }
+
+    type PublishError = std::convert::Infallible;
+
+    fn publish(self) -> Result<(), Self::PublishError> {
+        Ok(())
+    }
+}
+
+/// The check between the boot's ticks (`docs/decisions/D267.md`): the replica's state at `tip`
+/// restored a tick's bytes at a time, then held for the boot that compares it with the local
+/// database. In memory only: a new engine checks afresh.
+#[derive(Debug)]
+pub(crate) enum Check {
+    /// Being restored.
+    Restoring {
+        /// The replica's newest transaction, the state restored.
+        tip: Txid,
+        /// The restore.
+        restore: Box<Stepped<Image>>,
+    },
+    /// Restored.
+    Restored {
+        /// The state's transaction.
+        tip: Txid,
+        /// The state.
+        image: Box<Image>,
+        /// The last file applied, whose header gives the state's size and time.
+        last: Header,
+    },
+    /// The replica could not give its state at `tip` because it is damaged: no evidence.
+    Unrestorable {
+        /// The transaction asked for.
+        tip: Txid,
+    },
+}
+
+impl Check {
+    /// The replica's newest transaction when the check began.
+    pub(crate) const fn tip(&self) -> Txid {
+        match self {
+            Self::Restoring { tip, .. }
+            | Self::Restored { tip, .. }
+            | Self::Unrestorable { tip } => *tip,
+        }
+    }
+
+    /// Whether the restore has reads left.
+    pub(crate) const fn going(&self) -> bool {
+        matches!(self, Self::Restoring { .. })
+    }
+
+    /// Begins the restore of the replica's state at `tip`, keeping the page the local counter
+    /// lives on (read under `committed` with `reader`), and reads its first `budget` bytes.
+    ///
+    /// # Errors
+    /// The [`Fault`] a read met; a damaged replica is [`Check::Unrestorable`], not an error.
+    pub(crate) async fn begin<F: Read + Seek, P: PageSource, R: Role>(
+        reader: Option<&mut WalReader<F>>,
+        (committed, page_size): (CommittedRead, PageSize),
+        db: &mut P,
+        remote: &R,
+        (tip, budget): (Txid, u64),
+    ) -> Result<Self, Fault> {
+        let counter = match reader {
+            Some(reader) if reader.header().page_size() != page_size => None,
+            reader => Local::open(reader, committed, db)?.counter(page_size)?,
+        };
+        let image = Image {
+            counter,
+            ..Image::default()
+        };
+        let check = match Stepped::begin(remote, tip, image, budget).await {
+            Ok(restore) => Self::Restoring {
+                tip,
+                restore: Box::new(restore),
+            },
+            Err(err) => Self::failed::<R>(tip, &err)?,
+        };
+        check.step(remote, budget).await
+    }
+
+    /// Reads the restore on by up to `budget` bytes; a check that is not restoring is as it was.
+    ///
+    /// # Errors
+    /// As [`Self::begin`].
+    pub(crate) async fn step<R: Role>(self, remote: &R, budget: u64) -> Result<Self, Fault> {
+        let Self::Restoring { tip, restore } = self else {
+            return Ok(self);
+        };
+        match restore.step(remote, budget).await {
+            Ok(Stepping::Going(restore)) => Ok(Self::Restoring { tip, restore }),
+            Ok(Stepping::Done { sink, last }) => Ok(Self::Restored {
+                tip,
+                image: Box::new(sink),
+                last: *last.header(),
+            }),
+            Err(err) => Self::failed::<R>(tip, &err),
+        }
+    }
+
+    fn failed<R: Role>(tip: Txid, err: &RestoreError) -> Result<Self, Fault> {
+        match restore_fault::<R>(err) {
+            CheckError::Unrestorable => Ok(Self::Unrestorable { tip }),
+            CheckError::Fault(fault) => Err(fault),
+        }
+    }
+}
+
 /// What the local committed state, read under `committed` (the boot's wal-index read) with
-/// `reader` on the live WAL, is against the replica's state at `tip`, whose page size is
-/// `page_size`.
+/// `reader` on the live WAL, is against the replica's state the `check` restored, whose page
+/// size is `page_size`. A check still restoring, or one that could not restore, is
+/// [`Identity::Other`]: no evidence.
 ///
 /// # Errors
-/// The [`Fault`] a read met: the replica could not give its state at `tip`, a local page or
-/// the files' modified time could not be read, or the WAL moved under the reads.
-pub(crate) async fn local_against_replica<W: WalSource, P: PageSource, R: Role>(
+/// The [`Fault`] a read met: a local page or the files' modified time could not be read, or
+/// the WAL moved under the reads.
+pub(crate) fn local_against_replica<W: WalSource, P: PageSource>(
     wal: &mut W,
     reader: Option<&mut WalReader<W::Wal>>,
-    committed: CommittedRead,
+    (committed, page_size): (CommittedRead, PageSize),
     db: &mut P,
-    remote: &R,
-    tip: Txid,
-    page_size: lsr_ltx::PageSize,
+    check: Check,
 ) -> Result<Identity, Fault> {
-    // The local side first, so the restore can keep the page the local counter lives on.
+    let Check::Restored { image, last, .. } = check else {
+        return Ok(Identity::Other);
+    };
     let mut local = match reader {
         Some(reader) if reader.header().page_size() != page_size => None,
         reader => Some(Local::open(reader, committed, db)?),
     };
-    let counter = match local.as_mut() {
-        Some(local) => local.counter(page_size)?,
-        None => None,
-    };
-    let mut image = BTreeMap::new();
-    let mut kept = None;
-    let sink = DigestSink {
-        pages: &mut image,
-        keep: counter.as_ref().map(|(root, _)| (root.get(), &mut kept)),
-    };
-    let restored = restore_once(
-        remote,
-        RestoreTarget::Txid(tip),
-        RestoreOptions::default(),
-        sink,
-    )
-    .await;
-    // A replica whose state at `tip` does not verify or plan proves nothing equal: the
-    // refusal stands. A store that failed is the store's fault, and the boot runs again.
-    let restored = match restored.map_err(|err| restore_fault::<R>(&err)) {
-        Ok(restored) => restored,
-        Err(CheckError::Unrestorable) => return Ok(Identity::Other),
-        Err(CheckError::Fault(fault)) => return Err(fault),
-    };
-    let replica = restored.commit().get();
+    let replica = last.pages().get();
     let compared = match local.as_mut() {
-        Some(local) if restored.page_size() == page_size => {
-            Some(local.compare(&image, replica, page_size)?)
+        Some(local) if last.page_size() == page_size => {
+            Some(local.compare(&image.pages, replica, page_size)?)
         }
         Some(_) | None => None,
     };
@@ -180,12 +309,13 @@ pub(crate) async fn local_against_replica<W: WalSource, P: PageSource, R: Role>(
     // The replica's newest file's own header time, against the database's modified time: no
     // slack, and a time that cannot be read is no evidence.
     let written = wal.modified().map_err(Fault::from_source)?;
-    if !written.is_some_and(|written| written > restored.written()) {
+    if !written.is_some_and(|written| written > last.fields().timestamp) {
         return Ok(Identity::Other);
     }
     // An older copy of this database passes everything above; its counter is below the
     // replica's. A counter either side cannot read says nothing.
-    let older = match (counter, kept.as_deref().and_then(counter::value)) {
+    let theirs = image.kept.as_deref().and_then(counter::value);
+    let older = match (image.counter, theirs) {
         (Some((_, mine)), Some(theirs)) => mine < theirs,
         (Some(_) | None, Some(_) | None) => false,
     };
@@ -354,6 +484,32 @@ mod tests {
             nonzero,
             shared,
         }
+    }
+
+    /// The image a restore builds: a file that shrinks the database drops the pages above its
+    /// end, and a restore that starts over holds nothing.
+    #[test]
+    fn the_image_drops_pages_past_a_shrink_and_everything_on_a_reset() {
+        let size = PageSize::MIN;
+        let page = vec![7_u8; size.bytes()];
+        let mut image = Image {
+            counter: Some((pg(3), 1)),
+            ..Image::default()
+        };
+        for n in 1..=3 {
+            image
+                .write_page(lsr_ltx::PageRef::new(pg(n), size, &page).unwrap())
+                .unwrap();
+        }
+        assert_eq!(image.pages.len(), 3);
+        assert_eq!(image.kept.as_deref(), Some(&page[..]));
+        image.truncate(lsr_ltx::DbPages::new(2), size).unwrap();
+        assert_eq!(image.pages.keys().copied().collect::<Vec<_>>(), [1, 2]);
+        image
+            .write_page(lsr_ltx::PageRef::new(pg(3), size, &page).unwrap())
+            .unwrap();
+        image.reset().unwrap();
+        assert!(image.pages.is_empty() && image.kept.is_none());
     }
 
     /// The bar for reading a database as the replica plus more: three pages on each side, some
