@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
+--- a/crates/core/src/maintain.rs
++++ b/crates/core/src/maintain.rs
+@@ -1097,9 +1097,6 @@
+         },
+         Err(CompactError::InputVanished { key }) => Outcome::Replan { key },
+         // The key is taken, and what it holds stands: the answer a read of the key gives.
+-        Err(CompactError::Dest(StoreError::AlreadyExists { .. })) => {
+-            Outcome::Replan { key: output }
+-        }
+         Err(CompactError::Dest(err)) if leaves_bad_output(&err, mode) => {
+             remove_rejected(replica, output, err).await
+         }

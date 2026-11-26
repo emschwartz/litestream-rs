@@ -1,0 +1,9 @@
+# A level this engine compacted once is taken as compacted in every later window too, so it
+# is never compacted again.
+name = "compaction-closes-every-later-window"
+fix = "claude/steady-requests"
+package = "lsr-core"
+tests = [
+    "maintain::tests::a_level_this_engine_compacted_waits_for_its_next_window",
+    "maintain::tests::a_compaction_in_the_window_before_leaves_this_one_open",
+]

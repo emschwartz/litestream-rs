@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2443,9 +2443,6 @@
+                 MaintainedEvent::Compacted(info)
+             }
+             Outcome::Deleted { count } => {
+-                if let Job::Delete(delete) = job {
+-                    self.engine.known.deleted(delete.keys());
+-                }
+                 MaintainedEvent::Deleted(count)
+             }
+             Outcome::Replan { .. } => MaintainedEvent::Replan,

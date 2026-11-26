@@ -31,7 +31,8 @@
 //! lists before it trusts the destination. Exception: the output's commit is
 //! checked against the bytes written (`crate::publish`), so a `Dest` error
 //! holding `Corrupt { cause: CommitSizeMismatch { .. } }` means the store
-//! acknowledged a short object. The output is a replace, so it is left under
+//! acknowledged a short object. A create-only output found its key free, so the
+//! commit deletes the short object itself. A replacing output is left under
 //! its key (`removed: false`): the caller must not trust a listing of the
 //! output key, and removes it under a reason of its own.
 //!
@@ -736,7 +737,7 @@ pub async fn compact<S: ObjectStore, D: ObjectStore>(
     inputs: &CompactionInputs,
     level: Level,
 ) -> Result<Compacted, CompactError> {
-    compact_in(&Replica(source), dest, inputs, level).await
+    compact_in(&Replica(source), dest, inputs, level, WriteMode::Replace).await
 }
 
 /// [`compact`] reading its inputs as the staged copies the engine's level-1 compaction
@@ -752,25 +753,23 @@ pub async fn compact_staged<S: ObjectStore, D: ObjectStore>(
     inputs: &CompactionInputs,
     level: Level,
 ) -> Result<Compacted, CompactError> {
-    compact_in(&crate::fault::role::Staging(source), dest, inputs, level).await
+    let staged = crate::fault::role::Staging(source);
+    compact_in(&staged, dest, inputs, level, WriteMode::Replace).await
 }
 
 /// [`compact`] reading its inputs from `source` as its role: an input read
-/// that fails is that store's error ([`Role::compact_input`]).
+/// that fails is that store's error ([`Role::compact_input`]). The output is
+/// written under `mode`: create-only, a key that is taken fails the commit with
+/// [`StoreError::AlreadyExists`] and what it holds stands.
 pub(crate) async fn compact_in<S: Role, D: ObjectStore>(
     source: &S,
     dest: &D,
     inputs: &CompactionInputs,
     level: Level,
+    mode: WriteMode,
 ) -> Result<Compacted, CompactError> {
-    compact_with(
-        source,
-        dest,
-        inputs,
-        level,
-        Budget::reading::<S>(inputs.files.len()),
-    )
-    .await
+    let budget = Budget::reading::<S>(inputs.files.len());
+    compact_with(source, dest, inputs, level, mode, budget).await
 }
 
 async fn compact_with<S: Role, D: ObjectStore>(
@@ -778,6 +777,7 @@ async fn compact_with<S: Role, D: ObjectStore>(
     dest: &D,
     inputs: &CompactionInputs,
     level: Level,
+    mode: WriteMode,
     budget: Budget,
 ) -> Result<Compacted, CompactError> {
     if let Some(input) = inputs.level_not_below(level) {
@@ -798,9 +798,7 @@ async fn compact_with<S: Role, D: ObjectStore>(
     let encoder = Encoder::new(out, header).map_err(CompactError::Encode)?;
     let key = FileKey::new(level, inputs.range());
     let created_at = header.fields().timestamp;
-    // A compacted file may be written again over itself (a retried
-    // compaction, Go's output for the same range), as Go's are.
-    let mut upload = Writer::begin(dest, &key, created_at, WriteMode::Replace, None)
+    let mut upload = Writer::begin(dest, &key, created_at, mode, None)
         .await
         .map_err(CompactError::Dest)?;
     let written = write_output(&mut merge, encoder, &header, &mut upload).await;
