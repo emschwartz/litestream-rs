@@ -8,9 +8,14 @@
 //! The tail is the liveness check. With every fault healed and the run's own judges passed,
 //! the application commits [`TAIL_COMMITS`] times, [`TAIL_GAP`] apart, for long enough that
 //! level-1 and level-2 compactions come due in it, and the clock is charged whatever the run
-//! set. Each commit is made with the replica caught up, so the replica holding a transaction
-//! newer than its newest before the commit means the commit reached it: read from the bucket
-//! itself, never from the engine. Each must within [`Runner::lag_bound`] of simulated time.
+//! set. No file staged or on the replica before a commit holds it, so the replica holding a
+//! transaction newer than the newest of those means the commit reached it: read from the bucket
+//! and the staging directory themselves, never from the engine. A backlog the run left staged
+//! goes up first, and its files say nothing of the commit. A staged file the engine could not
+//! trust (its fsync failed) is no transaction: the engine writes it again under the same name
+//! from the WAL as it stands, the commit among it, as Go keeps a transaction's number until its
+//! sync succeeds. Once staging or the bucket holds other bytes at its name it stops counting
+//! as before the commit ([`Before`]). Each must within [`Runner::lag_bound`] of simulated time.
 //! And the tail may hand no more bytes to uploads the store never takes than one file in
 //! flight: a job that restarts from scratch with nothing failing wastes a slice each time.
 //!
@@ -24,7 +29,7 @@
 
 use std::time::Duration;
 
-use lsr_core::Event;
+use lsr_core::{Event, FileKey};
 use lsr_ltx::Txid;
 
 use super::{Runner, Step};
@@ -65,6 +70,36 @@ fn puts_since(events: &[RecorderEvent], from: usize) -> u64 {
         .filter(|event| matches!(event, RecorderEvent::Put { .. }))
         .count();
     u64::try_from(puts).unwrap_or(u64::MAX)
+}
+
+/// What staging and the replica held before one of the tail's commits: no transaction in it is
+/// the commit's (module doc).
+#[derive(Debug)]
+pub(super) struct Before {
+    /// The replica's newest transaction then.
+    frontier: Option<Txid>,
+    /// Each file staged then, with the digest of its bytes.
+    staged: Vec<(FileKey, u64)>,
+}
+
+impl Before {
+    /// From the replica's newest transaction and the staged files with their digests.
+    pub(super) const fn new(frontier: Option<Txid>, staged: Vec<(FileKey, u64)>) -> Self {
+        Self { frontier, staged }
+    }
+
+    /// The newest transaction the commit is not in, given the digests staging and the bucket
+    /// hold at a name now (`held`). A staged file whose name holds other bytes now was written
+    /// again, the commit with it, and from then on says nothing of what came before.
+    pub(super) fn newest(&mut self, held: impl Fn(&FileKey) -> Vec<u64>) -> Option<Txid> {
+        self.staged
+            .retain(|(key, digest)| held(key).iter().all(|now| now == digest));
+        self.staged
+            .iter()
+            .map(|(key, _)| key.range().max())
+            .max()
+            .max(self.frontier)
+    }
 }
 
 impl Runner {
@@ -113,6 +148,29 @@ impl Runner {
         Ok(())
     }
 
+    /// Judges what the tick held the write barrier across (`crate::barrier`): no replica
+    /// request, a wait within one staged file's price for each barrier, and, when the tick ended without its
+    /// process dying, no barrier still held.
+    pub(super) fn judge_barrier(&mut self, done: bool) -> Result<(), Violation> {
+        let held = self.barrier.take();
+        if held.holds > 0 {
+            self.report.reach.bump("barrier.judged");
+            within(Bound::BarrierRemoteRequests, held.remote_requests, 0)?;
+            // Each barrier may stage one file, the WAL's tail since the sync, of at most what one
+            // sync may stage; nothing else.
+            let limit = Profile::DEFAULT.staging.micros(
+                held.holds.saturating_mul(crate::cost::REQUESTS_PER_PUT),
+                held.holds
+                    .saturating_mul(self.allowance().written(crate::cost::Store::Staging)),
+            );
+            within(Bound::BarrierWaitMicros, held.wait_micros, limit)?;
+        }
+        if done {
+            within(Bound::BarrierHeldAfterTick, u64::from(held.open), 0)?;
+        }
+        Ok(())
+    }
+
     /// A boot's spare for its whole-file pass over staging ([`Spare`]), from staging's own
     /// sizes.
     pub(super) fn boot_spare(&self) -> Spare {
@@ -132,6 +190,24 @@ impl Runner {
             .iter()
             .map(|info| info.key.range().max())
             .max()
+    }
+
+    /// Every staged file at any level, with the digest of its bytes.
+    fn staged_digests(&self) -> Vec<(FileKey, u64)> {
+        self.w
+            .staged_files()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|info| Some((info.key, self.w.staged_digest(&info.key)?)))
+            .collect()
+    }
+
+    /// The digests staging and the bucket hold at `key`, each where it holds a file.
+    fn held_at(&self, key: &FileKey) -> Vec<u64> {
+        [self.w.staged_digest(key), (self.w.remote_raw.landed())(key)]
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     /// The bytes of staged level-0 files newer than `frontier`: what must reach the replica
@@ -183,6 +259,7 @@ impl Runner {
         let remote0 = self.w.remote_recorder.counts();
         for _ in 0..TAIL_COMMITS {
             let frontier = self.replica_frontier();
+            let mut before = Before::new(frontier, self.staged_digests());
             self.commit(TAIL_COMMIT_PAGES, false);
             // Staged files older than the commit upload before its own: the first file past
             // the frontier is then theirs, and the WAL has had no sync to checkpoint after.
@@ -221,7 +298,7 @@ impl Runner {
                         .unwrap_or(0),
                 )
                 .saturating_add(Profile::DEFAULT.tick(&stats.remote, &stats.staging));
-                if self.replica_frontier() > frontier {
+                if self.replica_frontier() > before.newest(|key| self.held_at(key)) {
                     reached = true;
                     self.report.reach.bump("liveness.judged");
                     within(Bound::CommitLagMillis, millis(waited), millis(bound))?;

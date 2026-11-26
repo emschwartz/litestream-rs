@@ -286,8 +286,10 @@ impl SendTurns {
         }
         let was_in_flight = self.in_flight;
         match ended {
-            Some(Event::Sending { .. }) => {
-                self.in_flight = true;
+            // A tick that published a file may have begun the next, which goes first next
+            // tick: it is a slice like one that only sent.
+            Some(Event::Sending { .. } | Event::Uploaded(_)) => {
+                self.in_flight = matches!(ended, Some(Event::Sending { .. }));
                 if !self.waiting {
                     return Ok(());
                 }
@@ -321,7 +323,6 @@ impl SendTurns {
                 | Event::StagingShort { .. }
                 | Event::Synced { .. }
                 | Event::Checkpointed { .. }
-                | Event::Uploaded(_)
                 | Event::Maintained { .. }
                 | Event::Idle
                 | Event::Resnapshot(_)

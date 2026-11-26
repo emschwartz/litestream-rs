@@ -9,8 +9,8 @@
 use std::time::Duration;
 
 use lsr_core::{
-    DegradedCause, Denied, Did, Event, Fault, FileKey, Level, MaintainedEvent, SnapshotCause,
-    SourceError, SourceOp, StopCause, StoreError, StoreOp,
+    DegradedCause, Denied, Did, Event, Fault, SnapshotCause, SourceError, SourceOp, StopCause,
+    StoreError, StoreOp,
 };
 use lsr_ltx::PageSize;
 
@@ -747,8 +747,9 @@ pub fn size_mismatch_on_commit() -> Scenario {
     )
 }
 
-/// The store says the stored bytes are not the ones sent. The uploader deletes
-/// the key and writes it again with no listing between.
+/// The store says the stored bytes are not the ones sent. The uploader deletes nothing and
+/// writes the key again with no listing between; the store kept the bytes, so the create-only
+/// retry is refused and reads them back (`docs/decisions/D280.md`).
 #[must_use]
 pub fn etag_mismatch_on_put() -> Scenario {
     let mut s = injected(
@@ -760,37 +761,29 @@ pub fn etag_mismatch_on_put() -> Scenario {
         )],
         vec![retries(FaultKind::UploadChecksumMismatch)],
     );
-    s.check = Some(deleted_then_put_again);
+    s.check = Some(kept_then_put_again);
     s
 }
 
-fn deleted_then_put_again(report: &RunReport) -> Result<(), String> {
-    let mut deleted = None;
-    let mut written_again = false;
-    for event in &report.remote_events {
-        match event {
-            RecorderEvent::Put { key, .. } if deleted == Some(*key) => {
-                written_again = true;
-                break;
-            }
-            RecorderEvent::Delete { keys, .. } if keys.len() == 1 => {
-                deleted = keys.first().copied()
-            }
-            RecorderEvent::Put { .. } | RecorderEvent::Delete { .. } => {}
-        }
-    }
-    if !written_again {
-        return Err("the key was not deleted and then written again".to_owned());
-    }
-    // From the rejection to the next upload, nothing lists the replica.
+fn kept_then_put_again(report: &RunReport) -> Result<(), String> {
+    // The retry's refusal reads the kept bytes back: the key was never deleted.
     let mut rejected = false;
+    let mut confirmed = false;
     for seen in &report.seen {
         match seen {
             Seen::Event(Event::Retrying {
                 fault: Fault::UploadChecksumMismatch,
                 ..
             }) => rejected = true,
-            Seen::Event(Event::Uploaded(_)) if rejected => break,
+            Seen::Event(Event::Uploaded(lsr_core::Did::AlreadyPut(_))) if rejected => {
+                confirmed = true;
+                break;
+            }
+            Seen::Event(Event::Uploaded(other)) if rejected => {
+                return Err(format!(
+                    "the retry did not read the kept key back: {other:?}"
+                ));
+            }
             Seen::Tick { remote_lists, .. } if rejected && *remote_lists != 0 => {
                 return Err(
                     "the replica was listed between the rejection and the rewrite".to_owned(),
@@ -803,6 +796,9 @@ fn deleted_then_put_again(report: &RunReport) -> Result<(), String> {
             | Seen::Oracle
             | Seen::Tick { .. } => {}
         }
+    }
+    if !confirmed {
+        return Err("the retry after the rejection confirmed no kept key".to_owned());
     }
     Ok(())
 }
@@ -1940,75 +1936,16 @@ fn corrupt_publish_then_power_loss(name: &'static str, jump: Option<i64>) -> Sce
 
 /// What the next boot must do about the object: read it back, delete it
 /// because the level below still covers it, and build the level again.
-fn repaired(mut scenario: Scenario, level: u8, check: super::Check) -> Scenario {
-    let level = Level::new(level).unwrap_or(Level::ZERO);
+/// A published body the store damaged, past a boot that reads only headers and tails: the
+/// first read of the body degrades maintenance, which recovers, and the replica restores.
+fn found_on_read(mut scenario: Scenario) -> Scenario {
     scenario.expect = vec![
         retries(FaultKind::UploadChecksumMismatch),
-        Expect::Event(EventMatch::Repaired(level)),
+        Expect::Stopped(StopCause::RemoteCorrupt),
         Expect::Oracle,
+        Expect::Recovered,
     ];
-    scenario.check = Some(check);
     scenario
-}
-
-/// The key the read-back deleted, when it deleted exactly one.
-fn repaired_key(report: &RunReport) -> Result<FileKey, String> {
-    let mut keys = report.seen.iter().filter_map(|seen| match seen {
-        Seen::Event(Event::Maintained {
-            event: MaintainedEvent::Repaired(key),
-            ..
-        }) => Some(*key),
-        Seen::Event(_)
-        | Seen::Stop(_)
-        | Seen::Recovered(_)
-        | Seen::Snapshot(_)
-        | Seen::Oracle
-        | Seen::Tick { .. } => None,
-    });
-    match (keys.next(), keys.next()) {
-        (Some(key), None) => Ok(key),
-        (first, second) => Err(format!("repaired {first:?} and {second:?}, want one key")),
-    }
-}
-
-/// The damaged object was published at `level`, the read-back deleted that
-/// key and nothing else, and a later compaction published the level again
-/// through the same last transaction.
-fn rebuilt_at(report: &RunReport, level: u8) -> Result<(), String> {
-    let key = repaired_key(report)?;
-    if key.level().get() != level {
-        return Err(format!("{key} is not at level {level}"));
-    }
-    let events = &report.remote_events;
-    let through = key.range().max();
-    let builds = |event: &RecorderEvent| match event {
-        RecorderEvent::Put { key: put, .. } => {
-            put.level() == key.level() && put.range().max() >= through
-        }
-        RecorderEvent::Delete { .. } => false,
-    };
-    let published = events
-        .iter()
-        .position(|event| matches!(event, RecorderEvent::Put { key: put, .. } if *put == key))
-        .ok_or_else(|| format!("{key} was never published"))?;
-    let mut later = events.iter().skip(published.saturating_add(1));
-    if !later.any(|event| matches!(event, RecorderEvent::Delete { keys, .. } if *keys == [key])) {
-        return Err(format!("{key} was never deleted alone"));
-    }
-    // `later` now starts after the delete.
-    if later.any(builds) {
-        Ok(())
-    } else {
-        Err(format!("level {level} was not built again through {key}"))
-    }
-}
-
-fn rebuilt_at_one(report: &RunReport) -> Result<(), String> {
-    rebuilt_at(report, 1)
-}
-
-fn rebuilt_at_two(report: &RunReport) -> Result<(), String> {
-    rebuilt_at(report, 2)
 }
 
 /// Ticks after the clock jump before level 1's compaction publishes: the checkpoint, the upload
@@ -2030,7 +1967,10 @@ fn level_window(pre_ticks: usize) -> Vec<Op> {
 }
 
 /// The level 1 compaction's output rots in the window: the first compaction
-/// above the first snapshot.
+/// above the first snapshot. Its header and tail are sound, so the boot's read-back (header
+/// and tail only, `docs/decisions/D272.md`) passes it; the first read of its body (the next
+/// compaction's input) finds it, and maintenance is degraded `RemoteCorrupt` until a level
+/// above covers it. No restore is wrong meanwhile.
 #[must_use]
 pub fn corrupt_l1_publish_then_power_loss() -> Scenario {
     let scenario = build(
@@ -2044,11 +1984,12 @@ pub fn corrupt_l1_publish_then_power_loss() -> Scenario {
         ],
         Vec::new(),
     );
-    repaired(scenario, 1, rebuilt_at_one)
+    found_on_read(scenario)
 }
 
 /// The level 2 compaction's output rots in the window: level 1 is inside its
-/// interval after [`live`], so the next upload to the replica is level 2's.
+/// interval after [`live`], so the next upload to the replica is level 2's. Found as the
+/// level 1 case is.
 #[must_use]
 pub fn corrupt_l2_publish_then_power_loss() -> Scenario {
     let scenario = build(
@@ -2062,7 +2003,7 @@ pub fn corrupt_l2_publish_then_power_loss() -> Scenario {
         ],
         Vec::new(),
     );
-    repaired(scenario, 2, rebuilt_at_two)
+    found_on_read(scenario)
 }
 
 /// The level 9 compaction's output rots in the window.

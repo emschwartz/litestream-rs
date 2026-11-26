@@ -14,7 +14,7 @@ use crate::s3::{home_beside, scrub_env};
 
 /// The configuration both `replicate` and `restore` read: short intervals so a replica holds
 /// every level and several snapshots within seconds. The keys exist, with the same meaning,
-/// from v0.5.0 to 041a8c3 (read in each tag's `cmd/litestream/main.go`).
+/// from v0.5.0 to 3e0fdc0 (read in each tag's `cmd/litestream/main.go`).
 pub fn write_config(path: &Path, db: &Path, replica: &Path) -> Result<(), CompatError> {
     write_config_snapshotting(path, db, replica, "3s")
 }

@@ -202,6 +202,31 @@ fn nine_slices_in_a_row_after_a_commit_break_the_bound() {
     assert_eq!(reach.get("send.turns.judged"), 17);
 }
 
+/// A tick that published a file and began the next is a slice too: nine in a row after a
+/// commit, with no turn for the WAL step, break the bound. Before, each published file reset the
+/// count, and an engine that sent a backlog this way ahead of a waiting commit passed.
+#[test]
+fn nine_ticks_that_publish_a_file_each_after_a_commit_break_the_bound() {
+    let mut reach = Reach::default();
+    let mut turns = SendTurns::default();
+    let published = Some(Event::Uploaded(lsr_core::Did::Nothing));
+    turns.committed();
+    for now in 1..=8 {
+        turns.tick(published.as_ref(), at(now), &mut reach).unwrap();
+    }
+    let err = turns
+        .tick(published.as_ref(), at(9), &mut reach)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        Violation::ResourceBound {
+            what: Bound::SlicesAhead,
+            seen: 9,
+            limit: 8,
+        }
+    ));
+}
+
 /// While a task waits out a retry the slices are counted as excused, and judged again from
 /// the tick the wait has passed.
 #[test]

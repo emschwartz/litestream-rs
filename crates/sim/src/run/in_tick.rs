@@ -7,7 +7,9 @@
 //! that ends it. The other operations are SQLite's
 //! own; the runner keeps its list of other readers in step with what ran. A WAL restart or
 //! deletion the operation caused is noted for the forcing checks inside the tick, before it
-//! judges the tick's snapshots, since the engine can meet it in the same tick.
+//! judges the tick's snapshots, since the engine can meet it in the same tick, and so is a
+//! wal-index reset ahead of the header that the operation found: a step earlier in the tick
+//! may have read under it, and a commit ends it before the tick does.
 
 use super::{Runner, small};
 use crate::forcing::Forcing;
@@ -101,6 +103,11 @@ impl Runner {
         }
         if ran.emptied {
             self.forcings.note_in_tick(Forcing::WalEmptied);
+        }
+        // A step under a wal-index reset proves nothing (`Runner::judge_snapshot` notes it when
+        // the reset outlasts the tick); a commit here ends the reset before the tick does.
+        if ran.reset_before {
+            self.forcings.note_in_tick(Forcing::PositionUnproven);
         }
     }
 }

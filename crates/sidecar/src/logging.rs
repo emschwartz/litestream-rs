@@ -498,7 +498,6 @@ fn store_line(event: &MaintainedEvent) -> Option<(&'static str, Vec<(&'static st
         MaintainedEvent::Deleted(_)
         | MaintainedEvent::Replan
         | MaintainedEvent::Repaired(_)
-        | MaintainedEvent::ReadBack
         | MaintainedEvent::Waiting { .. } => return None,
     })
 }

@@ -8,6 +8,6 @@ index f0e7601c7..b3af954ec 100644
              && match local_is_replica(local, replica, inputs, sent).await {
 -                Ok(staged) => staged,
 +                Ok(_) => true,
-                 Err(err) => return Err(judge(Err(err), output, replica, mode).await),
+                 Err(err) => return Err(judge(Err(err), output, replica).await),
              };
          match open(staged, inputs, level, (local, replica), mode).await {

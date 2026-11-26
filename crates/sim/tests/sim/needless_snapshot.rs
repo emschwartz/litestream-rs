@@ -1,6 +1,8 @@
 //! The needless-snapshot check (`crates/sim/src/needless_snapshot.rs`) judges
 //! every run; these runs give it something to judge on purpose.
 
+use lsr_core::SourceOp;
+use lsr_sim::generate::{AppAt, AppOp};
 use lsr_sim::run::run_ops;
 use lsr_sim::{CrashKind, Op, Opts, Seed};
 
@@ -237,4 +239,43 @@ fn a_power_loss_between_ticks_that_takes_a_sent_staged_file_forces_the_snapshot(
     assert!(torn > 0 && dropped > 0, "torn {torn}, dropped {dropped}");
     // A torn file is dropped by the boot, which snapshots above the replica's copy of it.
     assert_eq!(snapshots, torn);
+}
+
+/// A power loss leaves the wal-index reset ahead of the WAL header, so the boot's snapshot step
+/// runs under a reset and proves no continuity. The application commits inside that step, after
+/// its committed read: the commit writes the new header, so by the end of the tick the index and
+/// the header agree again, and the running engine meets a generation it cannot follow. Its
+/// snapshot is forced by the reset the step saw, though nothing after the tick shows it
+/// (`docs/decisions/D280.md`).
+#[test]
+fn a_commit_inside_a_step_under_a_reset_index_justifies_the_next_snapshot() {
+    let mut ops = vec![commit(), Op::Crash(CrashKind::Power), Op::Tick];
+    ops.push(Op::AppInTick {
+        at: AppAt::Before(SourceOp::PageCount),
+        op: AppOp::Commit {
+            pages: 3,
+            grow: true,
+        },
+    });
+    ops.extend(std::iter::repeat_n(Op::Tick, 4));
+    ops.push(Op::Restore);
+    let report = match run_ops(Seed::new(1), &ops, &Opts::default()) {
+        Ok(report) => report,
+        Err(failure) => panic!("{failure}"),
+    };
+    // The running engine's snapshot, judged and forced.
+    assert_eq!(
+        report.reach.get("event.Resnapshot"),
+        1,
+        "{:?}",
+        report.reach
+    );
+    assert_eq!(
+        report
+            .reach
+            .get("needless_snapshot.forced.GenerationChanged"),
+        1,
+        "{:?}",
+        report.reach
+    );
 }

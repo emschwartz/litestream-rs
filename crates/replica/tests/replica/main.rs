@@ -11,6 +11,8 @@ mod failstop;
 #[cfg(test)]
 mod gates;
 #[cfg(test)]
+mod odd_names;
+#[cfg(test)]
 mod rebuild;
 #[cfg(test)]
 mod replicator;

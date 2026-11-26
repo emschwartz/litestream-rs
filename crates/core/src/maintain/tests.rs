@@ -2470,13 +2470,35 @@ fn rejected_setup() -> (MemStore, MemStore, MaintainState, CompactJob) {
     (local, replica, state, job)
 }
 
+/// An output the store took at a size other than the one sent is this attempt's own, and
+/// the executor deletes it.
 #[test]
-fn a_rejected_compaction_output_is_deleted_by_the_executor() {
+fn an_output_taken_at_another_size_is_deleted_by_the_executor() {
+    for guard in [WriteMode::New, WriteMode::Replace] {
+        let (local, replica, _, job) = rejected_setup();
+        replica.inject_failure_after_publish(corrupt_output_error(false));
+        let ran = block_on(run_compact_as(
+            &job,
+            &Staging(&local),
+            &Replica(&replica),
+            guard,
+        ));
+        assert!(
+            matches!(ran, Outcome::Failed(MaintainError::Compact(_))),
+            "{guard:?}: {ran:?}"
+        );
+        assert!(load(&replica).level(level(1)).is_empty(), "{guard:?}");
+    }
+}
+
+/// An output the store refused against its checksum is never deleted by the executor, whole or
+/// by part, in either mode (`docs/decisions/D280.md`): the actor's read-back judges it.
+#[test]
+fn an_output_refused_against_its_checksum_is_left_for_the_read_back() {
     let whole_object = StoreError::Corrupt {
         key: None,
         cause: crate::store::CorruptCause::ChecksumMismatch { part: None },
     };
-    // A replacing write read its key as free first, so a rejected part's leavings are its own.
     let a_part = StoreError::Corrupt {
         key: None,
         cause: crate::store::CorruptCause::ChecksumMismatch {
@@ -2484,7 +2506,6 @@ fn a_rejected_compaction_output_is_deleted_by_the_executor() {
         },
     };
     for (mismatch, guard) in [
-        (corrupt_output_error(false), WriteMode::New),
         (whole_object.clone(), WriteMode::New),
         (whole_object, WriteMode::Replace),
         (a_part, WriteMode::Replace),
@@ -2498,11 +2519,46 @@ fn a_rejected_compaction_output_is_deleted_by_the_executor() {
             guard,
         ));
         assert!(
-            matches!(ran, Outcome::Failed(MaintainError::Compact(_))),
+            matches!(
+                ran,
+                Outcome::Failed(MaintainError::Compact(CompactError::Dest(_)))
+            ),
             "{guard:?}: {ran:?}"
         );
-        assert!(load(&replica).level(level(1)).is_empty(), "{guard:?}");
+        assert_eq!(
+            load(&replica).level(level(1)).len(),
+            1,
+            "{guard:?}: the object stays"
+        );
     }
+}
+
+/// S3 checks a body against its signed hash before it looks at `If-None-Match`, so a
+/// create-only output refused that way says nothing about its key, which may hold an earlier
+/// attempt's output whose answer was lost: that output is never deleted.
+#[test]
+fn a_create_only_output_refused_before_its_key_never_deletes_the_output_there() {
+    let (local, replica, _, job) = rejected_setup();
+    let (from, to) = (Staging(&local), Replica(&replica));
+    let first = block_on(run_compact_as(&job, &from, &to, WriteMode::New));
+    assert!(matches!(first, Outcome::Compacted { .. }), "{first:?}");
+    let held = whole(&replica, &job.output_key());
+    replica.inject_failure(
+        StoreOp::Upload,
+        StoreError::Corrupt {
+            key: None,
+            cause: crate::store::CorruptCause::ChecksumMismatch { part: None },
+        },
+    );
+    let again = block_on(run_compact_as(&job, &from, &to, WriteMode::New));
+    assert!(
+        matches!(
+            again,
+            Outcome::Failed(MaintainError::Compact(CompactError::Dest(_)))
+        ),
+        "{again:?}"
+    );
+    assert_eq!(whole(&replica, &job.output_key()), held);
 }
 
 #[test]
