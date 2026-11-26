@@ -146,3 +146,62 @@ fn the_cause_comes_back_after_another_fault_on_the_upload_task() {
         Some(DegradedCause::ConditionalWritesUnsupported)
     );
 }
+/// A compaction can be the first create-only write a process makes (a restart with a level
+/// due and nothing new to upload). The refusal publishes nothing and is reported; the output
+/// is then written as a replace, and so is every upload after it, which the upload task says.
+#[test]
+fn a_refused_compaction_output_is_written_again_by_replacing() {
+    let one = Level::new(1).unwrap();
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(go_like());
+    rig.settle(&mut actor, T0);
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    assert_eq!(newest_on_replica(&rig), Some(2));
+    let before = Rig::files(&rig.remote, one).len();
+    rig.remote.inner.refuse_create_only();
+    let mut restarted = Actor::new(go_like());
+    let seen = rig.settle(&mut restarted, T0 + 60_000);
+    assert!(
+        seen.iter().any(|tick| matches!(
+            event(tick),
+            Some(Event::Degraded {
+                task: Task::Maintenance,
+                cause: DegradedCause::ConditionalWritesUnsupported,
+                ..
+            })
+        )),
+        "{seen:?}"
+    );
+    assert_eq!(Rig::files(&rig.remote, one).len(), before, "{seen:?}");
+    // From the refusal on every level-0 upload replaces, so the upload task says so before
+    // the first one does (the simulator's judge of D79).
+    assert_eq!(
+        cause(&restarted),
+        Some(DegradedCause::ConditionalWritesUnsupported),
+        "{seen:?}"
+    );
+    let seen = rig.follow(&mut restarted, T0 + 60_000, 50);
+    assert_eq!(Rig::files(&rig.remote, one).len(), before + 1, "{seen:?}");
+    commit_and_settle(&mut rig, &mut restarted, 3, T0 + 180_000);
+    assert_eq!(newest_on_replica(&rig), Some(3));
+    assert_eq!(
+        cause(&restarted),
+        Some(DegradedCause::ConditionalWritesUnsupported)
+    );
+}
+
+/// Under the stop response the engine stops on a compaction's refusal too.
+#[test]
+fn a_refused_compaction_output_stops_under_strict_responses() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(cfg());
+    rig.settle(&mut actor, T0);
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    rig.remote.inner.refuse_create_only();
+    let mut restarted = Actor::new(cfg());
+    let seen = rig.settle(&mut restarted, T0 + 60_000);
+    assert!(
+        seen.contains(&Tick::Stopped(StopCause::ConditionalWritesUnsupported)),
+        "{seen:?}"
+    );
+}

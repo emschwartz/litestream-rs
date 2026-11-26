@@ -1,0 +1,19 @@
+diff --git a/crates/core/src/maintain/state.rs b/crates/core/src/maintain/state.rs
+--- a/crates/core/src/maintain/state.rs
++++ b/crates/core/src/maintain/state.rs
+@@ -170,7 +170,7 @@
+                 self.retries.remove(&level);
+                 // A run shorter than the most one job takes ended where the sources did. A
+                 // full one may have left a backlog, which drains inside the window.
+-                if job.inputs().files().len() < MAX_INPUTS {
++                if job.inputs().files().len() <= MAX_INPUTS {
+                     self.drained.insert(level, now);
+                 }
+             }
+@@ -270,4 +270,4 @@
+     pub(super) fn forget_unlisted(&mut self, listed: impl Fn(&FileKey) -> bool) {
+         self.distrusted.retain(|_, key| listed(key));
+     }
+-}
++}
+\ No newline at end of file

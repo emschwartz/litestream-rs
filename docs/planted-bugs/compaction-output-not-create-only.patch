@@ -1,0 +1,11 @@
+diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
+--- a/crates/core/src/maintain.rs
++++ b/crates/core/src/maintain.rs
+@@ -1080,6 +1080,7 @@ pub(crate) async fn run_compaction<L: Role, R: Role>(
+     mode: WriteMode,
+ ) -> Outcome {
+     let output = FileKey::new(level, inputs.range());
++    let mode = WriteMode::Replace;
+     let result = if inputs
+         .files()
+         .iter()

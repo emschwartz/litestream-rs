@@ -233,6 +233,7 @@ pub fn rig_actor_config() -> ActorConfig {
             min_pages: NonZeroU32::new(8),
             truncate_pages: NonZeroU32::new(24),
         },
+        sync_interval: Duration::ZERO,
         upload: UploadConfig::default(),
         maintenance,
         retry_interval: Duration::from_secs(1),

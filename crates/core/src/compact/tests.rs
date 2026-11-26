@@ -985,6 +985,7 @@ fn thirty_two_inputs_of_two_thousand_pages_stay_under_the_stated_bound() {
         &dest,
         &inputs(&infos),
         level(9),
+        WriteMode::Replace,
         small,
     ))
     .unwrap();
@@ -1299,6 +1300,7 @@ fn staged_inputs_are_read_in_the_staging_window() {
         &staged_dest,
         &inputs(&infos),
         level(1),
+        WriteMode::Replace,
     ))
     .unwrap();
     let bound = MAX_INPUTS * (window + page) + FLUSH_BYTES + 2 * page;
@@ -1388,6 +1390,7 @@ fn the_output_reaches_the_upload_in_writes_of_the_flush_size() {
         &dest,
         &inputs(&infos),
         level(1),
+        WriteMode::Replace,
     ))
     .unwrap();
     let lens = dest.script().write_lens.clone();

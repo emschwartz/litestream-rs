@@ -58,16 +58,35 @@ const SETTLE_POLLS: usize = 10;
 /// to land in a later poll, where it could cover a level-0 file a test had just removed.
 fn settle_maintenance(replicator: &Replicator, clock: &lsr_replica::FakeClockHandle, site: &Site) {
     let store = FsStore::new(&site.replica);
-    for _ in 0..SETTLE_POLLS {
+    let mut jumped = false;
+    for polls in 0..SETTLE_POLLS {
         let snapshots = block_on(store.list(Level::SNAPSHOT, None, PageLimit::MAX)).unwrap();
         let one = Level::new(1).unwrap();
         let level_one = block_on(store.list(one, None, PageLimit::MAX)).unwrap();
         if !snapshots.files.is_empty() && !level_one.files.is_empty() {
             return;
         }
+        // The engine syncs a commit once per poll interval, so a commit made right after the
+        // boot's file can reach the replica after the boot's first maintenance pass: that pass
+        // found nothing above the snapshot and the level's next window is the next day
+        // boundary, 6,400 s after [`common::START`]. Crossing it is what lands the level-1 file.
+        if polls >= 3 && !snapshots.files.is_empty() && !jumped {
+            jumped = true;
+            advance(replicator, clock, Duration::from_secs(6_400));
+        }
         advance(replicator, clock, POLL);
     }
-    panic!("no level-9 snapshot and level-1 file after {SETTLE_POLLS} polls");
+    let held: Vec<String> = Level::ALL
+        .iter()
+        .flat_map(|level| {
+            let listed = block_on(store.list(*level, None, PageLimit::MAX)).unwrap();
+            listed
+                .files
+                .into_iter()
+                .map(|file| format!("{:?}", file.key))
+        })
+        .collect();
+    panic!("no level-9 snapshot and level-1 file after {SETTLE_POLLS} polls: {held:?}");
 }
 
 fn replicated(health: &Health) -> Option<Txid> {

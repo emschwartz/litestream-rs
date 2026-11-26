@@ -1,7 +1,7 @@
 //! Test-only edits to a built request, for the cases a correct builder never
 //! produces: a wrong digest, a header sent without being signed.
 
-use super::{HttpRequest, WriteRequest};
+use super::HttpRequest;
 
 impl HttpRequest {
     /// Sets (or with `None` removes) a header, leaving the signature as it was.
@@ -15,7 +15,6 @@ impl HttpRequest {
     }
 
     /// Sets a query parameter, replacing any of that name, leaving the signature as it was.
-    /// Giving `X-Amz-Signature` makes a damaged signature.
     #[must_use]
     pub fn tamper_query(mut self, name: &str, value: &str) -> Self {
         let kept: Vec<(String, String)> = self
@@ -33,7 +32,17 @@ impl HttpRequest {
         self
     }
 
-    /// Replaces the body, keeping the digest the builder promised.
+    /// Replaces the signature in the `Authorization` header with `signature`: a damaged one.
+    #[must_use]
+    pub fn tamper_signature(self, signature: &str) -> Self {
+        let damaged = self
+            .header("authorization")
+            .and_then(|auth| auth.split_once("Signature="))
+            .map(|(head, _)| format!("{head}Signature={signature}"));
+        self.tamper_header("authorization", damaged)
+    }
+
+    /// Replaces the body, keeping the hash the request was signed with.
     #[must_use]
     pub fn tamper_body(mut self, body: Vec<u8>) -> Self {
         self.body = body;
@@ -41,22 +50,15 @@ impl HttpRequest {
     }
 }
 
-impl WriteRequest {
-    /// [`HttpRequest::tamper_header`] on the request, keeping its digest.
+impl HttpRequest {
+    /// The headers its `Authorization` names as signed, for a test that checks every header
+    /// sent is one of them.
     #[must_use]
-    pub fn tamper_header(self, name: &'static str, value: Option<String>) -> Self {
-        Self {
-            request: self.request.tamper_header(name, value),
-            md5: self.md5,
-        }
-    }
-
-    /// [`HttpRequest::tamper_body`] on the request, keeping its digest.
-    #[must_use]
-    pub fn tamper_body(self, body: Vec<u8>) -> Self {
-        Self {
-            request: self.request.tamper_body(body),
-            md5: self.md5,
-        }
+    pub fn signed_headers(&self) -> Vec<&str> {
+        self.header("authorization")
+            .and_then(|auth| auth.split_once("SignedHeaders="))
+            .and_then(|(_, rest)| rest.split(',').next())
+            .map(|list| list.split(';').collect())
+            .unwrap_or_default()
     }
 }

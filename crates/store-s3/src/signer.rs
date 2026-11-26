@@ -158,12 +158,8 @@ mod tests {
         let one = Txid::new(1).unwrap();
         let key = FileKey::new(Level::ZERO, TxidRange::new(one, one).unwrap());
         let request = builder.head(now, &key).unwrap();
-        let credential = request
-            .url()
-            .query_pairs()
-            .find(|(name, _)| name == "X-Amz-Credential")
-            .map(|(_, value)| value.into_owned())
-            .unwrap();
+        let auth = request.header("authorization").unwrap();
+        let credential = auth.split_once("Credential=").unwrap().1;
         credential.split('/').next().unwrap().to_owned()
     }
 

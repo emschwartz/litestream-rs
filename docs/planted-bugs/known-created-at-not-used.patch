@@ -1,0 +1,19 @@
+diff --git a/crates/core/src/created_at.rs b/crates/core/src/created_at.rs
+--- a/crates/core/src/created_at.rs
++++ b/crates/core/src/created_at.rs
+@@ -115,7 +115,7 @@
+                 .resolved
+                 .get(&info.key)
+                 .copied()
+-                .or_else(|| self.known.exact(info)),
++                .or_else(|| self.known.exact(info).filter(|_| false)),
+         }
+     }
+ 
+@@ -736,4 +736,4 @@
+         assert_eq!(got.created_at_read, 3);
+         assert!(store.batches.lock().unwrap().is_empty());
+     }
+-}
++}
+\ No newline at end of file

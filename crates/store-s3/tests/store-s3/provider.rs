@@ -814,7 +814,7 @@ fn a_wrong_signature_is_denied_as_credentials_and_a_malformed_one_is_never_retri
             .builder()
             .get_range(WallClock.now(), &key, 0, ReadLen::new(16).unwrap())
             .unwrap()
-            .tamper_query("X-Amz-Signature", signature);
+            .tamper_signature(signature);
         let response = h.send(request);
         obs_response(&h, &format!("GET with signature {signature:?}"), &response);
         classify(StoreOp::Read, Some(&key), None, &response).unwrap_err()

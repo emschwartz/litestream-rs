@@ -47,8 +47,8 @@ Generated from `crates/config/src/keys.rs` by `crates/config/src/keys/table.rs`;
 | `force-path-style` | The store: path-style or virtual-host-style addressing. |
 | `sign-payload` | No effect: litestream-rs's S3 client signs requests one fixed way. |
 | `sign-accept-encoding` | No effect: litestream-rs's S3 client signs requests one fixed way. |
-| `require-content-md5` | No effect: litestream-rs always sends Content-MD5 on uploads. |
-| `put-object-content-md5` | No effect: litestream-rs always sends Content-MD5 on uploads. |
+| `require-content-md5` | No effect: litestream-rs checks every upload by its signed SHA-256. |
+| `put-object-content-md5` | No effect: litestream-rs checks every upload by its signed SHA-256. |
 | `skip-verify` | No effect: litestream-rs always verifies TLS certificates. |
 | `storage-class` | Not supported (an S3 storage class). Accepted at empty; any other value is refused. |
 | `part-size` | The store: the `S3Config` multipart part size. |

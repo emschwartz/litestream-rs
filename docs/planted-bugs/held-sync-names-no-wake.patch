@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2840,7 +2840,7 @@ impl Actor {
+             self.engine.maintain.until,
+         ];
+         let held = self.engine.sync_due;
+-        [task(Task::Sync), task(Task::Upload), deadline, held]
++        [task(Task::Sync), task(Task::Upload), deadline, held.filter(|_| false)]
+             .into_iter()
+             .chain(only_checkpointing.into_iter().filter(move |_| checkpoints))
+             .chain(only_running.into_iter().filter(move |_| running))
