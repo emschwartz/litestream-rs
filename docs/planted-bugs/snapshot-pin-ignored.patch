@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/sync.rs b/crates/core/src/sync.rs
+index b6ce25055..e8550fc7e 100644
+--- a/crates/core/src/sync.rs
++++ b/crates/core/src/sync.rs
+@@ -648,7 +648,7 @@ impl Filling {
+                         .map_err(|err| page_fault(wal, err))?,
+                     PageFrom::Db(pgno) => {
+                         db.read_page(pgno, &mut buf).map_err(Fault::from_source)?;
+-                        let checked = if pinned {
++                        let checked = if false {
+                             pages.check_pinned(pgno, &buf)
+                         } else {
+                             pages.check(pgno, &buf)

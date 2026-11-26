@@ -2362,6 +2362,7 @@ mod requested_snapshot_after_restart;
 mod rewound;
 mod second_writer;
 mod sliced;
+mod sliced_snapshot;
 mod stamp;
 mod tasks;
 mod vouch;

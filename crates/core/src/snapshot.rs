@@ -25,16 +25,18 @@ use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
 use lsr_ltx::{Header, HeaderFields, PageChecksum, PageSize, Timestamp};
-use lsr_wal::{CommittedEnd, OpenError, PageMap, WalReader};
+use lsr_wal::{CommittedEnd, OpenError, PageMap, Salts, WalReader};
 use thiserror::Error;
 
 use crate::fault::role::Role;
 use crate::fault::{BugSite, Fault};
 use crate::layout::{FileInfo, FileKey};
 use crate::pages::PageChecksumTable;
-use crate::position::{Continuity, SyncedThrough};
+use crate::position::{Continuity, ReadLockHold, SyncedThrough};
+use crate::publish::{Open, Writer};
 use crate::source::{CommittedRead, PageSource, WalSource};
-use crate::sync::{PageFrom, Plan, clamp, scan_whole, stage};
+use crate::store::{Flight, Rest, WriteMode};
+use crate::sync::{Filling, PageFrom, Plan, clamp, scan_whole};
 use crate::verify::LivePages;
 
 /// A snapshot that was not written. Nothing is visible under `key`, unless
@@ -66,10 +68,25 @@ pub(crate) async fn write_snapshot<W: WalSource, P: PageSource, S: Role>(
     remote: &S,
     now: Timestamp,
 ) -> Result<FileInfo, SnapshotFailed> {
-    let key = FileKey::snapshot(proof.position().txid());
-    run(proof, &key, wal, db, pages, remote, now)
+    let mut snapshot = Snapshotting::begin(proof, wal, remote, now, false).await?;
+    let key = snapshot.key();
+    match snapshot
+        .slice((wal, db, pages), remote, u64::MAX, true)
         .await
-        .map_err(|fault| SnapshotFailed { fault, key })
+    {
+        Ok(Some(info)) => Ok(info),
+        Ok(None) => {
+            snapshot.abort().await;
+            Err(SnapshotFailed {
+                fault: BugSite::Encode.hit(),
+                key,
+            })
+        }
+        Err(fault) => {
+            snapshot.abort().await;
+            Err(SnapshotFailed { fault, key })
+        }
+    }
 }
 
 /// Everything a whole-database read at a proof's transaction reads: the WAL reader, and
@@ -123,38 +140,207 @@ fn whole<W: WalSource>(proof: &SyncedThrough, wal: &mut W) -> Result<Whole<W::Wa
     })
 }
 
-async fn run<W: WalSource, P: PageSource, S: Role>(
-    proof: &SyncedThrough,
-    key: &FileKey,
-    wal: &mut W,
-    db: &mut P,
-    pages: &mut PageChecksumTable,
-    remote: &S,
-    now: Timestamp,
-) -> Result<FileInfo, Fault> {
-    let position = proof.position();
-    let Whole {
-        mut reader,
-        map,
-        commit,
-        page_size,
-    } = whole(proof, wal)?;
-    let plan = Plan::new(&map, None, commit, page_size);
-    let (timestamp, _clamped) = clamp(Some(position.timestamp()), now);
-    let header = Header::new(HeaderFields {
-        tracked: false,
-        page_size,
-        commit: commit.get(),
-        txids: key.range(),
-        timestamp,
-        pre_apply: None,
-        wal: None,
-        node_id: 0,
-    })
-    .map_err(|_err| BugSite::Encode.hit())?;
-    let (file, _last, _made_here) =
-        stage(remote, key, header, &plan, &mut reader, db, pages).await?;
-    Ok(file)
+/// A level-9 snapshot part-way to the replica: what it holds between two slices, in memory
+/// only. A failure, a stop or a crash starts it again from its first page; nothing of it is
+/// visible until its commit.
+///
+/// Between two slices the engine syncs and uploads, and runs no checkpoint of its own. So the
+/// read transaction the proof was taken under is held throughout, and SQLite copies no frame
+/// past its read mark into the database file: the mark is at or below the synced end, whose
+/// frames the page map holds and which win over the file. Each slice first reads the
+/// wal-index again: another hold of the read transaction, another WAL generation or a
+/// backfill past the synced end ends the snapshot before it reads a page, and so does the
+/// table's pin let go (a snapshot step emptied it). A database-file page is checked against
+/// the table as it stood when the snapshot began ([`PageChecksumTable::pin`]).
+#[derive(Debug)]
+pub(crate) struct Snapshotting {
+    key: FileKey,
+    epoch: ReadLockHold,
+    salts: Salts,
+    /// The synced end's frame count: the frames the snapshot holds, and the most SQLite may
+    /// have copied into the database file under it.
+    frames: u32,
+    map: PageMap,
+    commit: NonZeroU32,
+    page_size: PageSize,
+    filling: Filling,
+    open: Option<Open>,
+    /// How many bytes were handed to the replica.
+    pub(crate) sent: u64,
+    pinned: bool,
+    /// The last slice stopped for the upload's parts (`docs/decisions/D233.md`).
+    pub(crate) waits: bool,
+}
+
+impl Snapshotting {
+    /// Begins the level-9 file for `proof`'s transaction: reads the WAL's page map up to the
+    /// synced end and opens the upload. `pinned`: the caller pinned `pages` and syncs between
+    /// the slices.
+    ///
+    /// # Errors
+    /// [`SnapshotFailed`]; nothing was written.
+    pub(crate) async fn begin<W: WalSource, S: Role>(
+        proof: &SyncedThrough,
+        wal: &mut W,
+        remote: &S,
+        now: Timestamp,
+        pinned: bool,
+    ) -> Result<Self, SnapshotFailed> {
+        let key = FileKey::snapshot(proof.position().txid());
+        let failed = |fault| SnapshotFailed { fault, key };
+        let epoch = wal.epoch();
+        let Whole {
+            reader,
+            map,
+            commit,
+            page_size,
+        } = whole(proof, wal).map_err(failed)?;
+        let (timestamp, _clamped) = clamp(Some(proof.position().timestamp()), now);
+        let header = Header::new(HeaderFields {
+            tracked: false,
+            page_size,
+            commit: commit.get(),
+            txids: key.range(),
+            timestamp,
+            pre_apply: None,
+            wal: None,
+            node_id: 0,
+        })
+        .map_err(|_err| failed(BugSite::Encode.hit()))?;
+        let filling =
+            Filling::new(header, &Plan::new(&map, None, commit, page_size)).map_err(failed)?;
+        let open = Writer::begin(remote, &key, timestamp, WriteMode::Replace, None)
+            .await
+            .map_err(|err| failed(S::fault(&err)))?
+            .boxed();
+        Ok(Self {
+            key,
+            epoch,
+            salts: reader.header().salts(),
+            frames: proof.position().synced().offset().frame_index(),
+            map,
+            commit,
+            page_size,
+            filling,
+            open: Some(open),
+            sent: 0,
+            pinned,
+            waits: false,
+        })
+    }
+
+    /// The file being written.
+    pub(crate) const fn key(&self) -> FileKey {
+        self.key
+    }
+
+    /// Hands the replica the next `budget` bytes of the file, never more, and commits it
+    /// once every byte is handed over and the upload's parts are answered. `Ok(None)`: it
+    /// goes on in a later slice. `patient` waits for the upload's parts inside the call, as a
+    /// whole-file write does; otherwise a slice that finds them in the way stops, and
+    /// `waits` says so.
+    ///
+    /// # Errors
+    /// The fault; the caller aborts the upload ([`Self::abort`]).
+    pub(crate) async fn slice<W: WalSource, P: PageSource, S: Role>(
+        &mut self,
+        (wal, db, pages): (&mut W, &mut P, &mut PageChecksumTable),
+        remote: &S,
+        budget: u64,
+        patient: bool,
+    ) -> Result<Option<FileInfo>, Fault> {
+        self.waits = false;
+        self.holds(wal, pages)?;
+        let mut reader = self.reader(wal)?;
+        let plan = Plan::new(&self.map, None, self.commit, self.page_size);
+        let mut left = budget;
+        let open = self
+            .open
+            .as_mut()
+            .ok_or_else(|| BugSite::UploadNeverOpened.hit())?;
+        while !self.filling.whole() && left > 0 {
+            if !patient
+                && open
+                    .flight(Rest::More)
+                    .await
+                    .map_err(|err| S::fault(&err))?
+                    == Flight::Full
+            {
+                self.waits = true;
+                break;
+            }
+            self.filling
+                .encode(&plan, &mut reader, db, pages, self.pinned)?;
+            let out = self.filling.out();
+            let n = out.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+            let chunk = out.get(..n).ok_or_else(|| BugSite::Encode.hit())?;
+            open.write(chunk).await.map_err(|err| S::fault(&err))?;
+            out.drain(..n);
+            let n = u64::try_from(n).unwrap_or(u64::MAX);
+            (left, self.sent) = (left.saturating_sub(n), self.sent.saturating_add(n));
+        }
+        pages.pin_past(self.filling.next());
+        if !self.filling.whole() {
+            return Ok(None);
+        }
+        if !patient
+            && open
+                .flight(Rest::None)
+                .await
+                .map_err(|err| S::fault(&err))?
+                != Flight::Idle
+        {
+            self.waits = true;
+            return Ok(None);
+        }
+        self.holds(wal, pages)?;
+        let open = self
+            .open
+            .take()
+            .ok_or_else(|| BugSite::UploadNeverOpened.hit())?;
+        let published = open
+            .commit(remote)
+            .await
+            .map_err(|err| S::fault(err.error()))?;
+        Ok(Some(published.info()))
+    }
+
+    /// Ends the snapshot: its upload is aborted, so nothing of it stays as scratch.
+    pub(crate) async fn abort(self) {
+        if let Some(open) = self.open {
+            // Nothing was published; a failed abort leaves scratch the next start clears.
+            drop(open.abort().await);
+        }
+    }
+
+    /// Whether the read the snapshot began under still holds: the same hold of the read
+    /// transaction, the same WAL generation, nothing copied into the database file past the
+    /// synced end, and, for a snapshot the engine syncs beside, the table's pin.
+    fn holds<W: WalSource>(&self, wal: &mut W, pages: &PageChecksumTable) -> Result<(), Fault> {
+        let committed = wal.committed().map_err(Fault::from_source)?;
+        if committed.epoch() != self.epoch {
+            return Err(Fault::ReadTxLost);
+        }
+        let moved = committed.end().salts() != self.salts || committed.backfilled() > self.frames;
+        if moved || (self.pinned && !pages.pinned()) {
+            return Err(Fault::WalMoved);
+        }
+        Ok(())
+    }
+
+    /// The WAL, opened again for this slice: the same generation, or the snapshot ends.
+    fn reader<W: WalSource>(&self, wal: &mut W) -> Result<WalReader<W::Wal>, Fault> {
+        let file = wal
+            .open()
+            .map_err(Fault::from_source)?
+            .ok_or(Fault::WalUnlinked)?;
+        let reader = WalReader::open(file).map_err(open_fault)?;
+        if reader.header().salts() == self.salts {
+            Ok(reader)
+        } else {
+            Err(Fault::WalMoved)
+        }
+    }
 }
 
 /// The live database at `proof`'s transaction, one checksum a page: what a restore of that

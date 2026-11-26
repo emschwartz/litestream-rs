@@ -480,3 +480,94 @@ fn the_table_counts_and_cuts_pages_across_chunk_edges() {
     table.record(pg(4097), digest(4097, 3));
     assert_eq!(table.len(), 3, "a slot cut and recorded again counts once");
 }
+/// A page the syncs record after the pin is checked, by the snapshot, against what the table
+/// held at the pin; the table itself holds the new page, and every other read checks that.
+#[test]
+fn a_pinned_page_recorded_since_is_checked_as_it_was() {
+    let mut table = table();
+    table.record(pg(5), digest(5, 1));
+    table.pin();
+    assert!(table.pinned());
+    table.record(pg(5), digest(5, 2));
+    assert_eq!(table.check_pinned(pg(5), &page(1)), Ok(()));
+    assert_eq!(
+        table.get(pg(5)),
+        Some(digest(5, 2)),
+        "the table keeps the new page"
+    );
+    assert_eq!(
+        table.check_pinned(pg(5), &page(3)),
+        Err(Mismatch {
+            pgno: pg(5),
+            recorded: digest(5, 1),
+            found: digest(5, 3),
+        })
+    );
+    assert!(
+        table.check(pg(5), &page(1)).is_err(),
+        "outside the pin, the new page"
+    );
+    table.unpin();
+    assert!(!table.pinned());
+    assert!(table.check_pinned(pg(5), &page(4)).is_err());
+}
+
+/// A page the table held none of at the pin passes the snapshot's check and is recorded
+/// nowhere; one unchanged since is checked, and learned, as by any read.
+#[test]
+fn a_pinned_page_absent_or_unchanged_at_the_pin_is_checked_as_any() {
+    let mut table = table();
+    table.pin();
+    table.record(pg(6), digest(6, 2));
+    assert_eq!(table.check_pinned(pg(6), &page(9)), Ok(()));
+    assert_eq!(table.get(pg(6)), Some(digest(6, 2)));
+    assert_eq!(table.check_pinned(pg(7), &page(4)), Ok(()));
+    assert_eq!(
+        table.get(pg(7)),
+        Some(digest(7, 4)),
+        "a first read is learned"
+    );
+    assert!(table.check(pg(7), &page(5)).is_err());
+}
+
+/// What the snapshot has read is not kept: a page below its place records as it would with
+/// no pin.
+#[test]
+fn a_pin_keeps_nothing_below_the_snapshots_place() {
+    let mut table = table();
+    table.record(pg(2), digest(2, 1));
+    table.record(pg(4_200), digest(4_200, 1));
+    table.pin();
+    table.record(pg(4_200), digest(4_200, 2));
+    table.pin_past(3);
+    table.record(pg(2), digest(2, 2));
+    assert!(table.check_pinned(pg(2), &page(1)).is_err());
+    assert_eq!(table.check_pinned(pg(4_200), &page(1)), Ok(()));
+    table.pin_past(4_201);
+    assert!(table.check_pinned(pg(4_200), &page(1)).is_err());
+}
+
+/// A shrink during the pin keeps the cut slots for the snapshot, whole chunks and the part of
+/// the last, and a mismatch reported at the pin stays accepted for it.
+#[test]
+fn a_shrink_under_a_pin_keeps_the_cut_pages_as_they_were() {
+    let mut table = table();
+    for n in [10, 4_200, 9_000] {
+        table.record(pg(n), digest(n, 1));
+    }
+    assert_eq!(table.check(pg(11), &page(1)), Ok(()));
+    assert!(table.check(pg(11), &page(2)).is_err());
+    table.pin();
+    table.record(pg(11), digest(11, 3));
+    table.truncate(nz(5));
+    table.record(pg(4_200), digest(4_200, 2));
+    table.truncate(nz(5));
+    for n in [10, 4_200, 9_000] {
+        assert_eq!(table.get(pg(n)), None);
+        assert_eq!(table.check_pinned(pg(n), &page(1)), Ok(()), "page {n}");
+        assert!(table.check_pinned(pg(n), &page(2)).is_err(), "page {n}");
+    }
+    assert_eq!(table.check_pinned(pg(11), &page(2)), Ok(()));
+    table.clear();
+    assert!(!table.pinned(), "an emptied table lets the pin go");
+}

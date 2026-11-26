@@ -1,0 +1,10 @@
+# A level-9 snapshot part-way checks a database-file page against the table as the syncs between
+# its slices left it, not as it stood when the snapshot began: a page a sync recorded since, and
+# the file does not hold yet (no checkpoint runs under the snapshot), fails it every time, so a
+# database with a steady writer never gets a snapshot.
+name = "snapshot-pin-ignored"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "actor::tests::sliced_snapshot::a_commit_made_during_a_long_snapshot_reaches_the_replica_before_it_ends",
+]

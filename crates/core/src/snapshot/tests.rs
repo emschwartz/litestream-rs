@@ -521,3 +521,144 @@ fn an_empty_wal_snapshots_the_database_file() {
     assert_eq!(header.fields().commit, 3);
     assert_eq!(pages, rig.image());
 }
+/// A snapshot begun from the rig's proof, written in slices: what a slice of `budget` did.
+fn begun(rig: &mut Rig) -> Snapshotting {
+    let proof = rig.through.as_ref().unwrap();
+    block_on(Snapshotting::begin(
+        proof,
+        &mut rig.wal,
+        &Replica(&rig.remote),
+        ts(5000),
+        true,
+    ))
+    .unwrap()
+}
+
+fn slice(
+    rig: &mut Rig,
+    snapshot: &mut Snapshotting,
+    pages: &mut PageChecksumTable,
+    budget: u64,
+) -> Result<Option<FileInfo>, Fault> {
+    let sources = (&mut rig.wal, &mut rig.db, pages);
+    block_on(snapshot.slice(sources, &Replica(&rig.remote), budget, false))
+}
+
+/// Pages of noise in the WAL, so the file is many slices long.
+fn noisy() -> Rig {
+    let mut rig = two_commits();
+    let mut x = 0x9E37_79B9_7F4A_7C15_u64;
+    let noise: Vec<u8> = (0..PS.bytes())
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x.to_be_bytes()[0]
+        })
+        .collect();
+    rig.wal.append_tx(&[(pg(1), noise)], nz(3));
+    rig.txs.push(Tx {
+        fill: 0,
+        pages: vec![1],
+        size: 3,
+    });
+    rig.sync(3000);
+    rig
+}
+
+#[test]
+fn a_snapshot_in_slices_hands_over_no_more_than_each_budget_and_publishes_once_whole() {
+    let mut rig = noisy();
+    let whole = rig.snapshot(5000).unwrap();
+    block_on(rig.remote.delete(&[whole.key])).unwrap();
+    let mut pages = PageChecksumTable::new();
+    pages.pin();
+    let mut snapshot = begun(&mut rig);
+    let mut slices = 0_u64;
+    let info = loop {
+        let before = snapshot.sent;
+        let sliced = slice(&mut rig, &mut snapshot, &mut pages, 100).unwrap();
+        assert!(snapshot.sent - before <= 100);
+        slices += 1;
+        match sliced {
+            Some(info) => break info,
+            None => assert_eq!(rig.remote_files(), 0, "nothing is visible part-way"),
+        }
+    };
+    assert!(slices > 5, "{slices}");
+    assert_eq!(info.size, whole.size, "the same file as one written whole");
+    assert_eq!(snapshot.sent, info.size);
+    assert_eq!(rig.remote_files(), 1);
+}
+
+/// Each slice first proves the read it began under: a fault, and no page read, when it does
+/// not hold.
+#[test]
+fn a_slice_after_the_read_moved_ends_the_snapshot() {
+    type Move = fn(&mut Rig, &mut PageChecksumTable);
+    let moves: [(Move, Fault); 5] = [
+        (
+            |rig, _| rig.wal.set_epoch(rig.wal.epoch().next()),
+            Fault::ReadTxLost,
+        ),
+        (|rig, _| rig.wal.force_restart(), Fault::WalMoved),
+        (
+            |rig, _| {
+                rig.commit(&[2]);
+                rig.backfill_to(rig.txs.len());
+            },
+            Fault::WalMoved,
+        ),
+        (|_, pages| pages.clear(), Fault::WalMoved),
+        (|rig, _| rig.wal.remove_file(), Fault::WalUnlinked),
+    ];
+    for (moved, fault) in moves {
+        let mut rig = noisy();
+        let mut pages = PageChecksumTable::new();
+        pages.pin();
+        let mut snapshot = begun(&mut rig);
+        assert_eq!(slice(&mut rig, &mut snapshot, &mut pages, 100), Ok(None));
+        moved(&mut rig, &mut pages);
+        let reads = rig.db.reads();
+        assert_eq!(slice(&mut rig, &mut snapshot, &mut pages, 100), Err(fault));
+        assert_eq!(rig.db.reads(), reads);
+        block_on(snapshot.abort());
+        assert_eq!(rig.remote.scratch(), 0);
+    }
+}
+
+/// A database read that retakes the read transaction under the snapshot, as a checkpoint
+/// that slipped in would.
+struct Retaking {
+    inner: FakeDb,
+    wal: FakeWal,
+}
+
+impl PageSource for Retaking {
+    fn page_count(&mut self) -> Result<DbPages, SourceError> {
+        self.inner.page_count()
+    }
+
+    fn read_page(&mut self, pgno: PageNo, buf: &mut [u8]) -> Result<(), SourceError> {
+        self.wal.set_epoch(self.wal.epoch().next());
+        self.inner.read_page(pgno, buf)
+    }
+}
+
+/// The last check comes after the last byte: a read that moved during the slice that
+/// reached the end publishes nothing.
+#[test]
+fn a_read_that_moved_before_the_commit_publishes_nothing() {
+    let mut rig = two_commits();
+    let mut pages = PageChecksumTable::new();
+    pages.pin();
+    let mut snapshot = begun(&mut rig);
+    let mut db = Retaking {
+        inner: std::mem::replace(&mut rig.db, FakeDb::new(PS)),
+        wal: rig.wal.clone(),
+    };
+    let sources = (&mut rig.wal, &mut db, &mut pages);
+    let sliced = block_on(snapshot.slice(sources, &Replica(&rig.remote), u64::MAX, false));
+    assert_eq!(sliced, Err(Fault::ReadTxLost));
+    assert_eq!(rig.remote_files(), 0);
+}

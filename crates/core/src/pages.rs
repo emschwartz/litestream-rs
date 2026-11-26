@@ -90,6 +90,37 @@ pub struct PageChecksumTable {
     /// Pages found different from the table, with the digest found: reported,
     /// and accepted as the file's bytes until a frame records the page again.
     mismatched: BTreeMap<PageNo, PageChecksum>,
+    /// The table as a level-9 snapshot part-way through the database found it, if one is.
+    pin: Option<Pin>,
+}
+
+/// What the table held, when a level-9 snapshot began, for the pages the snapshot has not read
+/// yet ([`PageChecksumTable::pin`]). The syncs between its slices record pages the database
+/// file does not hold yet (no checkpoint runs under the snapshot), so the snapshot checks a
+/// page it reads from the file against the table as it was. Only what changed since is kept:
+/// one slot a page changed at or past the snapshot's place, and the chunks a shrink cut, which
+/// the table held anyway.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Pin {
+    /// The next page the snapshot reads; nothing below it is kept.
+    next: u32,
+    /// The slot of each page at or past `next` that changed since the pin, as it was then.
+    was: BTreeMap<u32, u64>,
+    /// The chunks a shrink cut since the pin, by index, as they were when first cut.
+    cut: BTreeMap<usize, Vec<u64>>,
+    /// The pages reported as mismatched when the pin was taken.
+    mismatched: BTreeMap<PageNo, PageChecksum>,
+}
+
+impl Pin {
+    /// The slot `pgno` had at the pin, when it changed since; `None` when it did not.
+    fn then(&self, pgno: PageNo) -> Option<u64> {
+        let (chunk, place) = slot(pgno);
+        self.was
+            .get(&pgno.get())
+            .or_else(|| self.cut.get(&chunk).and_then(|cut| cut.get(place)))
+            .copied()
+    }
 }
 
 /// Slots in a chunk of the table.
@@ -111,6 +142,7 @@ impl PageChecksumTable {
             held: 0,
             top: 0,
             mismatched: BTreeMap::new(),
+            pin: None,
         }
     }
 
@@ -124,6 +156,7 @@ impl PageChecksumTable {
 
     /// Puts `digest` in the slot of `pgno`, making room for it.
     fn put(&mut self, pgno: PageNo, digest: PageChecksum) {
+        self.keep(pgno);
         let (chunk, place) = slot(pgno);
         while self.chunks.len() <= chunk {
             self.chunks.push(vec![0; CHUNK]);
@@ -181,7 +214,21 @@ impl PageChecksumTable {
             for chunk in self.chunks.iter().skip(whole.saturating_add(1)) {
                 dropped = dropped.saturating_add(chunk.iter().filter(|slot| **slot != 0).count());
             }
-            self.chunks.truncate(whole.saturating_add(1));
+            let cut = self
+                .chunks
+                .split_off(whole.saturating_add(1).min(self.chunks.len()));
+            if let Some(pin) = self.pin.as_mut() {
+                for (at, chunk) in (whole.saturating_add(1)..).zip(cut) {
+                    pin.cut.entry(at).or_insert(chunk);
+                }
+            }
+            // The cut chunk's slots above `keep` are zeroed in place: each is kept first.
+            let end = self.top.min(whole.saturating_add(1).saturating_mul(CHUNK));
+            let size = self.page_size.unwrap_or(PageSize::MIN);
+            let tail = (keep.saturating_add(1)..=end).filter_map(|n| u32::try_from(n).ok());
+            for pgno in tail.filter_map(|n| PageNo::new(n, size)) {
+                self.keep(pgno);
+            }
             if let Some(last) = self.chunks.get_mut(whole) {
                 for slot in last.iter_mut().skip(part).filter(|slot| **slot != 0) {
                     *slot = 0;
@@ -196,6 +243,7 @@ impl PageChecksumTable {
 
     /// Forgets every page.
     pub fn clear(&mut self) {
+        self.pin = None;
         self.chunks = Vec::new();
         self.held = 0;
         self.top = 0;
@@ -210,6 +258,85 @@ impl PageChecksumTable {
         }
     }
 
+    /// Keeps what the table holds now, for every page a level-9 snapshot has not read yet,
+    /// until [`Self::unpin`]; [`Self::clear`] lets it go too.
+    pub fn pin(&mut self) {
+        self.pin = Some(Pin {
+            next: 1,
+            mismatched: self.mismatched.clone(),
+            ..Pin::default()
+        });
+    }
+
+    /// Lets the pin go: the snapshot ended.
+    pub fn unpin(&mut self) {
+        self.pin = None;
+    }
+
+    /// Whether a pin is held: a [`Self::clear`] since [`Self::pin`] says the table no
+    /// longer describes the database the snapshot reads.
+    #[must_use]
+    pub const fn pinned(&self) -> bool {
+        self.pin.is_some()
+    }
+
+    /// The pinned snapshot has read every page below `next`: what was kept for them goes.
+    pub fn pin_past(&mut self, next: u32) {
+        if let Some(pin) = self.pin.as_mut() {
+            pin.next = next;
+            pin.was = pin.was.split_off(&next);
+            let done = usize::try_from(next.saturating_sub(1)).unwrap_or(usize::MAX) / CHUNK;
+            pin.cut = pin.cut.split_off(&done);
+        }
+    }
+
+    /// [`Self::check`] as the table stood at the pin, for a page that changed since: a page it
+    /// held none of then passes and is recorded nowhere (the table holds what came since).
+    ///
+    /// # Errors
+    /// [`Mismatch`] when the bytes differ from what the table held then.
+    pub fn check_pinned(&mut self, pgno: PageNo, page: &[u8]) -> Result<(), Mismatch> {
+        let Some((then, pin)) = self
+            .pin
+            .as_ref()
+            .and_then(|pin| Some((pin.then(pgno)?, pin)))
+        else {
+            return self.check(pgno, page);
+        };
+        let found = PageChecksum::of(pgno, page);
+        match PageChecksum::from_raw(then) {
+            Some(recorded) if recorded != found && pin.mismatched.get(&pgno) != Some(&found) => {
+                Err(Mismatch {
+                    pgno,
+                    recorded,
+                    found,
+                })
+            }
+            Some(_) | None => Ok(()),
+        }
+    }
+
+    /// Keeps the slot of `pgno` as the pin first saw it, before it changes.
+    fn keep(&mut self, pgno: PageNo) {
+        let now = self.raw(pgno);
+        if let Some(pin) = self.pin.as_mut()
+            && pgno.get() >= pin.next
+            && pin.then(pgno).is_none()
+        {
+            pin.was.insert(pgno.get(), now);
+        }
+    }
+
+    /// The raw slot of `pgno`, zero when it holds no page.
+    fn raw(&self, pgno: PageNo) -> u64 {
+        let (chunk, place) = slot(pgno);
+        self.chunks
+            .get(chunk)
+            .and_then(|chunk| chunk.get(place))
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// The lowest page still reported as mismatched.
     #[must_use]
     pub fn mismatch(&self) -> Option<PageNo> {
@@ -219,11 +346,7 @@ impl PageChecksumTable {
     /// The digest the table holds for `pgno`.
     #[must_use]
     pub fn get(&self, pgno: PageNo) -> Option<PageChecksum> {
-        let (chunk, place) = slot(pgno);
-        self.chunks
-            .get(chunk)
-            .and_then(|chunk| chunk.get(place))
-            .and_then(|raw| PageChecksum::from_raw(*raw))
+        PageChecksum::from_raw(self.raw(pgno))
     }
 
     /// How many pages are recorded.

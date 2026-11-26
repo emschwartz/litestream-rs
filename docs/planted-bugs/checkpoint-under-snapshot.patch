@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 6b5a9e163..c5167ca4a 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -1596,7 +1596,6 @@ impl Actor {
+         // No checkpoint of the engine's under a snapshot part-way: it would end the read
+         // transaction the snapshot reads under (`crate::snapshot::Snapshotting`).
+         let free = self.engine.gate.open(now)
+-            && self.engine.snapshot.is_none()
+             && self.kept.tasks.ready(Task::Checkpoint, now)
+             && self.kept.tasks.ready(Task::Sync, now);
+         if !free {

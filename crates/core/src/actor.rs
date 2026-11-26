@@ -27,7 +27,10 @@
 //!    one (`crate::regression_watch`); a watched file a read finds gone is a regression.
 //!    A snapshot job runs only once uploads are idle, so its last
 //!    transaction is at most what was published; with uploads busy it waits,
-//!    and the next listing waits with it.
+//!    and the next listing waits with it. A snapshot read from the database goes a slice a
+//!    tick: its slices go first, the rest of the engine has the tick after each
+//!    [`state::FAIR_SHARE`] of them, no checkpoint runs and nothing is listed until it ends
+//!    (`docs/decisions/D251.md`).
 //!
 //!    Fair share: after [`state::FAIR_SHARE`] uploads in a row, prune and
 //!    maintenance, when either has work, take the next unit ahead of uploads
@@ -138,7 +141,7 @@ use crate::recover::{
     Scanned, Verdict, WalView, newest_level_zero, newest_replica_level_zero, read_header,
     recover_traced,
 };
-use crate::snapshot::{SnapshotFailed, read_live, write_snapshot};
+use crate::snapshot::{SnapshotFailed, Snapshotting, read_live};
 use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, WalSource};
 use crate::store::{Denied, ObjectStore, PageLimit, StoreError, WriteMode};
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step, wal_barrier};
@@ -270,9 +273,10 @@ pub enum Event {
     },
     /// Uploads ran; this is what the last one did.
     Uploaded(Did),
-    /// A slice of a staged file went to the replica and more of the file is left: the tick
-    /// handed the replica as much as one tick may (`docs/decisions/D217.md`), and the next
-    /// upload step reads on. Nothing is published until the file is whole.
+    /// A slice of a staged file, or of a level-9 snapshot, went to the replica and more of the
+    /// file is left: the tick handed the replica as much as one tick may
+    /// (`docs/decisions/D217.md`, `docs/decisions/D251.md`), and the next slice reads on.
+    /// Nothing is published until the file is whole.
     Sending {
         /// How many bytes of the file were handed to the replica so far.
         bytes: u64,
@@ -585,6 +589,11 @@ impl Actor {
     #[must_use]
     pub fn awaits_parts(&self) -> bool {
         self.engine.in_flight.waits()
+            || self
+                .engine
+                .snapshot
+                .as_ref()
+                .is_some_and(|(_, snapshot)| snapshot.waits)
     }
 
     /// What the actor is doing.
@@ -1108,6 +1117,7 @@ impl Actor {
         // No tick runs again to send the rest of a file in flight or to abort its upload: it is
         // dropped, and what it wrote is scratch the next boot clears.
         self.engine.in_flight = InFlight::default();
+        self.engine.snapshot = None;
         Tick::Stopped(cause)
     }
 
@@ -1316,6 +1326,7 @@ impl Actor {
         let takeover = self.boot_takeover();
         let doubted = self.kept.suspect_staged;
         // Nothing is in flight before a boot; the boot's drops of staged files ask all the same.
+        self.end_snapshot().await;
         let mut in_flight = std::mem::take(&mut self.engine.in_flight);
         let unsent = in_flight.stop().await;
         let listed = match self.boot_listed(env, takeover, &unsent).await {
@@ -1396,6 +1407,11 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Tick {
+        if self.snapshot_owed()
+            && let Some(tick) = self.snapshot_unit(env, now).await
+        {
+            return tick;
+        }
         let owed = self.owed_upload();
         if owed && let Some(tick) = self.upload_unit(env, now).await {
             return tick;
@@ -1418,6 +1434,9 @@ impl Actor {
         if let Some(tick) = self.prune_unit(env, now).await {
             return tick;
         }
+        if let Some(tick) = self.snapshot_unit(env, now).await {
+            return tick;
+        }
         if let Some(tick) = self.maintain_unit(env, now).await {
             return tick;
         }
@@ -1431,6 +1450,8 @@ impl Actor {
         now: Timestamp,
         deadline: Timestamp,
     ) -> Tick {
+        // A drain runs no maintenance: a snapshot part-way ends, its upload aborted.
+        self.end_snapshot().await;
         // A retention pass the drain was asked to end with is not cut by the deadline once
         // everything is uploaded (`once_retention`).
         if now >= deadline {
@@ -1576,7 +1597,10 @@ impl Actor {
     /// that must prove it first may both run.
     fn checkpoint_decision(&self, now: Timestamp) -> Option<(Decision, CheckpointMode)> {
         let position = self.position().filter(|_| self.reset().is_none())?;
+        // No checkpoint of the engine's under a snapshot part-way: it would end the read
+        // transaction the snapshot reads under (`crate::snapshot::Snapshotting`).
         let free = self.engine.gate.open(now)
+            && self.engine.snapshot.is_none()
             && self.kept.tasks.ready(Task::Checkpoint, now)
             && self.kept.tasks.ready(Task::Sync, now);
         if !free {
@@ -2644,23 +2668,94 @@ impl Actor {
                 return tick;
             }
         };
-        let written = write_snapshot(
-            &proof,
-            &mut *env.wal,
-            &mut *env.db,
-            &mut self.engine.pages,
-            env.remote,
-            self.kept.clock.map_or(now, EngineClock::stamp_floor),
-        )
-        .await;
-        self.engine
-            .maintain
-            .state
-            .record_snapshot(now, written.as_ref().err().map(|failed| &failed.fault));
-        match written {
-            Ok(info) => self.snapshot_written(info, now, created_at_read),
-            Err(failed) => self.snapshot_failed(env.remote, job, failed, now).await,
+        let stamp = self.kept.clock.map_or(now, EngineClock::stamp_floor);
+        match Snapshotting::begin(&proof, &mut *env.wal, env.remote, stamp, true).await {
+            Ok(snapshot) => {
+                // The table as the snapshot's proof left it; the syncs between its slices
+                // record pages the database file does not hold yet.
+                self.engine.pages.pin();
+                self.engine.snapshot = Some((job.clone(), Box::new(snapshot)));
+                self.engine.snapshot_slices = 0;
+                match self.snapshot_unit(env, now).await {
+                    Some(tick) => tick,
+                    None => self.ran(Event::Sending { bytes: 0 }, now),
+                }
+            }
+            Err(failed) => {
+                let state = &mut self.engine.maintain.state;
+                state.record_snapshot(now, Some(&failed.fault));
+                self.snapshot_failed(env.remote, job, failed, now).await
+            }
         }
+    }
+
+    /// The next slice of the snapshot part-way (`docs/decisions/D217.md` for a staged
+    /// file's): `None` when there is none, or when it waits for its upload's parts and
+    /// handed nothing over.
+    async fn snapshot_unit<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
+        &mut self,
+        env: &mut Env<'_, W, P, C, L, R>,
+        now: Timestamp,
+    ) -> Option<Tick> {
+        if !self.snapshot_ready() {
+            return None;
+        }
+        let (job, mut snapshot) = self.engine.snapshot.take()?;
+        let sent = snapshot.sent;
+        let budget = self.kept.cfg.upload.bytes_per_tick.get();
+        let sources = (&mut *env.wal, &mut *env.db, &mut self.engine.pages);
+        let sliced = snapshot.slice(sources, env.remote, budget, false).await;
+        let state = &mut self.engine.maintain.state;
+        match sliced {
+            Ok(None) => {
+                let (waited, bytes) = (snapshot.sent == sent, snapshot.sent);
+                self.engine.snapshot = Some((job, snapshot));
+                if waited {
+                    return None;
+                }
+                self.engine.snapshot_slices = self.engine.snapshot_slices.saturating_add(1);
+                Some(self.ran(Event::Sending { bytes }, now))
+            }
+            Ok(Some(info)) => {
+                state.record_snapshot(now, None);
+                self.engine.pages.unpin();
+                Some(self.snapshot_written(info, now, 0))
+            }
+            Err(fault) => {
+                state.record_snapshot(now, Some(&fault));
+                let key = snapshot.key();
+                snapshot.abort().await;
+                self.engine.pages.unpin();
+                let failed = SnapshotFailed { fault, key };
+                Some(self.snapshot_failed(env.remote, &job, failed, now).await)
+            }
+        }
+    }
+
+    /// Ends the snapshot part-way, if any, and aborts its upload.
+    async fn end_snapshot(&mut self) {
+        if let Some((_, snapshot)) = self.engine.snapshot.take() {
+            snapshot.abort().await;
+            self.engine.pages.unpin();
+        }
+    }
+
+    /// Whether a snapshot is part-way and not waiting for its upload's parts.
+    fn snapshot_ready(&self) -> bool {
+        self.engine
+            .snapshot
+            .as_ref()
+            .is_some_and(|(_, snapshot)| !snapshot.waits)
+    }
+
+    /// Whether the snapshot's slice goes first this tick: until [`state::FAIR_SHARE`] of them
+    /// ran in a row, then the rest of the engine has a tick, as after a staged file's slices.
+    fn snapshot_owed(&mut self) -> bool {
+        let owed = self.snapshot_ready() && self.engine.snapshot_slices < state::FAIR_SHARE;
+        if !owed {
+            self.engine.snapshot_slices = 0;
+        }
+        owed
     }
 
     /// A snapshot that did not publish. When the store took the commit and
@@ -2713,6 +2808,7 @@ impl Actor {
                 // A send that waits for its upload's parts is not work to tick for: a part
                 // that ends wakes the task.
                 sync || (self.upload_ready(now) && !self.engine.in_flight.waits())
+                    || self.snapshot_ready()
                     || self.prune_ready(now).is_some()
                     || self.maintain_ready(now)
             }
@@ -2764,6 +2860,7 @@ impl Actor {
         let maintain = &self.engine.maintain;
         let turn = self.uploads_idle() || (self.fair_turn() && !maintain.snapshot_waits);
         self.running()
+            && self.engine.snapshot.is_none()
             && !self.kept.cfg.maintenance.is_one_off()
             && self.kept.tasks.ready(Task::Maintenance, now)
             && turn

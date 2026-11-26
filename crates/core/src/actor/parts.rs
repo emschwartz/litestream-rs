@@ -34,8 +34,10 @@ use crate::counts::WorkCounts;
 use crate::failstop::{Lag, WalMark};
 use crate::fault::{Next, SnapshotCause, SnapshotCounts, StopCause};
 use crate::layout::FileKey;
+use crate::maintain::Job;
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
+use crate::snapshot::Snapshotting;
 use crate::store::Denied;
 use crate::takeover::TakeoverRecord;
 use crate::upload::{InFlight, UploadState};
@@ -481,6 +483,12 @@ pub(super) struct Engine {
     /// [`super::state::FAIR_SHARE`] the WAL step goes first again. A file of many slices
     /// would otherwise keep every commit made meanwhile in the WAL until it is whole.
     pub(super) slices_ahead: u32,
+    /// The level-9 snapshot part-way to the replica, if any, and the job it is
+    /// (`crate::snapshot::Snapshotting`). In memory only, as a send is.
+    pub(super) snapshot: Option<(Job, Box<Snapshotting>)>,
+    /// Slices of the snapshot in a row: at [`super::state::FAIR_SHARE`] the rest of the engine
+    /// has the next tick, as it has after a staged file's slices.
+    pub(super) snapshot_slices: u32,
 }
 
 impl Engine {
@@ -503,6 +511,8 @@ impl Engine {
             attempted: None,
             syncs_ahead: 0,
             slices_ahead: 0,
+            snapshot: None,
+            snapshot_slices: 0,
         }
     }
 }

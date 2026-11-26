@@ -1,0 +1,9 @@
+# The engine checkpoints between two slices of a level-9 snapshot: the checkpoint ends the read
+# transaction the snapshot reads under and copies frames past its synced end into the database
+# file, so the rest of the snapshot would read pages newer than its transaction.
+name = "checkpoint-under-snapshot"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "actor::tests::sliced_snapshot::no_checkpoint_runs_while_a_snapshot_is_part_way",
+]
