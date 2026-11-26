@@ -464,7 +464,7 @@ fn short_bill() -> BTreeMap<(Request, u8), usize> {
 /// level 9), and a whole listing, one request per level, for each snapshot (level 5 is only ever
 /// listed by a whole listing) and at start. A snapshot that finds commits since its last sync
 /// takes its proof after their upload from the same decision, not from another whole listing
-/// (`docs/decisions/D243.md`). The check reads no snapshot (`docs/decisions/D252.md`).
+/// (`docs/decisions/D243.md`). The check reads no snapshot (`docs/decisions/D254.md`).
 /// Level 1 and level 2 GET one more than Go in this run (inputs read, as Go's; the bounds
 /// allow it, and the difference is not explained further).
 #[test]

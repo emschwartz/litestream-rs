@@ -669,7 +669,7 @@ pub(super) struct ShortZero {
 ///   when the level 1 to 8 file covering its lower part is removed by rule 2. This rule keeps
 ///   the first and deletes the second: the straddling file's range above the floor is covered
 ///   by files that stay, and a retained snapshot's restore starts above the floor, so nothing
-///   retained reads it (`docs/decisions/D252.md`).
+///   retained reads it (`docs/decisions/D254.md`).
 /// - The scan stops at the first young level-0 file, covered or not, where the full rule
 ///   skips an uncovered one without reading its age. Stopping earlier only deletes less.
 /// - Nothing is deleted while a kept restore point is pinned, an output is distrusted, a
