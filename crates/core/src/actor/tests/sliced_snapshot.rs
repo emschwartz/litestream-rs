@@ -266,6 +266,10 @@ fn a_snapshot_leaves_the_wal_step_a_tick_after_each_share_of_slices() {
         .append_tx(&[(pg(PAGES), vec![0x42; PS.bytes()])], nz(PAGES));
     let mut slices = 0;
     loop {
+        assert!(
+            slices <= super::super::state::FAIR_SHARE,
+            "no sync came within {slices} slices of the snapshot"
+        );
         match event(&rig.tick(&mut actor, T0)) {
             Some(Event::Sending { .. }) => slices += 1,
             Some(Event::Synced { .. }) => break,
