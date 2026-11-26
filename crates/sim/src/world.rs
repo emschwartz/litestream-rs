@@ -1326,6 +1326,15 @@ impl World {
         Ok(out)
     }
 
+    /// The digest of the staged file at `key` (`crate::store::content_digest`), read around the
+    /// wrappers; none when staging holds no file there or cannot read it.
+    #[must_use]
+    pub fn staged_digest(&self, key: &FileKey) -> Option<u64> {
+        read_all(&self.staging_raw, key)
+            .ok()
+            .map(|bytes| crate::store::content_digest(&bytes))
+    }
+
     fn read_staged(&self, key: &FileKey) -> Result<Vec<u8>, StoreError> {
         read_all(&self.staging_raw, key)
     }

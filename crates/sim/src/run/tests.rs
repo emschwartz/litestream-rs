@@ -113,3 +113,36 @@ fn a_first_sync_over_files_reports_a_loss() {
         true
     ));
 }
+
+fn staged_key(txid: u64) -> lsr_core::FileKey {
+    lsr_core::FileKey::staged(lsr_ltx::Txid::new(txid).unwrap())
+}
+
+/// A backlog staged before one of the tail's commits goes up unchanged and says nothing of the
+/// commit: its newest transaction stays the one the commit must pass, up on the replica or not.
+#[test]
+fn a_backlog_staged_before_a_tail_commit_counts_as_before_it() {
+    let mut before = tail::Before::new(None, vec![(staged_key(1), 10), (staged_key(2), 20)]);
+    let unchanged = |key: &lsr_core::FileKey| {
+        if *key == staged_key(1) {
+            vec![10, 10]
+        } else {
+            vec![20]
+        }
+    };
+    assert_eq!(before.newest(unchanged), lsr_ltx::Txid::new(2));
+    assert_eq!(before.newest(|_| Vec::new()), lsr_ltx::Txid::new(2));
+}
+
+/// A staged file the engine could not trust is written again under its name with the commit in
+/// it: once staging or the bucket holds other bytes there, it no longer counts as before the
+/// commit, and does not again once its name holds nothing.
+#[test]
+fn a_staged_file_written_again_after_a_tail_commit_counts_as_after_it() {
+    let one = lsr_ltx::Txid::new(1);
+    let mut before = tail::Before::new(one, vec![(staged_key(2), 20)]);
+    assert_eq!(before.newest(|_| vec![20]), lsr_ltx::Txid::new(2));
+    assert_eq!(before.newest(|_| vec![20, 35]), one);
+    assert_eq!(before.newest(|_| vec![20]), one);
+    assert_eq!(before.newest(|_| Vec::new()), one);
+}

@@ -127,7 +127,7 @@ pub use state::MaintainState;
 
 #[cfg(test)]
 pub(crate) use audit::restores_without;
-pub(crate) use audit::{ReadBack, ReadingBack, read_back};
+pub(crate) use audit::{ReadBack, read_back};
 
 #[cfg(test)]
 #[expect(
@@ -1063,10 +1063,11 @@ pub enum Outcome {
 /// find out (`docs/decisions/D239.md`). Go writes over whatever the key holds. On a store
 /// that said it cannot make create-only writes ([`WriteMode::Replace`]) the output replaces.
 ///
-/// When the store rejected the output's commit, the output key is deleted
-/// before returning: a listing would otherwise show it as coverage. That
-/// delete may only take the object this attempt wrote, never one the key held
-/// before, see [`leaves_bad_output`]. The key is not read first on any store: Go
+/// When the store acknowledged the output with a size other than the one sent, the output
+/// key is deleted before returning: a listing would otherwise show it as coverage, see
+/// [`leaves_bad_output`]. A checksum refusal deletes nothing (`docs/decisions/D280.md`):
+/// the key may hold an earlier attempt's output, and the read-back the actor then owes
+/// removes one that does not verify. The key is not read first on any store: Go
 /// writes its compaction output with no read either (`compactor.go:104`,
 /// `Compactor::Compact`), and the job was planned from a listing that shows every
 /// file this engine wrote (a store whose listings lag is unsupported,
@@ -1131,7 +1132,7 @@ impl Merging {
         let staged = zero
             && match local_is_replica(local, replica, inputs, sent).await {
                 Ok(staged) => staged,
-                Err(err) => return Err(judge(Err(err), output, replica, mode).await),
+                Err(err) => return Err(judge(Err(err), output, replica).await),
             };
         match open(staged, inputs, level, (local, replica), mode).await {
             Ok((job, staged)) => Ok(Self {
@@ -1141,7 +1142,7 @@ impl Merging {
                 level,
                 mode,
             }),
-            Err(err) => Err(judge(Err(err), output, replica, mode).await),
+            Err(err) => Err(judge(Err(err), output, replica).await),
         }
     }
 
@@ -1191,7 +1192,7 @@ impl Merging {
                 }
             }
         };
-        Err(judge(ended, output, replica, self.mode).await)
+        Err(judge(ended, output, replica).await)
     }
 
     /// Bytes handed to the replica so far.
@@ -1242,7 +1243,6 @@ async fn judge<R: Role>(
     result: Result<Compacted, CompactError>,
     output: FileKey,
     replica: &R,
-    mode: WriteMode,
 ) -> Outcome {
     match result {
         Ok(done) => Outcome::Compacted {
@@ -1254,7 +1254,7 @@ async fn judge<R: Role>(
         Err(CompactError::Dest(StoreError::AlreadyExists { .. })) => {
             Outcome::Replan { key: output }
         }
-        Err(CompactError::Dest(err)) if leaves_bad_output(&err, mode) => {
+        Err(CompactError::Dest(err)) if leaves_bad_output(&err) => {
             remove_rejected(replica, output, err).await
         }
         Err(
@@ -1337,24 +1337,19 @@ async fn local_is_replica<L: Role, R: Role>(
     Ok(true)
 }
 
-/// Whether a failed destination commit, of an output written under `mode`, may have left
-/// an object of this attempt under the output key that a listing would show and that does
-/// not decode.
+/// Whether a failed destination commit left an object of this attempt under the output key
+/// that a listing would show and that does not decode: the store took the commit and said it
+/// holds another size.
 ///
-/// A replacing write began after a read found the key free, so whatever a rejected commit
-/// left there is taken for this attempt's. A create-only write asked nobody first: only a
-/// commit the bucket let into the key can have left something, and a part the store
-/// rejected ended the upload before its commit asked for the key, so what the key holds
-/// then is an earlier object, never this attempt's to delete.
-const fn leaves_bad_output(err: &StoreError, mode: WriteMode) -> bool {
+/// A checksum refusal is not such proof. S3 checks a body against its signed hash before it
+/// looks at the key (`docs/decisions/D280.md`), so the key may hold an earlier attempt's
+/// output whose answer was lost, and a delete then would take the only copy retention left.
+const fn leaves_bad_output(err: &StoreError) -> bool {
     match err {
         StoreError::Corrupt { cause, .. } => match cause {
             CorruptCause::CommitSizeMismatch { removed, .. } => !*removed,
-            CorruptCause::ChecksumMismatch { part } => match mode {
-                WriteMode::Replace => true,
-                WriteMode::New => part.is_none(),
-            },
-            CorruptCause::NotARegularFile
+            CorruptCause::ChecksumMismatch { .. }
+            | CorruptCause::NotARegularFile
             | CorruptCause::TimestampOutOfRange
             | CorruptCause::BadCreatedAt => false,
         },

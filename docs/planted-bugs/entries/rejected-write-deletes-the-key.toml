@@ -1,0 +1,13 @@
+# A store's rejection of an upload's bytes is answered with a delete of the key. S3 refuses a body
+# against its signed hash before it looks at the create-only condition, so the key may hold an
+# earlier attempt's object, and the delete takes that transaction off the replica
+# (docs/decisions/D280.md).
+name = "rejected-write-deletes-the-key"
+fix = "claude/sim-snapshot-judge"
+package = "lsr-core"
+tests = [
+    "a_refused_create_only_body_deletes_nothing",
+    "a_rejected_commit_deletes_nothing_and_its_retry_reads_the_key_back",
+    "a_rejected_write_over_an_object_that_was_there_deletes_nothing",
+    "a_part_rejected_during_the_commit_deletes_nothing",
+]

@@ -9,4 +9,4 @@ diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
 +        self.engine.sliced.is_some() && turn
      }
  
-     /// A snapshot that did not publish. When the store took the commit and
+     /// A snapshot that did not publish. When the store took the commit at another size, the

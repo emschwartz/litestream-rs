@@ -62,24 +62,36 @@ fn is_rejection(tick: &Tick) -> bool {
     )
 }
 
+/// A snapshot the store took and then refused against its checksum is not deleted: S3 checks
+/// the body before the key, so the key may hold an earlier attempt's sound snapshot
+/// (`docs/decisions/D280.md`). The read-back the refusal owes finds this one sound.
 #[test]
-fn a_rejected_snapshot_is_deleted_at_once() {
+fn a_refused_snapshot_is_kept_and_read_back() {
     let (mut rig, mut actor) = before_first_snapshot();
     rig.remote
         .inner
         .inject_failure_after_publish(rejected(None));
     let tick = rig.tick(&mut actor, T0);
     assert!(is_rejection(&tick), "{tick:?}");
-    assert_eq!(
-        Rig::files(&rig.remote, Level::SNAPSHOT),
-        Vec::new(),
-        "the object the store rejected is not left listed"
+    let [kept] = Rig::files(&rig.remote, Level::SNAPSHOT)[..] else {
+        panic!("the refused snapshot is still listed");
+    };
+    assert!(
+        actor.engine.maintain.read_back_owed,
+        "the refusal owes a read-back"
     );
+    let reads = rig.remote.reads_of(&kept.key);
+    let seen = rig.follow(&mut actor, T0, 200);
+    no_stop(&seen);
+    assert!(rig.remote.reads_of(&kept.key) > reads, "it was read back");
+    assert!(!rig.remote.deleted().contains(&kept.key));
+    assert!(!actor.engine.maintain.read_back_owed);
+    assert_eq!(restored(&rig), 1);
 }
 
 /// The same, for a snapshot read from the database (the first one is built from level 0).
 #[test]
-fn a_rejected_database_snapshot_is_deleted_at_once() {
+fn a_refused_database_snapshot_is_kept_and_owes_a_read_back() {
     let (mut rig, mut actor) = before_first_snapshot();
     actor.engine.maintain.state.refuse_seed();
     rig.remote
@@ -89,7 +101,38 @@ fn a_rejected_database_snapshot_is_deleted_at_once() {
     let tick = rig.tick(&mut actor, T0);
     assert!(is_rejection(&tick), "{tick:?}");
     assert!(rig.db.reads() > reads, "it read the database");
-    assert_eq!(Rig::files(&rig.remote, Level::SNAPSHOT), Vec::new());
+    assert_eq!(Rig::files(&rig.remote, Level::SNAPSHOT).len(), 1);
+    assert!(actor.engine.maintain.read_back_owed);
+}
+
+/// A snapshot the store took damaged and then refused: the read-back finds it rotten,
+/// deletes it (the levels below still cover it) and the snapshot is taken again.
+#[test]
+fn a_damaged_snapshot_the_store_refused_is_read_back_and_taken_again() {
+    let (mut rig, mut actor) = before_first_snapshot();
+    rig.remote
+        .inner
+        .inject_failure_after_publish(rejected(None));
+    let tick = rig.tick(&mut actor, T0);
+    assert!(is_rejection(&tick), "{tick:?}");
+    let [bad] = Rig::files(&rig.remote, Level::SNAPSHOT)[..] else {
+        panic!("the refused snapshot is still listed");
+    };
+    super::audit::rot(&rig, &bad);
+    let seen = rig.follow(&mut actor, T0, 200);
+    no_stop(&seen);
+    let repaired = seen.iter().any(|tick| {
+        matches!(
+            event(tick),
+            Some(Event::Maintained {
+                event: MaintainedEvent::Repaired(key),
+                ..
+            }) if *key == bad.key
+        )
+    });
+    assert!(repaired, "{seen:?}");
+    assert_eq!(Rig::files(&rig.remote, Level::SNAPSHOT).len(), 1);
+    assert_eq!(restored(&rig), 1);
 }
 
 /// A snapshot that fails before its commit published nothing, so nothing is
@@ -115,17 +158,35 @@ fn a_snapshot_that_fails_before_its_commit_deletes_nothing() {
     assert_eq!(rig.remote.deleted(), before);
 }
 
+/// A snapshot the store took at another size than the one sent is this attempt's own, so it
+/// is deleted; when that delete fails, it goes first and holds retention.
 #[test]
-fn a_rejected_snapshot_that_cannot_be_deleted_goes_first_and_holds_retention() {
+fn a_short_snapshot_that_cannot_be_deleted_goes_first_and_holds_retention() {
     let (mut rig, mut actor) = before_first_snapshot();
     rig.remote
         .inner
-        .inject_failure_after_publish(rejected(None));
+        .inject_failure_after_publish(StoreError::Corrupt {
+            key: None,
+            cause: CorruptCause::CommitSizeMismatch {
+                wrote: 1,
+                stored: 0,
+                removed: false,
+            },
+        });
     rig.remote
         .inner
         .inject_failure(StoreOp::Delete, transient(StoreOp::Delete));
     let tick = rig.tick(&mut actor, T0);
-    assert!(is_rejection(&tick), "{tick:?}");
+    assert!(
+        matches!(
+            event(&tick),
+            Some(Event::Retrying {
+                fault: Fault::UploadAmbiguous,
+                ..
+            })
+        ),
+        "{tick:?}"
+    );
     let listed = Rig::files(&rig.remote, Level::SNAPSHOT);
     let [bad] = listed.as_slice() else {
         panic!("the rejected snapshot is still listed: {listed:?}");

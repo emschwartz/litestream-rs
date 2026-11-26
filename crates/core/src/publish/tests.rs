@@ -137,53 +137,27 @@ fn a_create_only_write_into_a_taken_key_is_refused_and_leaves_the_object() {
     assert_eq!(listed(&store), 1);
 }
 
-/// Only a rejected create-only write hands back its object, and removing it
-/// takes that key alone.
+/// A rejected write, in either mode, is reported as rejected and the commit deletes nothing:
+/// the refusal says nothing about what the key holds (`docs/decisions/D280.md`).
 #[test]
-fn only_a_rejected_create_only_write_hands_back_its_object() {
+fn a_rejected_write_is_reported_and_deletes_nothing() {
     let store = DigestLiar(MemStore::new());
-    let rejected = write(&store, b"abcd", WriteMode::New).unwrap();
-    let Err(Unpublished::Rejected(_, Some(own))) = rejected else {
-        panic!("{rejected:?}");
-    };
-    assert_eq!(own.0, key());
-    block_on(remove_rejected(&store, own)).unwrap();
-    assert_eq!(listed(&store.0), 0);
-
-    let replace = write(&store, b"abcd", WriteMode::Replace).unwrap();
-    assert!(
-        matches!(replace, Err(Unpublished::Rejected(_, None))),
-        "{replace:?}"
-    );
-    assert_eq!(listed(&store.0), 1);
-}
-
-/// A part the store reports wrong ended a multipart upload before anything was published:
-/// the commit never asked for the key, so a create-only write has no object of its own.
-#[test]
-fn a_rejected_part_hands_back_no_object() {
-    let part = StoreError::Corrupt {
-        key: Some(key()),
-        cause: CorruptCause::ChecksumMismatch {
-            part: crate::PartNumber::new(2),
-        },
-    };
     for mode in [WriteMode::New, WriteMode::Replace] {
-        let left = unpublished(part.clone(), key(), mode);
+        let rejected = write(&store, b"abcd", mode).unwrap();
         assert!(
-            matches!(left, Unpublished::Rejected(_, None)),
-            "{mode:?}: {left:?}"
+            matches!(rejected, Err(Unpublished::Rejected(_))),
+            "{mode:?}: {rejected:?}"
         );
+        assert_eq!(listed(&store.0), 1, "{mode:?}");
     }
-    let whole = StoreError::Corrupt {
-        key: Some(key()),
-        cause: CorruptCause::ChecksumMismatch { part: None },
-    };
-    let left = unpublished(whole, key(), WriteMode::New);
-    assert!(
-        matches!(left, Unpublished::Rejected(_, Some(_))),
-        "{left:?}"
-    );
+    for part in [None, crate::PartNumber::new(2)] {
+        let err = StoreError::Corrupt {
+            key: Some(key()),
+            cause: CorruptCause::ChecksumMismatch { part },
+        };
+        let left = unpublished(err, key(), WriteMode::New);
+        assert!(matches!(left, Unpublished::Rejected(_)), "{left:?}");
+    }
 }
 
 #[test]
