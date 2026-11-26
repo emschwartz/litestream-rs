@@ -498,8 +498,9 @@ fn a_store_fault_during_a_send_retries_the_file_from_its_first_byte() {
 }
 
 /// Maintenance keeps its share of the ticks while a file is in flight, and the send goes on
-/// from where it was afterwards. A compaction maintenance begins goes a slice a tick too, its
-/// slices first, so the file's next slice waits at most `FAIR_SHARE` ticks.
+/// from where it was afterwards. A compaction maintenance begins goes a slice a tick too,
+/// taking turns with the file's slices, so the file's next slice waits at most `FAIR_SHARE`
+/// ticks.
 #[test]
 fn maintenance_takes_its_turn_between_the_slices_of_a_file() {
     let (mut rig, mut actor) = caught_up_with(slicing(8));
@@ -532,11 +533,11 @@ fn maintenance_takes_its_turn_between_the_slices_of_a_file() {
         }
         seen.push(tick);
     }
-    let maintained = seen
+    let slices = seen
         .iter()
-        .filter(|tick| matches!(event(tick), Some(Event::Maintained { .. })))
+        .filter(|tick| matches!(event(tick), Some(Event::Sending { .. })))
         .count();
-    assert!(maintained >= 2, "{seen:?}");
+    assert!(slices > file_slices.len(), "no compaction slice: {seen:?}");
     let share = usize::try_from(state::FAIR_SHARE).unwrap();
     assert!(
         file_slices
