@@ -940,3 +940,89 @@ fn the_gate_vouches_for_the_lower_of_staging_and_the_replica() {
         assert_eq!(got, want, "{gate:?} over tip {tip:?}");
     }
 }
+
+/// A tick's bytes so small that the identity check's restore of the replica's state takes many
+/// ticks.
+const CHECK_SLICE: u64 = 64;
+
+fn slicing_actor() -> Actor {
+    let mut actor = go_like_actor();
+    actor.kept.cfg.upload.bytes_per_tick = std::num::NonZeroU64::new(CHECK_SLICE).unwrap();
+    actor
+}
+
+/// Ticks until the boot is done with the identity check: the ticks that read its restore on,
+/// each checked to read about a tick's bytes of the replica with the start held for the check.
+fn check_slices(rig: &mut Rig, actor: &mut Actor, limit: usize) -> (usize, Tick) {
+    // A read goes on to the end of the page or header it began in.
+    let most = CHECK_SLICE
+        .saturating_add(u64::try_from(PS.bytes().saturating_add(lsr_ltx::HEADER_LEN)).unwrap());
+    for slices in 0..limit {
+        let before = rig.remote.read_bytes();
+        let tick = rig.tick(actor, T0 + 2);
+        if !matches!(event(&tick), Some(Event::CheckingIdentity { .. })) {
+            return (slices, tick);
+        }
+        let read = rig.remote.read_bytes().saturating_sub(before);
+        assert!(slices == 0 || read <= most, "{read} bytes in one tick");
+        // The tick that read the restore's last bytes leaves it whole, waiting for the boot.
+        assert!(!actor.boot_judged());
+        assert!(actor.checking_identity() || actor.engine.identity.is_some());
+        // The tick that began the check leaves it going.
+        assert!(slices > 0 || actor.checking_identity());
+    }
+    panic!("the identity check never ended");
+}
+
+/// The identity check restores the replica's state a tick's bytes at a time, never in one tick,
+/// and the boot after it compares and decides as a check in one tick would: the database is the
+/// replica's state, so the boot snapshots above it. The check is announced once.
+#[test]
+fn the_identity_check_restores_the_replica_a_slice_a_tick() {
+    let mut rig = redeployed_with_a_new_meta_directory();
+    let mut actor = slicing_actor();
+    let (slices, boot) = check_slices(&mut rig, &mut actor, 500);
+    assert!(slices >= 2, "{slices} slices");
+    assert_eq!(rig.announced, [tx(3)]);
+    assert!(!actor.checking_identity() && actor.boot_judged());
+    assert_eq!(
+        booted(&boot),
+        Some(Some(SnapshotCause::GenerationChanged)),
+        "{boot:?}"
+    );
+    let seen = rig.follow(&mut actor, T0 + 2, 50);
+    assert!(
+        !seen.iter().any(|tick| matches!(tick, Tick::Stopped(_))),
+        "{seen:?}"
+    );
+    assert_eq!(super::restored(&rig), 3);
+}
+
+/// Another writer's file lands while the check restores the replica: this engine writes nothing
+/// there before it boots, so the newest transaction moving under the check is a second writer,
+/// and the boot stops as it would for any file nothing vouches for.
+#[test]
+fn a_replica_that_moves_under_a_sliced_identity_check_stops_the_boot() {
+    let (mut other, mut writer) = caught_up();
+    for n in 2..=4 {
+        commit_and_settle(&mut other, &mut writer, n, T0 + 1);
+    }
+    let four = FileKey::new(Level::ZERO, TxidRange::single(tx(4)));
+    let bytes = block_on(other.remote.inner.read(&four, 0, ReadLen::CHUNK)).unwrap();
+    let mut rig = redeployed_with_a_new_meta_directory();
+    let mut actor = slicing_actor();
+    for _ in 0..3 {
+        let tick = rig.tick(&mut actor, T0 + 2);
+        assert!(
+            matches!(event(&tick), Some(Event::CheckingIdentity { .. })),
+            "{tick:?}"
+        );
+    }
+    put_level_zero(&rig.remote.inner, four, &bytes);
+    let seen = rig.follow(&mut actor, T0 + 2, 500);
+    assert_eq!(
+        seen.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "{seen:?}"
+    );
+}

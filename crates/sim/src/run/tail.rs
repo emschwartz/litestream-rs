@@ -14,6 +14,12 @@
 //! And the tail may hand no more bytes to uploads the store never takes than one file in
 //! flight: a job that restarts from scratch with nothing failing wastes a slice each time.
 //!
+//! The WAL stays small through the tail ([`wal_bound`]): with no reader holding a snapshot, Go
+//! checkpoints PASSIVE after a sync that leaves the minimum of synced frames, so the next commit
+//! restarts the WAL from its start. Once a commit has reached the replica, the WAL holds at most
+//! the minimum, one commit's frames and the engine's own bump frame. An engine that stops
+//! checkpointing after a sync lets the WAL grow until the interval or the truncate threshold.
+//!
 //! [`Opts::cost`]: crate::Opts::cost
 
 use std::time::Duration;
@@ -33,6 +39,19 @@ pub const TAIL_COMMITS: u32 = 40;
 /// Simulated time between two of the tail's commits: forty of them span over six minutes, so
 /// a level-1 compaction (every 30 s) and a level-2 one (every 5 minutes) come due inside it.
 pub const TAIL_GAP: Duration = Duration::from_secs(10);
+
+/// Pages each of the tail's commits writes.
+const TAIL_COMMIT_PAGES: u8 = 2;
+
+/// The most frames the WAL may hold once one of the tail's commits reached the replica, with
+/// no reader holding a snapshot (module doc): Go's PASSIVE minimum, the commit's own frames, and
+/// the bump frame the engine writes after a checkpoint.
+#[must_use]
+pub fn wal_bound() -> u32 {
+    super::PASSIVE_PAGES
+        .saturating_add(u32::from(TAIL_COMMIT_PAGES))
+        .saturating_add(1)
+}
 
 /// Ticks one of the tail's commits may take to reach the replica before the run gives up on
 /// it, whatever the clock says: a backstop for an engine that ticks without time passing.
@@ -79,25 +98,20 @@ impl Runner {
         &mut self,
         stats: &TickStats,
         (remote_at, staging_at): (usize, usize),
-        restoring: bool,
     ) -> Result<(), Violation> {
         let remote_puts = puts_since(&self.w.remote_recorder.events(), remote_at);
         let staging_puts = puts_since(&self.w.staging_recorder.events(), staging_at);
         let allowance = self.allowance();
-        let judged = crate::cost::judge(
+        crate::cost::judge(
             &Profile::DEFAULT,
             allowance,
             (&stats.remote, remote_puts),
             (&stats.staging, staging_puts),
             &mut self.spare,
-        );
-        let judged = judged?;
+        )?;
         self.report.reach.bump("tick_cost.judged");
-        // The two defect allowances' own counts (`crate::cost::Spare`, `crate::cost::s3_rereads`):
-        // each goes to zero when its engine fix lands, and a scenario test then fails.
-        if restoring && judged > 0 {
-            self.report.reach.bump("tick_cost.boot_restore_read");
-        }
+        // The defect allowance's own count (`crate::cost::s3_rereads`): it goes to zero when
+        // its engine fix lands, and a scenario test then fails.
         if crate::cost::s3_rereads(&stats.remote) > 0 {
             self.report.reach.bump("tick_cost.s3_rereads_allowed");
         }
@@ -136,18 +150,6 @@ impl Runner {
             .fold(0_u64, |sum, info| sum.saturating_add(info.size));
         let files = u64::try_from(staged.len()).unwrap_or(u64::MAX);
         Spare::boot(&Profile::DEFAULT, (files, bytes))
-    }
-
-    /// A boot that finds nothing staged may restore the replica whole, the defect allowance
-    /// in [`Spare`]: adds it.
-    pub(super) fn allow_boot_restore(&mut self) {
-        let stored = self.w.remote_raw.stored();
-        let files = u64::try_from(stored.len()).unwrap_or(u64::MAX);
-        let bytes = stored
-            .iter()
-            .fold(0_u64, |sum, info| sum.saturating_add(info.size));
-        self.spare
-            .boot_restore(&Profile::DEFAULT.remote, files, bytes);
     }
 
     /// The newest transaction the bucket holds at any level.
@@ -209,8 +211,9 @@ impl Runner {
         let remote0 = self.w.remote_recorder.counts();
         for _ in 0..TAIL_COMMITS {
             let frontier = self.replica_frontier();
-            self.commit(2, false);
+            self.commit(TAIL_COMMIT_PAGES, false);
             let mut began = self.now();
+            let mut excused = false;
             let mut reached = false;
             let mut pending = 0;
             for _ in 0..TAIL_TICKS {
@@ -224,6 +227,7 @@ impl Runner {
                     // it, and after the retry wait the engine announced for it, if any (the
                     // fault is the world's record; the wait is the engine's own signal).
                     self.report.reach.bump("liveness.excused_by_fault");
+                    excused = true;
                     began = match stats.event {
                         Some(Event::Retrying { until, .. } | Event::Degraded { until, .. }) => {
                             until.max(self.now())
@@ -246,6 +250,18 @@ impl Runner {
                     reached = true;
                     self.report.reach.bump("liveness.judged");
                     within(Bound::CommitLagMillis, millis(waited), millis(bound))?;
+                    // A fault in the window may have failed a checkpoint, and a reader still
+                    // open blocks the WAL's restart: the bound is for a healthy WAL.
+                    if excused || !self.readers.is_empty() {
+                        self.report.reach.bump("wal_bound.excused");
+                    } else {
+                        self.report.reach.bump("wal_bound.judged");
+                        within(
+                            Bound::WalFrames,
+                            u64::from(self.w.sqlite.mx_frame()),
+                            u64::from(wal_bound()),
+                        )?;
+                    }
                     break;
                 }
                 within(Bound::CommitLagMillis, millis(waited), millis(bound))?;
@@ -260,7 +276,11 @@ impl Runner {
             self.w.clock.advance(TAIL_GAP);
         }
         let spent = crate::resources::delta(remote0, self.w.remote_recorder.counts());
-        let wasted = spent.written_bytes.saturating_sub(spent.committed_bytes);
+        // An upload still open (the snapshot the tail asked for, part-way) wasted nothing yet.
+        let wasted = spent
+            .written_bytes
+            .saturating_sub(spent.committed_bytes)
+            .saturating_sub(self.w.remote_recorder.open_bytes());
         let open = self
             .limits()
             .slice_bytes
