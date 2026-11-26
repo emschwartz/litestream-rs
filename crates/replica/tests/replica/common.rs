@@ -49,8 +49,13 @@ impl Site {
     /// A WAL-mode database holding one empty table; the application's connection is set up as an application
     /// must set every connection up.
     pub fn new() -> Self {
+        Self::named("app.db")
+    }
+
+    /// [`Self::new`] with the database file called `name`.
+    pub fn named(name: &str) -> Self {
         let dir = TempDir::new().unwrap();
-        let db = dir.path().join("app.db");
+        let db = dir.path().join(name);
         let app = Connection::open(&db).unwrap();
         app.busy_timeout(Duration::from_secs(5)).unwrap();
         app.query_row("PRAGMA journal_mode = wal", [], |_row| Ok(()))

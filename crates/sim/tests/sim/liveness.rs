@@ -107,26 +107,6 @@ fn a_boot_over_another_writer_reads_the_replica_a_slice_a_tick() {
     );
 }
 
-/// A defect allowance's test (`lsr_sim::cost::s3_rereads`, <https://github.com/emschwartz/litestream-rs/issues/478>): the S3 replica
-/// reads each staged body it puts whole again from staging, to hash it and to send it. It
-/// fails once the store hashes and sends from one read; the allowance goes with it.
-#[test]
-fn an_s3_put_reads_its_staged_body_again() {
-    let opts = Opts {
-        remote_s3: true,
-        ..Opts::default()
-    };
-    let report = match run_ops(Seed::new(1), &commits(5, 1), &opts) {
-        Ok(report) => report,
-        Err(failure) => panic!("{failure}"),
-    };
-    assert!(
-        report.reach.get("tick_cost.s3_rereads_allowed") > 0,
-        "{:?}",
-        report.reach
-    );
-}
-
 /// Commits two ticks apart, then the healthy tail: once each tail commit reaches the replica,
 /// the WAL holds no more than Go's PASSIVE minimum, the commit's frames and the engine's bump
 /// frame (`lsr_sim::run::tail::wal_bound`).

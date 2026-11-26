@@ -471,8 +471,8 @@ fn rig() -> Rig {
     let fixture = all_fixtures()
         .unwrap()
         .into_iter()
-        .find(|f| f.ends_with("small-4096") && f.to_string_lossy().contains("041a8c3"))
-        .expect("the 041a8c3 small-4096 fixture");
+        .find(|f| f.ends_with("small-4096") && f.to_string_lossy().contains("3e0fdc0"))
+        .expect("the 3e0fdc0 small-4096 fixture");
     let manifest = Manifest::load(&fixture).unwrap();
     let txid = manifest
         .targets

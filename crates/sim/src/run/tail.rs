@@ -110,11 +110,6 @@ impl Runner {
             &mut self.spare,
         )?;
         self.report.reach.bump("tick_cost.judged");
-        // The defect allowance's own count (`crate::cost::s3_rereads`): it goes to zero when
-        // its engine fix lands, and a scenario test then fails.
-        if crate::cost::s3_rereads(&stats.remote) > 0 {
-            self.report.reach.bump("tick_cost.s3_rereads_allowed");
-        }
         Ok(())
     }
 

@@ -20,7 +20,7 @@ for repo in litestream ltx; do
         exit 1
     fi
 done
-want_litestream=041a8c382c63
+want_litestream=3e0fdc0edfc6
 case "$(git -C .upstream/litestream rev-parse HEAD)" in
     "$want_litestream"*) ;;
     *)

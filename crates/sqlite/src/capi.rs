@@ -87,17 +87,30 @@ pub(crate) struct Connection {
 // holds because `Connection` is not `Sync` and every `Handle` borrows it.
 unsafe impl Send for Connection {}
 
+/// The name to give SQLite for the file `path`. The bundled SQLite is built with
+/// `SQLITE_USE_URI`, so it reads every name that starts with `file:` as a URI, and a relative
+/// path that does (`file:x?mode=memory`) would open something else than the file it names.
+/// `./` in front names the same file and is never a URI.
+fn plain_name(path: &[u8]) -> Vec<u8> {
+    if path.starts_with(b"file:") {
+        [b"./", path].concat()
+    } else {
+        path.to_vec()
+    }
+}
+
 impl Connection {
     /// Opens `path` with `flags` on the VFS named `vfs` (SQLite's default when `None`), with
     /// extended result codes on, as rusqlite and sqlx open theirs.
     pub(crate) fn open(path: &Path, flags: c_int, vfs: Option<&str>) -> Result<Self, SqliteError> {
         #[cfg(unix)]
-        let name = {
+        let bytes = {
             use std::os::unix::ffi::OsStrExt;
-            CString::new(path.as_os_str().as_bytes()).map_err(|_nul| SqliteError::BadString)?
+            path.as_os_str().as_bytes()
         };
         #[cfg(not(unix))]
-        let name = c_string(path.to_str().ok_or(SqliteError::BadString)?)?;
+        let bytes = path.to_str().ok_or(SqliteError::BadString)?.as_bytes();
+        let name = CString::new(plain_name(bytes)).map_err(|_nul| SqliteError::BadString)?;
         Self::open_c(&name, flags, vfs)
     }
 

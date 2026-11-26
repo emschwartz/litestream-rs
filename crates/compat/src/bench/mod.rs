@@ -450,7 +450,7 @@ pub fn run(args: &[OsString]) -> Result<(), CompatError> {
     machine();
     println!("minio: {}, {}-byte pages", rig.env.endpoint(), PAGE_SIZE);
     println!("{}", plan::NAPKIN);
-    let go = preserve(&rig.out, "go-041a8c3", &go_binary(GoVersion::Head)?)?;
+    let go = preserve(&rig.out, "go-3e0fdc0", &go_binary(GoVersion::Head)?)?;
     let lsr = preserve(&rig.out, "lsr", &lsr_release())?;
     let lsr_copy = preserve(&rig.out, "lsr-copy", &lsr_release())?;
     let mut generated = None;

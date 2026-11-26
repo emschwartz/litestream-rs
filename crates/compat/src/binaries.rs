@@ -22,7 +22,7 @@ pub enum GoVersion {
     V0_5_16,
     /// A later release on the block encoding.
     V0_5_18,
-    /// The pinned upstream commit 041a8c3 the research read.
+    /// The pinned upstream commit 3e0fdc0 the research read.
     Head,
 }
 
@@ -43,7 +43,7 @@ impl GoVersion {
             Self::V0_5_15 => "v0.5.15",
             Self::V0_5_16 => "v0.5.16",
             Self::V0_5_18 => "v0.5.18",
-            Self::Head => "041a8c3",
+            Self::Head => "3e0fdc0",
         }
     }
 
@@ -167,7 +167,7 @@ impl GoBuild {
     /// `mxFrame` first (`walIndexMaxFrame`, `db.go`); no release contains it yet
     /// ([`FIRST_WAL_INDEX_END_PATCH`]).
     ///
-    /// A commit or `main` counts as containing it: the pinned 041a8c3 and upstream's newest commit both
+    /// A commit or `main` counts as containing it: the pinned 3e0fdc0 and upstream's newest commit both
     /// do. A commit older than the fix is then held to the strict expectation, so it can fail
     /// loudly on the bug but never pass by an exception it should not get.
     pub fn reads_wal_index_end(&self) -> bool {
@@ -408,7 +408,7 @@ mod tests {
             ("v0.5.15", PageEncoding::Frame),
             ("v0.5.16", PageEncoding::Block),
             ("v0.5.100", PageEncoding::Block),
-            ("041a8c3", PageEncoding::Block),
+            ("3e0fdc0", PageEncoding::Block),
             ("main", PageEncoding::Block),
             ("v0.5.3-beta3", PageEncoding::Block),
         ] {
@@ -423,7 +423,7 @@ mod tests {
             ("v0.5.15", false),
             ("v0.5.16", true),
             ("v0.5.18", true),
-            ("041a8c3", true),
+            ("3e0fdc0", true),
             ("main", true),
         ] {
             assert_eq!(
@@ -442,7 +442,7 @@ mod tests {
             ("v0.5.3", true),
             ("v0.5.15", true),
             ("v0.5.18", true),
-            ("041a8c3", true),
+            ("3e0fdc0", true),
             ("main", true),
         ] {
             assert_eq!(GoBuild::new(name).vfs_reads_files(), files, "{name}");
@@ -455,7 +455,7 @@ mod tests {
             ("v0.5.0", false),
             ("v0.5.16", false),
             ("v0.5.18", false),
-            ("041a8c3", true),
+            ("3e0fdc0", true),
             ("main", true),
         ] {
             assert_eq!(GoBuild::new(name).reads_wal_index_end(), fixed, "{name}");

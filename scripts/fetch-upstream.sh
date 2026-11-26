@@ -19,5 +19,5 @@ fetch() {
     git -C ".upstream/$name" checkout --quiet --detach "$rev"
     echo "$name @ $(git -C ".upstream/$name" rev-parse --short HEAD)"
 }
-fetch litestream https://github.com/benbjohnson/litestream 041a8c382c63
+fetch litestream https://github.com/benbjohnson/litestream 3e0fdc0edfc6
 fetch ltx https://github.com/superfly/ltx v0.5.3
