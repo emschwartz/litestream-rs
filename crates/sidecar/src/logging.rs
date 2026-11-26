@@ -582,6 +582,11 @@ fn engine_line(event: &EngineEvent) -> Option<Line> {
             "comparing the database with the replica before starting",
             vec![("tip", tip.get().into())],
         ),
+        EngineEvent::StagingShort { needed, free } => (
+            LogLevel::Warn,
+            "staging disk has less free space than the database copy may need, copying anyway",
+            vec![("needed", (*needed).into()), ("free", (*free).into())],
+        ),
         EngineEvent::TakeoverWanted(record) => (
             LogLevel::Info,
             "takeover record kept before dropping staged files",

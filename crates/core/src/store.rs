@@ -606,6 +606,14 @@ pub trait ObjectStore: Send + Sync {
     /// default, so a new store or wrapper cannot drop it by saying nothing.
     fn remove_scratch(&self) -> impl Future<Output = Result<u64, StoreError>> + Send;
 
+    /// Bytes this store can still take before its disk is full, when it can say: a directory
+    /// store reports the free space of its filesystem. A store with no disk of its own (memory,
+    /// a bucket) answers `None`, the default; a wrapper forwards it. The engine asks only before
+    /// it stages a whole-database copy, to report that the copy may not fit (Go does not look).
+    fn free_bytes(&self) -> Option<u64> {
+        None
+    }
+
     /// How many items of a batch of `kind` this store runs at once. A caller
     /// asks for at most this many at a time, so its memory is this many
     /// responses. One, the default, means the batch methods are sequential.

@@ -59,6 +59,7 @@ The replicator saves each batch of changes in its working folder (the folder whe
 |---|---|---|
 | Power loss | Never syncs the WAL, so the bucket can hold commits the database then loses | Syncs the WAL before copying from it. If the disk loses them anyway, the next start takes a snapshot |
 | A write of the WAL to disk fails | Does not notice | Reports `wal_sync_failed` and retries |
+| The staging disk has less free space than a whole-database copy can take | Copies until the disk fills | Copies the same way, and first logs a warning with both sizes and reports `local_disk_full` in health until the copy is on the replica ([decisions/D252.md](decisions/D252.md)) |
 | Files are deleted from the bucket, or it is rolled back | Does not notice. Restores fail until the next snapshot | The same, and reports `remote_regressed` |
 | The WAL is damaged below the last commit | Reads it as the end of the WAL | Reports `wal_corrupt` and replicates nothing past the damage |
 | A writer stopped mid-commit left frames in the WAL | Releases through v0.5.18 can replicate them | Never reads past the last commit |
