@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 68bb77e3b..1e80cbada 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -1699,6 +1699,9 @@ impl Actor {
+         if let (Some(proof), Some((decision, mode))) = (proof, decision) {
+             return Some(self.checkpoint_unit(env, proof, decision, mode, now).await);
+         }
++        if files > 0 {
++            let _ = env.remote.list(Level::ZERO, None, PageLimit::MAX).await;
++        }
+         (files > 0).then(|| self.ran(Event::Synced { files }, now))
+     }
+ 
