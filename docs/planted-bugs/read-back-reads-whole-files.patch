@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/maintain/audit.rs b/crates/core/src/maintain/audit.rs
+index 30ee04d30..2733819a6 100644
+--- a/crates/core/src/maintain/audit.rs
++++ b/crates/core/src/maintain/audit.rs
+@@ -96,7 +96,7 @@ pub(crate) async fn read_back<R: Role>(
+     inventory: &Inventory,
+ ) -> Result<ReadBack, Fault> {
+     for info in newest_per_level(inventory) {
+-        if !ends_sound(remote, info).await? {
++        if !crate::upload::remote_verifies(remote, &info.key).await? {
+             return Ok(ReadBack::Rotten {
+                 key: info.key,
+                 covered: restores_without(inventory, &info.key),

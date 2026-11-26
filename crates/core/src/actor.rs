@@ -251,8 +251,6 @@ pub enum MaintainedEvent {
     /// The read-back after a boot found this file does not verify and deleted
     /// it: the replica's other files still restore its last transaction.
     Repaired(FileKey),
-    /// A slice of the read-back after a boot was read (`docs/decisions/D266.md`).
-    ReadBack,
     /// Nothing is due.
     Waiting {
         /// Why deletions are refused, if they are.
@@ -2499,16 +2497,6 @@ impl Actor {
         if !self.maintain_ready(now) {
             return None;
         }
-        if let Some(reading) = self.engine.reading_back.take() {
-            let read = reading.slice(env.remote, self.kept.cfg.upload.bytes_per_tick.get());
-            let tick = self.read_back_unit(env.remote, read.await, now).await;
-            // Sound: the listing the read-back began on is ticks old, so the next one plans.
-            return Some(tick.unwrap_or_else(|| {
-                self.engine.maintain.stale = true;
-                self.maintained(now);
-                self.ran_maintained(MaintainedEvent::ReadBack, 0, now)
-            }));
-        }
         if let Some(job) = self.engine.maintain.snapshot_retry.take() {
             return Some(self.snapshot_job(env, &job, now, 0).await);
         }
@@ -2532,15 +2520,10 @@ impl Actor {
         if let Some(tick) = self.listing_regressed(&inventory, now) {
             return Some(tick);
         }
-        if self.engine.maintain.read_back_owed {
-            let read = read_back(
-                env.remote,
-                &inventory,
-                self.kept.cfg.upload.bytes_per_tick.get(),
-            );
-            if let Some(tick) = self.read_back_unit(env.remote, read.await, now).await {
-                return Some(tick);
-            }
+        if self.engine.maintain.read_back_owed
+            && let Some(tick) = self.read_back_unit(env.remote, &inventory, now).await
+        {
+            return Some(tick);
         }
         let published = self.engine.upload.confirmed();
         // The planner reads the kept restore point from its state: handed over here, where
@@ -2595,25 +2578,19 @@ impl Actor {
             .then(|| self.fault(Task::Upload, Fault::RemoteRegressed, now))
     }
 
-    /// The tick a slice of the read-back a boot owes ends (see `maintain::audit`): `None` when
-    /// every newest file is sound, and the listing the slice was read on then plans the next job.
+    /// The read-back a boot owes (see `maintain::audit`). `None` when every
+    /// newest file is sound: the same listing then plans the next job.
     async fn read_back_unit<R: Role>(
         &mut self,
         remote: &R,
-        read: Result<ReadBack, Fault>,
+        inventory: &Inventory,
         now: Timestamp,
     ) -> Option<Tick> {
-        let (key, covered) = match read {
+        let (key, covered) = match read_back(remote, inventory).await {
             Ok(ReadBack::Sound) => {
                 self.engine.maintain.read_back_owed = false;
                 self.engine.maintain.suspect = None;
                 return None;
-            }
-            Ok(ReadBack::Reading(reading)) => {
-                self.engine.reading_back = Some(reading);
-                self.engine.maintain.passed_over = 0;
-                self.maintained(now);
-                return Some(self.ran_maintained(MaintainedEvent::ReadBack, 0, now));
             }
             Ok(ReadBack::Rotten { key, covered }) => (key, covered),
             Err(fault) => return Some(self.fault(Task::Maintenance, fault, now)),
@@ -3107,7 +3084,7 @@ impl Actor {
             && !self.kept.cfg.maintenance.is_one_off()
             && self.kept.tasks.ready(Task::Maintenance, now)
             && turn
-            && (maintain.wants_listing(now) || self.engine.reading_back.is_some())
+            && maintain.wants_listing(now)
     }
 
     /// Whether prune and maintenance take the next unit ahead of uploads.

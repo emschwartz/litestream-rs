@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/maintain/audit.rs b/crates/core/src/maintain/audit.rs
+index 30ee04d30..2b390e0bd 100644
+--- a/crates/core/src/maintain/audit.rs
++++ b/crates/core/src/maintain/audit.rs
+@@ -124,6 +124,9 @@ async fn ends_sound<R: Role>(remote: &R, info: &FileInfo) -> Result<bool, Fault>
+     else {
+         return Ok(false);
+     };
++    if header.txids() == info.key.range() {
++        return Ok(true);
++    }
+     let Some(at) = info
+         .size
+         .checked_sub(TAIL.get())
