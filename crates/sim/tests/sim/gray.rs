@@ -266,3 +266,46 @@ fn an_age_trip_inside_a_hung_tick_is_dated_where_the_tick_ended() {
         report.trips
     );
 }
+
+/// A drain outlives its grace because calls hung before it, while the app holds a spilled
+/// transaction. The operator runs the engine until it is idle and asks again, but with the
+/// write lock held the engine's checkpoint is deferred every second and it is never idle:
+/// the harness waited for an idle tick that could not come (found by nightly seed
+/// 0x126d69288c4d). A deferred checkpoint is as idle as the engine gets until the app lets go.
+#[test]
+fn a_drain_past_its_grace_under_a_spill_is_asked_again() {
+    use lsr_core::{SourceError, SourceOp};
+    let ops = [
+        Op::StoreFault {
+            target: Target::Remote,
+            op: StoreOp::Delete,
+            ahead: 0,
+            shape: FaultShape::Hang,
+        },
+        Op::StoreFault {
+            target: Target::Remote,
+            op: StoreOp::Upload,
+            ahead: 0,
+            shape: FaultShape::Hang,
+        },
+        Op::Shutdown,
+        Op::Hold {
+            hold: Hold::Hang(StoreOp::Upload),
+            ticks: 33,
+        },
+        Op::Shutdown,
+        Op::Spill,
+        Op::EnvFault(lsr_sim::EnvFault::Source(
+            SourceOp::Committed,
+            SourceError::Busy,
+        )),
+        Op::Shutdown,
+    ];
+    let opts = Opts {
+        after_restart: lsr_sim::AfterRestart::Busy,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(Seed::new(0x126d_6928_8c4d), &ops, &opts) {
+        panic!("{failure}");
+    }
+}

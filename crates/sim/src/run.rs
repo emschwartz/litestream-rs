@@ -1575,9 +1575,13 @@ impl Runner {
                 // runs until it is idle, and the drain is asked again. Draining at once would
                 // send the same backlog from its start each time and, once a backlog takes
                 // longer than the grace to send, never end (seen once I/O cost time).
+                // An app that holds the write lock (a spilled transaction) keeps the engine's
+                // checkpoint deferred, which is as idle as the engine gets until it lets go.
                 Step::Stopped(StopCause::Shutdown) => {
                     self.reboot();
-                    self.settle(|event| matches!(event, Event::Idle))?;
+                    self.settle(|event| {
+                        matches!(event, Event::Idle | Event::CheckpointDeferred { .. })
+                    })?;
                     self.actor
                         .begin_shutdown(self.actor.shutdown_deadline(self.now()));
                 }
