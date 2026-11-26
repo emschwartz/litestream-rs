@@ -2697,7 +2697,9 @@ impl Runner {
         let mut settled = false;
         // A tick that sent a slice made progress a file's size bounds: a level-9 snapshot
         // written after the boot goes a slice a tick, so its slices do not count against the
-        // settle budget; the drain's tick cap bounds them.
+        // settle budget; the drain's tick cap bounds them. A tick that found its upload waiting
+        // for a part is part of the same sending (the store wakes a real driver when the part
+        // lands), so it counts as a slice too (docs/decisions/D284.md).
         let (mut ticks, mut slices) = (0_u32, 0_u32);
         while ticks < SETTLE_TICKS && slices < DRAIN_TICKS {
             let spins = self.report.spins;
@@ -2705,7 +2707,8 @@ impl Runner {
             if self.ends_idle(&step)? {
                 return Ok(());
             }
-            if matches!(stats.event, Some(Event::Sending { .. })) {
+            let part_wait = matches!(stats.event, Some(Event::Idle)) && self.actor.awaits_parts();
+            if part_wait || matches!(stats.event, Some(Event::Sending { .. })) {
                 slices = slices.saturating_add(1);
             } else {
                 ticks = ticks.saturating_add(1);
