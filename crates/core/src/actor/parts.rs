@@ -31,6 +31,7 @@ use super::state::{Live, Maintain, Phase, Tasks};
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
 use crate::counts::WorkCounts;
+use crate::created_at::Known;
 use crate::failstop::{Lag, WalMark};
 use crate::fault::{Next, SnapshotCause, SnapshotCounts, StopCause};
 use crate::layout::FileKey;
@@ -39,7 +40,7 @@ use crate::position::Position;
 use crate::store::Denied;
 use crate::takeover::TakeoverRecord;
 use crate::upload::{InFlight, UploadState};
-use crate::witness::Witnesses;
+use crate::witness::{Sent, Witnesses};
 
 /// Whether the actor was asked to stop, which no rebuild forgets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -180,6 +181,9 @@ pub(super) struct Kept {
     /// permission, and the process does not ask again: the sweep is best effort. Kept across
     /// rebuilds.
     pub(super) scratch_sweep_denied: bool,
+    /// Since when the staging disk had less free space than the newest whole-database copy
+    /// could take, while that copy may still be in staging: a report (`Actor::degraded`).
+    pub(super) staging_short: Option<Timestamp>,
     /// Whether this process may still try the local course (`super::local`). Kept across
     /// rebuilds: the try reads every staged file, so it is made once.
     pub(super) local: LocalTry,
@@ -216,6 +220,7 @@ impl Kept {
             doubt_baseline: None,
             read_lock_violations: 0,
             scratch_sweep_denied: false,
+            staging_short: None,
             local: LocalTry::Open,
         }
     }
@@ -254,6 +259,7 @@ impl Kept {
             doubt_baseline: _,
             read_lock_violations,
             scratch_sweep_denied,
+            staging_short,
             local,
         } = self;
         Self {
@@ -289,6 +295,7 @@ impl Kept {
             doubt_baseline: None,
             read_lock_violations: *read_lock_violations,
             scratch_sweep_denied: *scratch_sweep_denied,
+            staging_short: *staging_short,
             local: *local,
         }
     }
@@ -467,6 +474,16 @@ pub(super) struct Engine {
     /// The uploader's tokens for the pending staged files (`crate::witness`):
     /// held in memory only, so a new engine witnesses again at boot.
     pub(super) witnesses: Witnesses,
+    /// The tokens of the staged files this engine put on the replica and has not pruned:
+    /// what a level-1 compaction knows of the replica's copies without reading them.
+    pub(super) sent: Sent,
+    /// The created-at times of the files this engine put, as the store answered: what
+    /// retention ages them by without asking again.
+    pub(super) known: Known,
+    /// When the last sync step began, for [`super::ActorConfig::sync_interval`].
+    pub(super) synced_at: Option<Timestamp>,
+    /// When the sync step this tick held back may run: the tick's wake.
+    pub(super) sync_due: Option<Timestamp>,
     /// The newest level-0 transaction this engine sent a put for. Past what a listing or a
     /// commit confirmed, only its own puts whose answer was lost can be on the replica: a
     /// boot's listing showed everything earlier processes put. So a takeover record before
@@ -500,6 +517,10 @@ impl Engine {
             pruned: None,
             dropped_through: None,
             witnesses: Witnesses::new(),
+            sent: Sent::default(),
+            known: Known::default(),
+            synced_at: None,
+            sync_due: None,
             attempted: None,
             syncs_ahead: 0,
             slices_ahead: 0,

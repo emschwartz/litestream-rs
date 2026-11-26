@@ -63,7 +63,9 @@ lsr-store-s3 = { git = "https://github.com/emschwartz/litestream-rs" }
 ```rust
 use std::{path::Path, sync::Arc, time::Duration};
 
-use lsr_replica::{Booted, Config, Replicator, Stopped};
+use lsr_replica::{
+    Config, IfMissing, Readiness, Replicator, StartOptions, StopOutcome, restore_if_missing,
+};
 use lsr_store_s3::{BucketName, CredentialChain, Endpoint, Prefix, S3Config, S3Store};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -76,11 +78,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let keys = CredentialChain::from_process().resolve()?;
     let store = Arc::new(S3Store::resolved(config, &keys)?);
+    let db = Path::new("app.db");
+    let replication = Config::default();
+
+    // On a new machine, restore the newest backup; on a first deploy there is none.
+    let first_start = restore_if_missing(&*store, db, &replication)? == IfMissing::EmptyReplica;
 
     // Start before the application opens its own connections.
-    let replicator = Replicator::start(Path::new("app.db"), store, Config::default())?;
-    match replicator.wait_booted(Duration::from_secs(30)) {
-        Booted::Booted => {}
+    let options = StartOptions {
+        config: replication,
+        create_if_missing: first_start,
+        ..StartOptions::default()
+    };
+    let replicator = Replicator::start(db, store, options)?;
+    match replicator.ready(Duration::from_secs(30)).wait() {
+        Readiness::Ready => {}
         other => return Err(format!("replication did not start: {other:?}").into()),
     }
 
@@ -88,7 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // At shutdown, after the application's connections close.
     match replicator.stop(Duration::from_secs(30)).wait() {
-        Stopped::Drained { .. } => Ok(()),
+        StopOutcome::Drained { .. } => Ok(()),
         other => Err(format!("not everything reached the replica: {other:?}").into()),
     }
 }

@@ -29,6 +29,7 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 | The S3 permissions Litestream's guide publishes | Work. litestream-rs also tries to list and abort open multipart uploads at start, and skips that sweep, with a warning, when the policy refuses it ([s3-permissions.md](s3-permissions.md)) |
 | The store is down at start, with `hold-start` (litestream-rs only; Go never holds writes) | Starts the application at once | Holds writes while boot attempts fail, up to 15 seconds from the first failure, then releases them and starts the `-exec` child. One failed attempt does not release, because the next may find another writer ([decisions/D207.md](decisions/D207.md)) |
 | `replicate` and `restore` fail | Exit 1 |
+| An upload's bytes are damaged on the way to S3 | Every request is signed with the SHA-256 of its body, and S3 refuses a body that does not match it, so nothing is stored and the upload is tried again. Content-MD5 goes only on deletes, and the ETag S3 answers is not compared with anything. litestream-rs also checks each part's bytes, read again from the staged file to be sent, against the first read ([decisions/D250.md](decisions/D250.md)) |
 
 ### Files waiting to upload at a restart
 
@@ -58,6 +59,7 @@ The replicator saves each batch of changes in its working folder (the folder whe
 |---|---|---|
 | Power loss | Never syncs the WAL, so the bucket can hold commits the database then loses | Syncs the WAL before copying from it. If the disk loses them anyway, the next start takes a snapshot |
 | A write of the WAL to disk fails | Does not notice | Reports `wal_sync_failed` and retries |
+| The staging disk has less free space than a whole-database copy can take | Copies until the disk fills | Copies the same way, and first logs a warning with both sizes and reports `local_disk_full` in health until the copy is on the replica ([decisions/D252.md](decisions/D252.md)) |
 | Files are deleted from the bucket, or it is rolled back | Does not notice. Restores fail until the next snapshot | The same, and reports `remote_regressed` |
 | The WAL is damaged below the last commit | Reads it as the end of the WAL | Reports `wal_corrupt` and replicates nothing past the damage |
 | A writer stopped mid-commit left frames in the WAL | Releases through v0.5.18 can replicate them | Never reads past the last commit |
@@ -70,6 +72,7 @@ The replicator saves each batch of changes in its working folder (the folder whe
 | The S3 provider has no conditional writes | Does not use them | Runs as Go does, and reports `conditional_writes_unsupported` |
 | `restore` over an existing database | Deletes the old file first | Keeps the old file until the new one is complete and checked. One open exception: after a restore that was killed at its last step, `-force` rewrites the database in place |
 | `restore` by URL to a time after the newest file | Refuses | Restores the newest state |
+| `restore` over a store with a round trip of 50 to 100 ms | Opens each plan file in turn; a later upstream release opens up to 32 bodies at once ([upstream#1568](https://github.com/benbjohnson/litestream/pull/1568)) | Opens each plan file in turn, so a restore costs the number of files times one round trip before bandwidth counts: about 15 to 30 s for 300 files. Not yet measured here, and a read-ahead waits for that measurement ([#326](https://github.com/emschwartz/litestream-rs/issues/326)) |
 | `restore` leaves a record for the replicator that starts next | Leaves only the database | Leaves only the database too, unless a config names the restored path (the one `-config`, `$LITESTREAM_CONFIG` or `/etc/litestream.yml` names): then it writes the takeover record in that database's working folder (its `meta-path`, else `.<name>-litestream` beside it) and prints `takeover recorded through <txid>`, so the replicator started on it builds on the bucket it came from. A backup or a copy no config names gets no folder. If such a file is replicated later and the working folder is new, the start compares it with the bucket and stops with `other_writer` when it cannot vouch for it; `lsr trust-local` is the one command that clears it ([decisions/D215.md](decisions/D215.md)) |
 | A config shared with Go carries a `litestream-rs:` section | Warns once at each start (`configuration contains unrecognized or duplicate key`, `line N: field litestream-rs not found in type main.Config`) and ignores it, so the same file starts either program | Reads it |
 | An environment variable in the config that is not set | Expands to nothing and says nothing, wherever it stands in the file, a YAML comment included | Expands to nothing as Go does. Warns once per name when a key or value reads it; a reference only in a comment is silent |

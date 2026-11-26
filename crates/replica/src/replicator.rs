@@ -1,7 +1,7 @@
 //! The handle, the state it shares with its thread, and the stop's outcome.
 //!
 //! [`Shared`] is everything the thread and the handles both touch: a [`State`] the thread
-//! writes after every tick (read by `health`, `wait_booted` and [`FinalSync`] under one lock,
+//! writes after every tick (read by `health`, `wait_booted` and [`StopFuture`] under one lock,
 //! never across I/O), a condition variable signalled with each write, and the pending commands.
 //! Commands are not a queue but slots, each idempotent (stop with the earliest deadline asked,
 //! a snapshot asked, the newest event sink), so they are bounded by construction; setting one
@@ -29,12 +29,12 @@ use std::{fmt, io};
 
 use lsr_core::{Clock, Gate, StopCause, Task, Unfinished, blocks_writes};
 use lsr_ltx::Timestamp;
-use lsr_sqlite::{DatabaseFile, Sqlite, SqliteConfig, WriteGate, WritesHeld};
+use lsr_sqlite::{ConnectionSetup, DatabaseFile, Sqlite, SqliteConfig, WriteGate, WritesHeld};
 
 use crate::config::Config;
 use crate::error::StartError;
 use crate::events::EventSink;
-use crate::health::{Booted, Gone, Health, Phase, Stopped, Writes};
+use crate::health::{FailStop, Gone, Health, Phase, Readiness, StopOutcome, Writes};
 use crate::meta::{MetaLock, read_takeover};
 use crate::readers::ReaderGuard;
 use crate::runtime::{CALLER_SLICE, Park, Runtime, later, lock};
@@ -48,7 +48,7 @@ pub(crate) struct State {
     /// The first boot finished.
     pub(crate) booted: bool,
     /// How the thread ended; set once.
-    pub(crate) outcome: Option<Stopped>,
+    pub(crate) outcome: Option<StopOutcome>,
     /// When the tick now running began; `None` between ticks.
     pub(crate) tick_began: Option<Timestamp>,
     /// What is not on the replica, as of the last tick.
@@ -186,6 +186,35 @@ impl Shared {
         }
     }
 
+    /// Waits until `done` holds for a health snapshot or `deadline` passes. The predicate runs
+    /// with no lock held, so it may call any method of the handle, `health()` included.
+    fn wait_for_health(
+        &self,
+        deadline: Timestamp,
+        done: impl Fn(&Health) -> bool,
+    ) -> Option<Health> {
+        loop {
+            let health = {
+                let state = lock(&self.state);
+                let died = state.outcome.is_none() && self.thread_died();
+                snapshot(&state, died, &self.meters)
+            };
+            if done(&health) {
+                return Some(health);
+            }
+            if self.clock.now() >= deadline {
+                return None;
+            }
+            // A change between the snapshot and this wait is seen at the latest after one slice.
+            let state = lock(&self.state);
+            drop(
+                self.changed
+                    .wait_timeout(state, CALLER_SLICE)
+                    .unwrap_or_else(PoisonError::into_inner),
+            );
+        }
+    }
+
     /// Takes this replicator out of the registry, if it is the one registered.
     pub(crate) fn unregister(self: &Arc<Self>) {
         let mut active = lock(&ACTIVE);
@@ -198,16 +227,16 @@ impl Shared {
     }
 
     /// The thread's last act: the outcome, out of the registry, every waiter woken.
-    pub(crate) fn finish(self: &Arc<Self>, outcome: Stopped) {
+    pub(crate) fn finish(self: &Arc<Self>, outcome: StopOutcome) {
         self.unregister();
         self.update(|state| {
             let outcome = *state.outcome.get_or_insert(outcome);
             state.health.phase = match outcome {
-                Stopped::Drained { .. } | Stopped::DeadlineReached { .. } => {
+                StopOutcome::Drained { .. } | StopOutcome::DeadlineReached { .. } => {
                     Phase::Stopped(StopCause::Shutdown)
                 }
-                Stopped::Stopped(cause) => Phase::Stopped(cause),
-                Stopped::Gone(gone) => Phase::Gone(gone),
+                StopOutcome::Stopped(cause) => Phase::Stopped(cause),
+                StopOutcome::Gone(gone) => Phase::Gone(gone),
             };
             state.tick_began = None;
         });
@@ -264,6 +293,27 @@ impl fmt::Debug for Replicator {
     }
 }
 
+/// How [`Replicator::start`] starts a replicator. Each field's default is the one a start
+/// without it gets: `StartOptions { config, ..StartOptions::default() }`.
+#[derive(Default)]
+#[expect(missing_debug_implementations, reason = "the event sink is not Debug")]
+pub struct StartOptions {
+    /// The configuration.
+    pub config: Config,
+    /// Every source of time, waiting and chance; [`Runtime::system`] when `None`.
+    pub runtime: Option<Runtime>,
+    /// The event sink, in place before the thread starts, so it sees every event, the first
+    /// boot's included. A sink set later with [`Replicator::set_events`] sees only what comes
+    /// after the thread picks it up, which may be after the first boot.
+    pub events: Option<Box<dyn EventSink>>,
+    /// Creates an empty database in WAL mode when nothing is at the path, so a first start
+    /// against an empty replica ([`crate::IfMissing::EmptyReplica`]) replicates from scratch,
+    /// as Go's does. Without it a missing database is [`StartError::Open`] with `NotFound`.
+    /// The page size of a database created here is SQLite's default: an application that wants
+    /// another creates the database itself before the start.
+    pub create_if_missing: bool,
+}
+
 /// Shared by every clone of one replicator; its drop is the last handle's.
 struct LastHandle {
     shared: Arc<Shared>,
@@ -278,52 +328,33 @@ impl Drop for LastHandle {
 }
 
 impl Replicator {
-    /// Opens the replication connections, takes the read transaction that pins the WAL,
-    /// starts the thread, and returns. The first boot (listing the replica, recovering the
-    /// position) runs on the thread afterwards and shows in [`Replicator::health`]; no store
-    /// call happens on the caller's thread. Call it before the application's connection pool opens.
+    /// Opens the replication connections for the database at `database`, takes the read
+    /// transaction that pins the WAL, starts the thread replicating to `store`, and returns.
+    /// The first boot (listing the replica, recovering the position) runs on the thread
+    /// afterwards and shows in [`Replicator::health`]; no store call happens on the caller's
+    /// thread. Call it before the application's connection pool opens.
     ///
-    /// If a replicator for the same file (device and inode, not path) is still draining in
-    /// this process, waits for it, up to its shutdown grace.
+    /// It blocks: it opens SQLite, and if a replicator for the same file (device and inode, not
+    /// path) is still draining in this process, it waits for it, up to its shutdown grace. An
+    /// async application calls it from a blocking task (`spawn_blocking`).
     ///
     /// # Errors
     /// [`StartError`]; nothing is left open or pinned.
     pub fn start(
         database: &Path,
         store: Arc<dyn DynStore>,
-        config: Config,
+        options: StartOptions,
     ) -> Result<Self, StartError> {
-        Self::start_with(database, store, config, Runtime::system())
-    }
-
-    /// [`Replicator::start`] with every source of time, waiting and chance supplied.
-    ///
-    /// # Errors
-    /// As [`Replicator::start`].
-    pub fn start_with(
-        database: &Path,
-        store: Arc<dyn DynStore>,
-        config: Config,
-        runtime: Runtime,
-    ) -> Result<Self, StartError> {
-        Self::start_inner(database, store, config, runtime, None)
-    }
-
-    /// [`Replicator::start_with`] with the event sink in place before the thread starts, so
-    /// it sees every event, the first boot's included. A sink set later with
-    /// [`Replicator::set_events`] sees only what comes after the thread picks it up, which
-    /// may be after the first boot.
-    ///
-    /// # Errors
-    /// As [`Replicator::start`].
-    pub fn start_with_events(
-        database: &Path,
-        store: Arc<dyn DynStore>,
-        config: Config,
-        runtime: Runtime,
-        events: Box<dyn EventSink>,
-    ) -> Result<Self, StartError> {
-        Self::start_inner(database, store, config, runtime, Some(events))
+        if options.create_if_missing && !database.exists() {
+            lsr_sqlite::create_database(database)?;
+        }
+        Self::start_inner(
+            database,
+            store,
+            options.config,
+            options.runtime.unwrap_or_else(Runtime::system),
+            options.events,
+        )
     }
 
     fn start_inner(
@@ -335,9 +366,9 @@ impl Replicator {
     ) -> Result<Self, StartError> {
         let open = |err: io::Error| StartError::Open { kind: err.kind() };
         let file = DatabaseFile::of(database).map_err(open)?;
-        let meta = config.meta_dir_for(database).ok_or(StartError::Open {
-            kind: io::ErrorKind::InvalidInput,
-        })?;
+        let meta = config
+            .meta_dir_for(database)
+            .ok_or(StartError::NoFileName)?;
         let shared = Arc::new(Shared::new(file, &config, &runtime));
         register(&shared)?;
         let started = Self::launch(&shared, database, &meta, store, config, runtime, events);
@@ -415,16 +446,16 @@ impl Replicator {
     /// the first snapshot taken), or cannot be, or until `within` passes on the replicator's
     /// clock: [`Replicator::ready`] for a caller without async.
     #[must_use]
-    pub fn wait_booted(&self, within: Duration) -> Booted {
+    pub fn wait_booted(&self, within: Duration) -> Readiness {
         if self.shared.forked() {
-            return Booted::Gone(Gone::Forked);
+            return Readiness::Gone(Gone::Forked);
         }
         settle_boot(&self.shared, later(self.shared.clock.now(), within))
     }
 
     /// Resolves once the replicator is ready: the first boot listed the replica and decided how
     /// this start proceeds (continue from a position, or snapshot for a named cause), so the
-    /// write hold that covers it is over (`Booted::Booted`). Or once it cannot be: the boot
+    /// write hold that covers it is over (`Readiness::Ready`). Or once it cannot be: the boot
     /// keeps failing (`Degraded`), the replicator stopped, its thread is gone, or `within`
     /// passed on the replicator's clock (`TimedOut`). It answers as
     /// [`Replicator::wait_booted`] does. The future needs no runtime: `.await` it or call
@@ -449,7 +480,7 @@ impl Replicator {
         let deadline = later(self.shared.clock.now(), within);
         let watched = Watched::new(&self.shared, deadline, settle_boot, "lsr-ready");
         if self.shared.forked() {
-            return Ready(watched.answered(Booted::Gone(Gone::Forked)));
+            return Ready(watched.answered(Readiness::Gone(Gone::Forked)));
         }
         Ready(watched)
     }
@@ -461,25 +492,21 @@ impl Replicator {
             return None;
         }
         let deadline = later(self.shared.clock.now(), within);
-        let meters = Arc::clone(&self.shared.meters);
-        self.shared.wait_for(Some(deadline), |state, died| {
-            let health = snapshot(state, died, &meters);
-            done(&health).then_some(health)
-        })
+        self.shared.wait_for_health(deadline, done)
     }
 
     /// Stops after syncing and uploading everything committed. The deadline is the earlier of
     /// this call's and any earlier stop's, so a second stop with a zero wait shortens a drain.
-    /// The future needs no runtime: `.await` it or call [`FinalSync::wait`]. It resolves at the
+    /// The future needs no runtime: `.await` it or call [`StopFuture::wait`]. It resolves at the
     /// deadline on the caller's side even if the thread is still inside a request (which can
     /// take up to that request's own deadline); the thread then finishes in the background.
-    pub fn stop(&self, within: Duration) -> FinalSync {
+    pub fn stop(&self, within: Duration) -> StopFuture {
         if self.shared.forked() {
-            return FinalSync::ready(&self.shared, Stopped::Gone(Gone::Forked));
+            return StopFuture::ready(&self.shared, StopOutcome::Gone(Gone::Forked));
         }
         let deadline = later(self.shared.clock.now(), within);
         self.shared.ask_stop(deadline);
-        FinalSync::new(&self.shared, deadline)
+        StopFuture::new(&self.shared, deadline)
     }
 
     /// A copy of the replicator's state.
@@ -528,7 +555,7 @@ impl Replicator {
     /// Sends every event from the thread's next turn on to `sink`, replacing the sink before
     /// it. Events the thread emitted before it took the sink, the first boot's among them,
     /// went to the sink before it (or nowhere): give the first sink to
-    /// [`Replicator::start_with_events`] to see them all.
+    /// [`StartOptions::events`] to see them all.
     pub fn set_events(&self, sink: Box<dyn EventSink>) {
         self.shared.command(|commands| commands.sink = Some(sink));
     }
@@ -540,45 +567,45 @@ impl Replicator {
         ReaderGuard::new(&self.shared.readers)
     }
 
-    /// The database file this replicator follows, for [`crate::app_connection_raw`].
-    #[must_use]
-    pub fn database(&self) -> &DatabaseFile {
-        &self.shared.database
-    }
-
-    /// Whether the replicator holds the application's writes now, as a handle that follows
-    /// it: what [`crate::app_connection_raw`] gives an application connection's busy handler.
-    /// [`Health::writes`] says the same, with the reason.
-    #[must_use]
-    pub fn writes_held(&self) -> WritesHeld {
-        self.shared.writes_held.clone()
-    }
-
-    /// Optional setup for one of the application's connections: checks that it opens this
-    /// replicator's database (device and inode), sets `wal_autocheckpoint = 0`, and installs a
-    /// busy handler that makes a write fail at once while the replicator holds the
-    /// application's writes, instead of after the connection's busy timeout. Otherwise the
-    /// handler waits as SQLite's default one does, for the busy timeout the connection had
-    /// when this was called.
+    /// What each of the application's connections may be set up with
+    /// ([`ConnectionSetup::apply`], or [`ConnectionSetup::apply_raw`] on a raw handle from
+    /// sqlx, diesel or its own FFI): it checks that the connection opens this replicator's
+    /// database (device and inode), sets `wal_autocheckpoint = 0`, and installs a busy handler
+    /// that makes a write fail at once while the replicator holds the application's writes,
+    /// instead of after the connection's busy timeout. Otherwise the handler waits as SQLite's
+    /// default one does, for the busy timeout the connection had when it was set up.
     ///
     /// Skipping it is safe. Fail-stop holds writes with a write transaction of its own
     /// ([`Health::writes`]), which stops every writer whether or not it was set up, in this
     /// process or another: a connection not set up here meets "database is locked" after its
     /// busy timeout, and runs automatic checkpoints, which cost the replica nothing
     /// ([`crate::Health::app_notice`]). Setting `PRAGMA busy_timeout` afterwards replaces the
-    /// handler and loses only the fast failure. SQLite's own error is not changed: an
-    /// application that wants to say more listens for `Event::WritesBlocked`.
+    /// handler and loses only the fast failure. When every connection is set up, set
+    /// `Config::app_autocheckpoint` to `None` so the replicator expects no application
+    /// checkpoints. SQLite's own error is not changed: an application that wants to say more
+    /// listens for `Event::WritesBlocked`.
+    ///
+    /// The value is cheap to clone, `Send` and `'static`, so a pool's per-connection callback
+    /// captures it; it never blocks.
+    #[must_use]
+    pub fn connection_setup(&self) -> ConnectionSetup {
+        ConnectionSetup::new(
+            self.shared.database.clone(),
+            self.shared.writes_held.clone(),
+        )
+    }
+
+    /// [`Replicator::connection_setup`] applied to one rusqlite connection.
     ///
     /// # Errors
-    /// [`lsr_sqlite::SetupError`]: the connection has no file or opens another one, or a
-    /// setting failed.
+    /// [`crate::SetupError`]: the connection has no file or opens another one, or a setting
+    /// failed.
     #[cfg(feature = "rusqlite")]
     pub fn app_connection(
         &self,
         conn: &rusqlite::Connection,
     ) -> Result<(), lsr_sqlite::SetupError> {
-        lsr_sqlite::app_connection_for(conn, &self.shared.database)?;
-        lsr_sqlite::fail_fast_while(conn, &self.shared.writes_held)
+        self.connection_setup().apply(conn)
     }
 }
 
@@ -591,63 +618,68 @@ fn snapshot(state: &State, died: bool, meters: &Meters) -> Health {
     health
 }
 
-fn boot_answer(state: &State, died: bool) -> Option<Booted> {
+fn boot_answer(state: &State, died: bool) -> Option<Readiness> {
     if died {
-        return Some(Booted::Gone(Gone::ThreadDied));
+        return Some(Readiness::Gone(Gone::ThreadDied));
     }
     match state.outcome {
-        Some(Stopped::Gone(gone)) => return Some(Booted::Gone(gone)),
-        Some(Stopped::Stopped(cause)) => return Some(Booted::Stopped(cause)),
+        Some(StopOutcome::Gone(gone)) => return Some(Readiness::Gone(gone)),
+        Some(StopOutcome::Stopped(cause)) => return Some(Readiness::Stopped(cause)),
         // A drain before the first boot finished is answered by the phase below, which the
         // outcome set to `Stopped(Shutdown)` under the same lock.
-        Some(Stopped::Drained { .. } | Stopped::DeadlineReached { .. }) | None => {}
+        Some(StopOutcome::Drained { .. } | StopOutcome::DeadlineReached { .. }) | None => {}
     }
     // Ready once the boot is judged too: until then writes are held (`Gate::Pending`), so an
     // application told it may go would meet "database is locked".
-    if state.booted && state.health.held_by.gate != Gate::Pending {
-        return Some(Booted::Booted);
+    if state.booted && state.health.fail_stop != FailStop::Pending {
+        return Some(Readiness::Ready);
     }
     if let Phase::Stopped(cause) = state.health.phase {
-        return Some(Booted::Stopped(cause));
+        return Some(Readiness::Stopped(cause));
     }
     state
         .health
         .task(Task::Sync)
-        .map(|degraded| Booted::Degraded(degraded.cause))
+        .map(|degraded| Readiness::Degraded(degraded.cause))
 }
 
 /// [`boot_answer`] by `deadline`, blocking the calling thread.
-fn settle_boot(shared: &Shared, deadline: Timestamp) -> Booted {
+fn settle_boot(shared: &Shared, deadline: Timestamp) -> Readiness {
     shared
         .wait_for(Some(deadline), boot_answer)
-        .unwrap_or(Booted::TimedOut)
+        .unwrap_or(Readiness::TimedOut)
 }
 
 /// The end of a stop, as the thread reports it or, at the deadline, as the caller sees it.
-fn stop_answer(state: &State, died: bool, now: Timestamp, deadline: Timestamp) -> Option<Stopped> {
+fn stop_answer(
+    state: &State,
+    died: bool,
+    now: Timestamp,
+    deadline: Timestamp,
+) -> Option<StopOutcome> {
     if let Some(outcome) = state.outcome {
         return Some(outcome);
     }
     if died {
-        return Some(Stopped::Gone(Gone::ThreadDied));
+        return Some(StopOutcome::Gone(Gone::ThreadDied));
     }
     // Only a tick that began before the deadline and is still running is cut off: the thread
     // is inside a request. One that began at or after it does no store I/O and ends at once.
     let stuck = state.tick_began.is_some_and(|began| began < deadline);
-    (now >= deadline && stuck).then_some(Stopped::DeadlineReached {
+    (now >= deadline && stuck).then_some(StopOutcome::DeadlineReached {
         unsynced_wal_bytes: state.left.unsynced_wal_bytes,
         staged_not_uploaded: state.left.staged_not_uploaded,
     })
 }
 
 /// [`stop_answer`], blocking the calling thread.
-fn settle_stop(shared: &Shared, deadline: Timestamp) -> Stopped {
+fn settle_stop(shared: &Shared, deadline: Timestamp) -> StopOutcome {
     let clock = Arc::clone(&shared.clock);
     shared
         .wait_for(None, |state, died| {
             stop_answer(state, died, clock.now(), deadline)
         })
-        .unwrap_or(Stopped::Gone(Gone::ThreadDied))
+        .unwrap_or(StopOutcome::Gone(Gone::ThreadDied))
 }
 
 #[derive(Debug)]
@@ -658,7 +690,7 @@ struct Watch<T> {
 }
 
 /// One answer from the thread's state, as a future that needs no runtime or by blocking:
-/// what [`FinalSync`] and [`Ready`] share. `settle` blocks until the answer, by `deadline`.
+/// what [`StopFuture`] and [`Ready`] share. `settle` blocks until the answer, by `deadline`.
 #[derive(Debug)]
 struct Watched<T> {
     shared: Arc<Shared>,
@@ -736,13 +768,13 @@ impl<T: Copy + Send + 'static> Watched<T> {
     }
 }
 
-/// The outcome of [`Replicator::stop`]: a future that needs no runtime, or [`FinalSync::wait`]
+/// The outcome of [`Replicator::stop`]: a future that needs no runtime, or [`StopFuture::wait`]
 /// to block for it.
 #[derive(Debug)]
 #[must_use = "a stop's outcome says whether everything committed reached the replica"]
-pub struct FinalSync(Watched<Stopped>);
+pub struct StopFuture(Watched<StopOutcome>);
 
-impl FinalSync {
+impl StopFuture {
     fn new(shared: &Arc<Shared>, deadline: Timestamp) -> Self {
         Self(Watched::new(
             shared,
@@ -752,7 +784,7 @@ impl FinalSync {
         ))
     }
 
-    fn ready(shared: &Arc<Shared>, outcome: Stopped) -> Self {
+    fn ready(shared: &Arc<Shared>, outcome: StopOutcome) -> Self {
         Self(
             Watched::new(shared, shared.clock.now(), settle_stop, "lsr-final-sync")
                 .answered(outcome),
@@ -761,15 +793,15 @@ impl FinalSync {
 
     /// Blocks until the stop ends, or until its deadline passes with the thread still inside
     /// a request.
-    pub fn wait(self) -> Stopped {
+    pub fn wait(self) -> StopOutcome {
         self.0.wait()
     }
 }
 
-impl Future for FinalSync {
-    type Output = Stopped;
+impl Future for StopFuture {
+    type Output = StopOutcome;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Stopped> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<StopOutcome> {
         self.0.poll(cx)
     }
 }
@@ -778,19 +810,19 @@ impl Future for FinalSync {
 /// block for it, which is [`Replicator::wait_booted`].
 #[derive(Debug)]
 #[must_use = "the outcome says whether the replicator is ready, and why not"]
-pub struct Ready(Watched<Booted>);
+pub struct Ready(Watched<Readiness>);
 
 impl Ready {
     /// Blocks until the replicator is ready or cannot be, or the wait runs out.
-    pub fn wait(self) -> Booted {
+    pub fn wait(self) -> Readiness {
         self.0.wait()
     }
 }
 
 impl Future for Ready {
-    type Output = Booted;
+    type Output = Readiness;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Booted> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Readiness> {
         self.0.poll(cx)
     }
 }
@@ -841,12 +873,37 @@ mod tests {
         assert_eq!(forked.health().phase, Phase::Gone(Gone::Forked));
         assert_eq!(
             forked.wait_booted(Duration::from_secs(60)),
-            Booted::Gone(Gone::Forked)
+            Readiness::Gone(Gone::Forked)
         );
         assert_eq!(forked.wait_until(Duration::from_secs(60), |_| true), None);
         assert_eq!(
             forked.stop(Duration::from_secs(60)).wait(),
-            Stopped::Gone(Gone::Forked)
+            StopOutcome::Gone(Gone::Forked)
+        );
+    }
+
+    /// A predicate may read the handle: it runs with no lock held, so `health()` inside it
+    /// answers instead of waiting on the lock the wait itself holds.
+    #[test]
+    fn a_wait_until_predicate_may_call_health() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("db");
+        std::fs::write(&path, b"").unwrap();
+        let file = DatabaseFile::of(&path).unwrap();
+        let shared = Arc::new(Shared::new(file, &Config::default(), &Runtime::system()));
+        let handle = Replicator {
+            _last: Arc::new(LastHandle {
+                shared: Arc::clone(&shared),
+            }),
+            shared,
+        };
+        let seen = handle.wait_until(Duration::from_secs(60), |_| {
+            handle.health().phase == Phase::Booting
+        });
+        assert_eq!(seen.map(|health| health.phase), Some(Phase::Booting));
+        assert_eq!(
+            handle.wait_until(Duration::ZERO, |_| handle.health().phase != Phase::Booting),
+            None
         );
     }
 
@@ -855,7 +912,7 @@ mod tests {
     #[test]
     fn a_stop_is_cut_off_only_by_a_tick_from_before_its_deadline() {
         let deadline = at(1_000);
-        let cut = Some(Stopped::DeadlineReached {
+        let cut = Some(StopOutcome::DeadlineReached {
             unsynced_wal_bytes: 7,
             staged_not_uploaded: 2,
         });

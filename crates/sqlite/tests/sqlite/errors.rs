@@ -9,8 +9,8 @@ use std::time::Duration;
 use lsr_core::{CheckpointMode, Checkpointer, PageSource, SourceError, WalSource};
 use lsr_ltx::{PageNo, PageSize};
 use lsr_sqlite::{
-    DatabaseFile, OpenError, SetupError, Sqlite, SqliteConfig, app_connection, app_connection_for,
-    app_connection_raw, check_app_connection,
+    ConnectionSetup, DatabaseFile, OpenError, SetupError, Sqlite, SqliteConfig, WritesHeld,
+    app_connection, check_app_connection,
 };
 use rusqlite::Connection;
 use rusqlite::limits::Limit;
@@ -248,6 +248,11 @@ fn a_checkpoint_blocked_by_readers_reports_busy_in_the_run() {
     assert_eq!(run.epoch, first.next());
 }
 
+/// The setup a replicator on `database` hands out, its writes never held.
+fn setup(database: &DatabaseFile) -> ConnectionSetup {
+    ConnectionSetup::new(database.clone(), WritesHeld::new())
+}
+
 /// A connection is set up only for the database it names: an in-memory one has no file, one on
 /// another file is refused, and a second path to the same file (a hard link) is the same file.
 #[test]
@@ -259,18 +264,18 @@ fn setup_checks_which_file_the_connection_opens() {
     drop(original);
     let memory = Connection::open_in_memory().unwrap();
     assert!(matches!(
-        app_connection_for(&memory, &database),
+        setup(&database).apply(&memory),
         Err(SetupError::NoFile)
     ));
     let (_other_dir, other, _other_app) = fresh();
     assert!(matches!(
-        app_connection_for(&app(&other), &database),
+        setup(&database).apply(&app(&other)),
         Err(SetupError::OtherDatabase)
     ));
     let linked = dir.path().join("linked.db");
     std::fs::hard_link(&path, &linked).unwrap();
     let conn = app(&linked);
-    app_connection_for(&conn, &database).unwrap();
+    setup(&database).apply(&conn).unwrap();
     check_app_connection(&conn).unwrap();
 }
 
@@ -316,7 +321,7 @@ fn a_connection_whose_file_is_gone_cannot_be_checked() {
     conn.execute_batch("CREATE TABLE t(x)").unwrap();
     std::fs::remove_file(&doomed).unwrap();
     assert!(matches!(
-        app_connection_for(&conn, &database),
+        setup(&database).apply(&conn),
         Err(SetupError::Stat(std::io::ErrorKind::NotFound))
     ));
 }
@@ -338,8 +343,8 @@ fn a_raw_handle_is_set_up_and_stays_open() {
         reason = "the test hands over the raw handle an application would"
     )]
     // SAFETY: `handle` is open on this crate's SQLite and used by no other thread during the call.
-    let setup = unsafe { app_connection_raw(handle, &database, &lsr_sqlite::WritesHeld::new()) };
-    setup.unwrap();
+    let set_up = unsafe { setup(&database).apply_raw(handle) };
+    set_up.unwrap();
     check_app_connection(&conn).unwrap();
     conn.execute_batch("INSERT INTO t(v) VALUES (x'01')")
         .unwrap();

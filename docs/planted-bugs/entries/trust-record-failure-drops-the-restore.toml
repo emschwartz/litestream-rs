@@ -1,0 +1,5 @@
+name = "trust-record-failure-drops-the-restore"
+fix = "claude/library-api"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["a_trust_record_that_cannot_be_written_carries_the_restore"]

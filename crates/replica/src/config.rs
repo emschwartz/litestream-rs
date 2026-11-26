@@ -87,13 +87,15 @@ impl Default for SyncLimits {
 }
 
 /// How a replicator runs. Go's behaviour by default. The event sink is not part of it
-/// ([`crate::Replicator::start_with_events`], [`crate::Replicator::set_events`]).
+/// ([`crate::StartOptions::events`], [`crate::Replicator::set_events`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     /// Go's meta directory, `<dir>/.<name>-litestream` beside the database unless set, so Go
     /// and this library resume from each other's staged files.
     pub meta_dir: Option<PathBuf>,
-    /// How often the WAL is polled for new commits (Go: 1 s).
+    /// How often the WAL is polled for new commits (Go: 1 s). A steady writer costs one
+    /// level-0 file per interval: the engine ticks more often when it has other work, and
+    /// the commits made meanwhile wait for the next interval.
     pub poll_interval: NonZeroDuration,
     /// The first retry wait, doubling to 5 minutes (Go's sync interval and backoff cap).
     pub retry_interval: NonZeroDuration,
@@ -127,7 +129,7 @@ pub struct Config {
     /// What a fail-stop trip does to the application (`if-replication-stops`, decisions D13
     /// and D14): `HoldStart` by default. For the library, a held gate, and a boot not yet
     /// judged except under `Report`, hold the application's writes with the write lock the
-    /// replicator keeps (`docs/decisions/D192.md`); see [`crate::Health::held_by`] and
+    /// replicator keeps (`docs/decisions/D192.md`); see [`crate::Health::fail_stop`] and
     /// [`crate::Health::writes`].
     pub if_replication_stops: IfReplicationStops,
     /// How long a commit may stay off the replica before fail-stop trips for it (decision
@@ -188,6 +190,7 @@ impl Config {
                 cap: self.sync_limits.wal_bytes_per_step,
                 node_id: 0,
             },
+            sync_interval: self.poll_interval.get(),
             checkpoint,
             upload: UploadConfig {
                 files_per_tick: self.sync_limits.files_per_upload,
@@ -217,6 +220,22 @@ mod tests {
         assert_eq!(
             engine.upload.files_per_tick,
             Some(SyncLimits::FILES_PER_UPLOAD)
+        );
+    }
+
+    /// The engine ticks more often than it polls (a file to upload, a compaction), and
+    /// holds the commits made meanwhile until one poll interval after its last sync: a
+    /// steady writer costs one level-0 file per interval, as under Go.
+    #[test]
+    fn new_commits_are_synced_once_per_poll_interval() {
+        let config = Config {
+            poll_interval: NonZeroDuration::new(Duration::from_millis(250)).unwrap(),
+            ..Config::default()
+        };
+        assert_eq!(config.actor().sync_interval, Duration::from_millis(250));
+        assert_eq!(
+            Config::default().actor().sync_interval,
+            Duration::from_secs(1)
         );
     }
 

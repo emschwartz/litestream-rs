@@ -35,10 +35,10 @@ use std::time::Duration;
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    Actor, ActorConfig, CheckpointConfig, CheckpointMode, Checkpointer, Clock, Env, Event,
-    FakeClock, Fault, FileInfo, Inventory, L0Retention, Maintenance, MemStore, Next, ObjectStore,
-    PageSource, PersistentCause, ReadLen, Responses, StopCause, StoreError, SyncConfig, Tick,
-    Upload, UploadConfig, WalSource,
+    Actor, ActorConfig, CheckpointConfig, CheckpointMode, Checkpointer, Clock, DegradedCause, Env,
+    Event, FakeClock, Fault, FileInfo, Inventory, L0Retention, Maintenance, MemStore, Next,
+    ObjectStore, PageSource, ReadLen, Responses, StopCause, StoreError, SyncConfig, Tick, Upload,
+    UploadConfig, WalSource,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_sim::{
@@ -233,6 +233,7 @@ pub fn rig_actor_config() -> ActorConfig {
             min_pages: NonZeroU32::new(8),
             truncate_pages: NonZeroU32::new(24),
         },
+        sync_interval: Duration::ZERO,
         upload: UploadConfig::default(),
         maintenance,
         retry_interval: Duration::from_secs(1),
@@ -447,7 +448,7 @@ pub struct Rig<B: Backend> {
     /// Each tick's window calls, per kind of file and call, counted after it.
     calls: Vec<BTreeMap<(FileKind, Op), u32>>,
     faults: Vec<Fault>,
-    degraded: Vec<PersistentCause>,
+    degraded: Vec<DegradedCause>,
     everywhere: bool,
     /// The takeover record a restore left, handed to every new actor as the replica's driver
     /// does.
@@ -636,7 +637,7 @@ impl<B: Backend> Rig<B> {
 
     /// Every cause a tick reported a task degraded by, in order.
     #[must_use]
-    pub fn degraded(&self) -> &[PersistentCause] {
+    pub fn degraded(&self) -> &[DegradedCause] {
         &self.degraded
     }
 
@@ -786,6 +787,7 @@ impl<B: Backend> Rig<B> {
             | Event::Resnapshot(_)
             | Event::Clamped(_)
             | Event::CheckingIdentity { .. }
+            | Event::StagingShort { .. }
             // The rig runs no write gate.
             | Event::WritesHeld { .. } => {}
         }
@@ -897,7 +899,7 @@ impl<B: Backend> Rig<B> {
                 tick,
                 Tick::Ran {
                     event: Event::Degraded {
-                        cause: PersistentCause::WalSyncFailed,
+                        cause: DegradedCause::WalSyncFailed,
                         ..
                     },
                     ..

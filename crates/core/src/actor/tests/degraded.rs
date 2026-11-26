@@ -4,7 +4,7 @@
 use super::*;
 use crate::fault::BugSite;
 
-fn degraded(tick: &Tick) -> Option<(Task, PersistentCause, Timestamp)> {
+fn degraded(tick: &Tick) -> Option<(Task, DegradedCause, Timestamp)> {
     match event(tick) {
         Some(Event::Degraded {
             task, cause, until, ..
@@ -58,7 +58,7 @@ fn revoked_credentials_degrade_the_upload_task_until_an_upload_succeeds() {
         (task, cause),
         (
             Task::Upload,
-            PersistentCause::StoreDenied(crate::store::Denied::Credentials)
+            DegradedCause::StoreDenied(crate::store::Denied::Credentials)
         )
     );
     assert_eq!(until, ts(T0 + 1_010));
@@ -98,7 +98,7 @@ fn the_degraded_backoff_doubles_to_the_cap_and_no_further() {
     for _ in 0..200 {
         let tick = rig.tick(&mut actor, now);
         if let Some((task, cause, until)) = degraded(&tick) {
-            assert_eq!((task, cause), (Task::Upload, PersistentCause::StoreRefused));
+            assert_eq!((task, cause), (Task::Upload, DegradedCause::StoreRefused));
             waits.push(until.unix_millis() - now);
         }
         match next_of(&tick) {
@@ -134,7 +134,7 @@ fn a_refused_retention_delete_leaves_sync_and_upload_running() {
         if let Some((task, cause, _)) = degraded(&tick) {
             assert_eq!(
                 (task, cause),
-                (Task::Maintenance, PersistentCause::StoreRefused)
+                (Task::Maintenance, DegradedCause::StoreRefused)
             );
             break now;
         }
@@ -201,7 +201,7 @@ fn a_bug_rebuilds_the_actor_and_boots_again_after_the_wait() {
     let Some((task, cause, until)) = degraded(&failed) else {
         panic!("{failed:?}");
     };
-    assert_eq!((task, cause), (Task::Sync, PersistentCause::Bug));
+    assert_eq!((task, cause), (Task::Sync, DegradedCause::Bug));
     assert_eq!(actor.phase(), Phase::Boot);
     assert_eq!(actor.position(), None, "nothing of the old state is kept");
     let io = rig.io();
@@ -258,7 +258,7 @@ fn continuing_past_a_second_writer_boots_again() {
     let tick = actor.fault(Task::Upload, Fault::RemoteAheadOfLocal, ts(T0 + 10));
     assert_eq!(
         degraded(&tick).map(|(task, cause, _)| (task, cause)),
-        Some((Task::Sync, PersistentCause::OtherWriter))
+        Some((Task::Sync, DegradedCause::OtherWriter))
     );
     let seen = rig.follow(&mut actor, T0 + 10, 20);
     assert!(
@@ -280,7 +280,7 @@ fn a_regressed_replica_is_listed_again_and_uploads_go_on() {
     let tick = actor.fault(Task::Upload, Fault::RemoteRegressed, ts(T0 + 20));
     assert_eq!(
         degraded(&tick).map(|(task, cause, _)| (task, cause)),
-        Some((Task::Upload, PersistentCause::RemoteRegressed))
+        Some((Task::Upload, DegradedCause::RemoteRegressed))
     );
     assert_eq!(
         actor.engine.upload,
@@ -303,7 +303,7 @@ fn a_page_size_change_keeps_the_boot_degraded_and_stages_nothing() {
     resize(&mut rig, big());
     let mut actor = Actor::new(go_like());
     let seen = rig.follow(&mut actor, T0 + 10, 30);
-    let changed = PersistentCause::PageSizeChanged {
+    let changed = DegradedCause::PageSizeChanged {
         was: PS,
         now: big(),
     };
@@ -340,7 +340,7 @@ fn a_corrupt_committed_frame_is_never_staged_nor_snapshotted_past() {
     assert!(
         seen.iter()
             .filter_map(degraded)
-            .all(|(task, cause, _)| task == Task::Sync && cause == PersistentCause::WalCorrupt),
+            .all(|(task, cause, _)| task == Task::Sync && cause == DegradedCause::WalCorrupt),
         "{seen:?}"
     );
     assert!(seen.iter().filter_map(degraded).count() > 3, "{seen:?}");
@@ -573,7 +573,7 @@ fn a_retried_fault_that_persists_ends_degraded_as_a_stall() {
         now += 1;
     }
     let tick = actor.fault(Task::Upload, Fault::LocalDiskFull, ts(now));
-    let cause = PersistentCause::Stalled(Stall::LocalDiskFull);
+    let cause = DegradedCause::Stalled(Stall::LocalDiskFull);
     assert_eq!(
         degraded(&tick).map(|(t, c, _)| (t, c)),
         Some((Task::Upload, cause))

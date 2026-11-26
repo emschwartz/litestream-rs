@@ -449,7 +449,7 @@ fn uploads_resume_with_a_snapshot_after_a_rollback_took_confirmed_ids() {
         matches!(
             event(tick),
             Some(Event::Degraded {
-                cause: PersistentCause::RemoteRegressed,
+                cause: DegradedCause::RemoteRegressed,
                 ..
             })
         )

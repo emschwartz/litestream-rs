@@ -13,9 +13,7 @@ use std::time::Instant;
 use lsr_core::conformance::block_on;
 use lsr_core::{Clock, PartNumber, ReadLen};
 use lsr_ltx::Timestamp;
-use lsr_store_s3::{
-    EtagCheck, S3Code, UploadId, check_etag, parse_complete, parse_create, parse_head, quoted_md5,
-};
+use lsr_store_s3::{S3Code, UploadId, parse_complete, parse_create, parse_head, quoted_md5};
 
 use crate::provider::{h, raw_body};
 use crate::real::{self, CREATED_AT_HEADER, RealHarness, WallClock, at, body};
@@ -53,7 +51,7 @@ fn obs_response(what: &str, r: &lsr_store_s3::HttpResponse) {
 
 #[test]
 #[ignore = "needs a Tigris bucket (just test-tigris)"]
-fn item1_unsigned_payload_with_signed_meta_and_consistent_headers() {
+fn item1_signed_payload_with_signed_meta_and_consistent_headers() {
     let h = h();
     let key = h.key(0, 1, 1);
     let created_at = at("2024-05-01T12:00:00.123Z");
@@ -62,7 +60,7 @@ fn item1_unsigned_payload_with_signed_meta_and_consistent_headers() {
         .put_object(WallClock.now(), &key, b"hello".to_vec(), created_at)
         .unwrap();
     expect(
-        "item1 signed put (UNSIGNED-PAYLOAD, meta + consistent signed)",
+        "item1 signed put (signed SHA-256 payload, meta + consistent signed)",
         &h.send(put),
         200,
         None,
@@ -96,7 +94,7 @@ fn item1_unsigned_payload_with_signed_meta_and_consistent_headers() {
 
 #[test]
 #[ignore = "needs a Tigris bucket (just test-tigris)"]
-fn item2_item3_content_md5_and_etag_shapes() {
+fn item2_item3_payload_hash_and_etag_shapes() {
     let h = h();
     let key = h.key(0, 1, 1);
     let wrong = h
@@ -111,7 +109,7 @@ fn item2_item3_content_md5_and_etag_shapes() {
         .tamper_body(b"other".to_vec());
     let sent = h.send(wrong);
     expect(
-        "item2 put with wrong Content-MD5",
+        "item2 put with a body other than the signed one",
         &sent,
         400,
         Some(S3Code::BadDigest),
@@ -141,7 +139,6 @@ fn item2_item3_content_md5_and_etag_shapes() {
         sent.header("etag") == Some(want.as_str())
     };
     assert!(md5, "a single PUT's ETag is the hex MD5");
-    let _ = (check_etag, EtagCheck::Matches);
 }
 
 fn start_multipart(h: &RealHarness, key: &lsr_core::FileKey, created_at: Timestamp) -> UploadId {
@@ -209,7 +206,7 @@ fn item2_item3_wrong_part_digest_and_complete_etag() {
         .unwrap()
         .tamper_body(b"other".to_vec());
     expect(
-        "item2 part with wrong Content-MD5",
+        "item2 part with a body other than the signed one",
         &h.send(wrong),
         400,
         Some(S3Code::BadDigest),

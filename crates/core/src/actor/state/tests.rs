@@ -19,7 +19,7 @@ fn fail(retry: &mut Retry, until: i64) {
 fn a_degraded_count_follows_the_retries_after_it() {
     let mut retry = Retry::default();
     fail(&mut retry, 10);
-    retry.degrade(PersistentCause::StoreRefused, ts(1));
+    retry.degrade(DegradedCause::StoreRefused, ts(1));
     assert_eq!(retry.degraded().map(|d| d.retries), Some(1));
     fail(&mut retry, 20);
     fail(&mut retry, 30);
@@ -32,8 +32,8 @@ fn a_degraded_count_follows_the_retries_after_it() {
 fn a_success_keeps_only_a_page_mismatch_and_counts_it_from_one() {
     let pgno = PageNo::new(3, PageSize::MIN).unwrap();
     let cases = [
-        (PersistentCause::StoreRefused, None),
-        (PersistentCause::DatabasePageMismatch { pgno }, Some(1)),
+        (DegradedCause::StoreRefused, None),
+        (DegradedCause::DatabasePageMismatch { pgno }, Some(1)),
     ];
     for (cause, kept) in cases {
         let mut retry = Retry::default();
@@ -54,13 +54,13 @@ fn a_success_keeps_only_a_page_mismatch_and_counts_it_from_one() {
 fn clearing_the_wait_frees_the_task_and_keeps_the_degradation() {
     let mut retry = Retry::default();
     fail(&mut retry, 50);
-    retry.degrade(PersistentCause::StoreRefused, ts(1));
+    retry.degrade(DegradedCause::StoreRefused, ts(1));
     assert!(!retry.ready(ts(10)));
     retry.clear_wait();
     assert!(retry.ready(ts(10)));
     assert_eq!((retry.failures(), retry.until()), (0, None));
     assert_eq!(
         retry.degraded().map(|d| (d.cause, d.since)),
-        Some((PersistentCause::StoreRefused, ts(1)))
+        Some((DegradedCause::StoreRefused, ts(1)))
     );
 }

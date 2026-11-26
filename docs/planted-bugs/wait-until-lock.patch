@@ -1,0 +1,17 @@
+diff --git a/crates/replica/src/replicator.rs b/crates/replica/src/replicator.rs
+index db3948e40..cf4c9c365 100644
+--- a/crates/replica/src/replicator.rs
++++ b/crates/replica/src/replicator.rs
+@@ -490,7 +490,11 @@ impl Replicator {
+             return None;
+         }
+         let deadline = later(self.shared.clock.now(), within);
+-        self.shared.wait_for_health(deadline, done)
++        let meters = Arc::clone(&self.shared.meters);
++        self.shared.wait_for(Some(deadline), |state, died| {
++            let health = snapshot(state, died, &meters);
++            done(&health).then_some(health)
++        })
+     }
+ 
+     /// Stops after syncing and uploading everything committed. The deadline is the earlier of

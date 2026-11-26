@@ -1,0 +1,19 @@
+diff --git a/crates/replica/src/restore.rs b/crates/replica/src/restore.rs
+--- a/crates/replica/src/restore.rs
++++ b/crates/replica/src/restore.rs
+@@ -102,12 +102,9 @@
+         how.options,
+         sink,
+     ))?;
+-    write_takeover(&meta, TakeoverRecord::through(restored.reached())).map_err(|err| {
+-        RestoreError::TrustRecord {
+-            restored,
+-            kind: err.kind(),
+-        }
+-    })?;
++    if write_takeover(&meta, TakeoverRecord::through(restored.reached())).is_err() {
++        return Err(RestoreError::NoMetaDir { path: meta });
++    }
+     Ok(restored)
+ }
+ 

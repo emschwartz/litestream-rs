@@ -51,13 +51,13 @@ commit-check base="":
     while IFS= read -r line; do
         subject="${line#* }"
         case "$subject" in Merge\ *) continue ;; esac
-        if ! printf '%s' "$subject" | grep -Eq "$pattern"; then
+        if [ "${#subject}" -gt 72 ] || ! printf '%s' "$subject" | grep -Eq "$pattern"; then
             echo "commit-check: ${line%% *}: $subject" >&2
             bad=1
         fi
     done < <(git log --format='%h %s' "$base..HEAD")
     if [ "$bad" -ne 0 ]; then
-        echo "commit-check: subjects must be 'type(scope): summary' (see AGENTS.md)" >&2
+        echo "commit-check: subjects must be 'type(scope): summary', at most 72 characters (see AGENTS.md)" >&2
         exit 1
     fi
 

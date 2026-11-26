@@ -35,12 +35,12 @@ crate::real::shared_cases!(connect, all());
 
 #[test]
 #[ignore = "needs MinIO; just test-s3"]
-fn wrong_content_md5_is_refused_by_minio() {
+fn a_body_other_than_the_signed_one_is_refused_by_minio() {
     let Some(h) = connect() else {
         return;
     };
     let key = h.key(0, 3, 3);
-    // The signed digest is of "hello"; the body that goes out is not.
+    // The signed SHA-256 is of "hello"; the body that goes out is not.
     let request = h
         .builder()
         .put_object(

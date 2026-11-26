@@ -49,6 +49,8 @@ mod restored_staging;
 #[cfg(test)]
 mod retention;
 #[cfg(test)]
+mod retention_windows;
+#[cfg(test)]
 mod short_write;
 #[cfg(test)]
 mod sliced;

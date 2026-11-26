@@ -1,6 +1,6 @@
-# A part whose body is read back from the staged file while it is sent goes out without
-# Content-MD5, so the store has nothing to check the bytes it received against: a second read
-# that went wrong on the way would be stored as the part (docs/decisions/D222.md).
+# A part whose body is read back from the staged file while it is sent is signed with the hash
+# of an empty body in place of the SHA-256 of the bytes first handed over, so the store has
+# nothing true to check the bytes it received against (docs/decisions/D222.md, D250.md).
 name = "streamed-part-without-its-digest"
 fix = "plant"
 package = "lsr-store-s3"
