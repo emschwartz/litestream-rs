@@ -387,17 +387,28 @@ impl Forcings {
         // The replica holds everything staging does only once no staged file is one it never
         // took: a file left behind it (a backup put back, a file damaged in place) is still to be
         // dropped, and the fault that left it must be in the window when it is (seed 0xf42e9).
-        let left_behind = world
-            .staged_level_zero()
-            .iter()
-            .any(|key| !self.uploaded.contains(key));
+        let staged_keys = world.staged_level_zero();
+        let left_behind = staged_keys.iter().any(|key| !self.uploaded.contains(key));
+        // Nor while the newest staged file is gone from staging: an upload that reaches the
+        // engine's newest file proves nothing about a staging directory wiped under its send
+        // (its bytes were read before the wipe), and a boot over what is left finds no file to
+        // continue from (seed 0x126d69380a38: the wipe was forgotten and the boot's snapshot
+        // above the replica was called needless).
+        let newest_kept = newest_staged.is_some_and(|newest| {
+            staged_keys
+                .iter()
+                .any(|key| key.range().max().get() == newest)
+        });
         // Nor while a staged file has other bytes than the replica's copy of it: a file read on
         // one tick and published on a later one, damaged in between, is published as it was
         // read, and no read of that upload met the damage. The boot that finds it has the edit
         // for its cause. Asked last, and only of an upload that would otherwise have caught
         // up: it reads every staged file and its copy.
         let caught_up = !left_behind
-            && took.is_some_and(|took| newest_staged.is_none_or(|newest| took >= newest))
+            && newest_kept
+            && took
+                .zip(newest_staged)
+                .is_some_and(|(took, newest)| took >= newest)
             && !world.staged_differs_from_replica();
         let staged = self.take_staging(staging, world, reach)?;
         let grew = self.snapshots.take_counts(counts, &self.window, reach)?;
@@ -629,7 +640,7 @@ mod tests {
         }
 
         fn staged_level_zero(&self) -> Vec<FileKey> {
-            Vec::new()
+            vec![key(24), key(25)]
         }
         fn staged_differs_from_replica(&self) -> bool {
             false
@@ -696,6 +707,37 @@ mod tests {
         assert!(!forcings.window.contains(&Forcing::StagingEdited));
     }
 
+    /// Staging wiped under the send of the engine's newest file, 26: the replica takes it, and
+    /// staging holds nothing. The upload reaches the engine's newest file but vouches for no
+    /// staging left to continue from, so the wipe stays in the window for the boot that finds
+    /// the empty directory and snapshots above the replica (seed 0x126d69380a38).
+    #[test]
+    fn an_upload_that_leaves_staging_empty_keeps_the_staging_edit() {
+        let mut forcings = Forcings::new();
+        let mut reach = Reach::default();
+        forcings.window.clear();
+        forcings.note(Forcing::StagingEdited);
+        let wiped = WithEngine {
+            world: &Replica {
+                newest: 26,
+                ends: &[26],
+            },
+            staged: Some(26),
+        };
+        forcings
+            .after_tick(
+                (&[], &[remote_put(26)]),
+                &wiped,
+                SnapshotCounts::default(),
+                false,
+                &mut reach,
+            )
+            .unwrap();
+        assert!(forcings.window.contains(&Forcing::StagingEdited));
+        let judged = forcings.judge(SnapshotCauseKind::AheadOfReplica, true, &mut reach);
+        assert!(judged.is_ok(), "{judged:?}");
+    }
+
     fn key(txid: u64) -> FileKey {
         FileKey::new(
             lsr_core::Level::ZERO,
@@ -716,7 +758,7 @@ mod tests {
             false
         }
         fn newest_staged(&self) -> Option<u64> {
-            Some(43)
+            self.staged.iter().map(|key| key.range().max().get()).max()
         }
         fn replica_newest(&self) -> Option<u64> {
             Some(43)
