@@ -359,7 +359,6 @@ impl Replicator {
     /// A builder for the replicator of the database at `database`, replicating to `store`:
     /// the default [`Config`], the system clock, and no event sink until
     /// [`ReplicatorBuilder::start`] says otherwise.
-    #[must_use]
     pub fn builder(database: &Path, store: Arc<dyn DynStore>) -> ReplicatorBuilder {
         ReplicatorBuilder {
             database: database.to_owned(),
