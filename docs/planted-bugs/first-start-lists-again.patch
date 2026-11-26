@@ -1,10 +1,10 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1466,7 +1466,7 @@
-             ..Engine::fresh()
-         };
-         if first_start {
+@@ -1465,7 +1465,7 @@
+         // The boot listing found nothing to confirm: maintenance plans its first job from what
+         // this engine puts, not from listing again what the boot just listed.
+         if self.engine.upload.confirmed().is_none() {
 -            self.engine.maintain.remembered.begin_first_start();
 +            self.engine.maintain.remembered.end_first_start();
          }

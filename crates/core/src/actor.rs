@@ -1452,9 +1452,6 @@ impl Actor {
             Err(fault) => return self.boot_failed(fault, took(), now),
         };
         self.quiet_at_boot(quiet);
-        // The boot listing found nothing to confirm: maintenance plans its first job from what
-        // this engine puts, not from listing again what the boot just listed.
-        let first_start = upload.confirmed().is_none();
         // Every step succeeded: the engine is assigned whole.
         self.engine = Engine {
             course,
@@ -1465,7 +1462,9 @@ impl Actor {
             witnesses: tokens.into_iter().collect(),
             ..Engine::fresh()
         };
-        if first_start {
+        // The boot listing found nothing to confirm: maintenance plans its first job from what
+        // this engine puts, not from listing again what the boot just listed.
+        if self.engine.upload.confirmed().is_none() {
             self.engine.maintain.remembered.begin_first_start();
         }
         self.kept.tasks.get_mut(task).succeed();
