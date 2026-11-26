@@ -636,9 +636,14 @@ pub fn required_keys() -> Vec<String> {
     // The time judges arm in every run (`run::tail`, `crate::cost`): a night in which none
     // judged anything is a generator or a harness that starved them.
     keys.extend(
-        ["liveness.judged", "tick_cost.judged", "wal_bound.judged"]
-            .iter()
-            .map(|key| (*key).to_owned()),
+        [
+            "liveness.judged",
+            "tick_cost.judged",
+            "wal_bound.judged",
+            "barrier.judged",
+        ]
+        .iter()
+        .map(|key| (*key).to_owned()),
     );
     keys.extend(crate::domain::points::required_keys());
     keys.retain(|key| !EXEMPT.iter().any(|(exempt, _)| exempt == key));

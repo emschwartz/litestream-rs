@@ -9,8 +9,8 @@
 use std::time::Duration;
 
 use lsr_core::{
-    DegradedCause, Denied, Did, Event, Fault, FileKey, Level, MaintainedEvent, SnapshotCause,
-    SourceError, SourceOp, StopCause, StoreError, StoreOp,
+    DegradedCause, Denied, Did, Event, Fault, SnapshotCause, SourceError, SourceOp, StopCause,
+    StoreError, StoreOp,
 };
 use lsr_ltx::PageSize;
 
@@ -1940,75 +1940,16 @@ fn corrupt_publish_then_power_loss(name: &'static str, jump: Option<i64>) -> Sce
 
 /// What the next boot must do about the object: read it back, delete it
 /// because the level below still covers it, and build the level again.
-fn repaired(mut scenario: Scenario, level: u8, check: super::Check) -> Scenario {
-    let level = Level::new(level).unwrap_or(Level::ZERO);
+/// A published body the store damaged, past a boot that reads only headers and tails: the
+/// first read of the body degrades maintenance, which recovers, and the replica restores.
+fn found_on_read(mut scenario: Scenario) -> Scenario {
     scenario.expect = vec![
         retries(FaultKind::UploadChecksumMismatch),
-        Expect::Event(EventMatch::Repaired(level)),
+        Expect::Stopped(StopCause::RemoteCorrupt),
         Expect::Oracle,
+        Expect::Recovered,
     ];
-    scenario.check = Some(check);
     scenario
-}
-
-/// The key the read-back deleted, when it deleted exactly one.
-fn repaired_key(report: &RunReport) -> Result<FileKey, String> {
-    let mut keys = report.seen.iter().filter_map(|seen| match seen {
-        Seen::Event(Event::Maintained {
-            event: MaintainedEvent::Repaired(key),
-            ..
-        }) => Some(*key),
-        Seen::Event(_)
-        | Seen::Stop(_)
-        | Seen::Recovered(_)
-        | Seen::Snapshot(_)
-        | Seen::Oracle
-        | Seen::Tick { .. } => None,
-    });
-    match (keys.next(), keys.next()) {
-        (Some(key), None) => Ok(key),
-        (first, second) => Err(format!("repaired {first:?} and {second:?}, want one key")),
-    }
-}
-
-/// The damaged object was published at `level`, the read-back deleted that
-/// key and nothing else, and a later compaction published the level again
-/// through the same last transaction.
-fn rebuilt_at(report: &RunReport, level: u8) -> Result<(), String> {
-    let key = repaired_key(report)?;
-    if key.level().get() != level {
-        return Err(format!("{key} is not at level {level}"));
-    }
-    let events = &report.remote_events;
-    let through = key.range().max();
-    let builds = |event: &RecorderEvent| match event {
-        RecorderEvent::Put { key: put, .. } => {
-            put.level() == key.level() && put.range().max() >= through
-        }
-        RecorderEvent::Delete { .. } => false,
-    };
-    let published = events
-        .iter()
-        .position(|event| matches!(event, RecorderEvent::Put { key: put, .. } if *put == key))
-        .ok_or_else(|| format!("{key} was never published"))?;
-    let mut later = events.iter().skip(published.saturating_add(1));
-    if !later.any(|event| matches!(event, RecorderEvent::Delete { keys, .. } if *keys == [key])) {
-        return Err(format!("{key} was never deleted alone"));
-    }
-    // `later` now starts after the delete.
-    if later.any(builds) {
-        Ok(())
-    } else {
-        Err(format!("level {level} was not built again through {key}"))
-    }
-}
-
-fn rebuilt_at_one(report: &RunReport) -> Result<(), String> {
-    rebuilt_at(report, 1)
-}
-
-fn rebuilt_at_two(report: &RunReport) -> Result<(), String> {
-    rebuilt_at(report, 2)
 }
 
 /// Ticks after the clock jump before level 1's compaction publishes: the checkpoint, the upload
@@ -2030,7 +1971,10 @@ fn level_window(pre_ticks: usize) -> Vec<Op> {
 }
 
 /// The level 1 compaction's output rots in the window: the first compaction
-/// above the first snapshot.
+/// above the first snapshot. Its header and tail are sound, so the boot's read-back (header
+/// and tail only, `docs/decisions/D272.md`) passes it; the first read of its body (the next
+/// compaction's input) finds it, and maintenance is degraded `RemoteCorrupt` until a level
+/// above covers it. No restore is wrong meanwhile.
 #[must_use]
 pub fn corrupt_l1_publish_then_power_loss() -> Scenario {
     let scenario = build(
@@ -2044,11 +1988,12 @@ pub fn corrupt_l1_publish_then_power_loss() -> Scenario {
         ],
         Vec::new(),
     );
-    repaired(scenario, 1, rebuilt_at_one)
+    found_on_read(scenario)
 }
 
 /// The level 2 compaction's output rots in the window: level 1 is inside its
-/// interval after [`live`], so the next upload to the replica is level 2's.
+/// interval after [`live`], so the next upload to the replica is level 2's. Found as the
+/// level 1 case is.
 #[must_use]
 pub fn corrupt_l2_publish_then_power_loss() -> Scenario {
     let scenario = build(
@@ -2062,7 +2007,7 @@ pub fn corrupt_l2_publish_then_power_loss() -> Scenario {
         ],
         Vec::new(),
     );
-    repaired(scenario, 2, rebuilt_at_two)
+    found_on_read(scenario)
 }
 
 /// The level 9 compaction's output rots in the window.
