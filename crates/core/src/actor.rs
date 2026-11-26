@@ -2085,22 +2085,8 @@ impl Actor {
             }
         };
         let position = self.took(done.staged);
-        match done.outcome {
-            CheckpointOutcome::LockBusy => return self.lock_busy(skips, now),
-            // A TRUNCATE that changed the WAL staged its boundary snapshot.
-            CheckpointOutcome::Truncated => self
-                .kept
-                .snapshots
-                .count(&SnapshotCause::CheckpointBoundary),
-            // The same snapshot, which the next sync stages and counts.
-            CheckpointOutcome::BoundaryOwed => self
-                .engine
-                .course
-                .snapshot_for(SnapshotCause::CheckpointBoundary, false),
-            CheckpointOutcome::Busy
-            | CheckpointOutcome::NotRestarted
-            | CheckpointOutcome::Overtaken
-            | CheckpointOutcome::Restarted => {}
+        if done.outcome == CheckpointOutcome::LockBusy {
+            return self.lock_busy(skips, now);
         }
         let observed = Observed::of(now, &position, true);
         let (state, next) = after_checkpoint(
@@ -2120,8 +2106,7 @@ impl Actor {
             CheckpointOutcome::LockBusy
             | CheckpointOutcome::NotRestarted
             | CheckpointOutcome::Restarted
-            | CheckpointOutcome::Truncated
-            | CheckpointOutcome::BoundaryOwed => false,
+            | CheckpointOutcome::Truncated => false,
         };
         self.ran(Event::Checkpointed { mode, busy }, now)
     }

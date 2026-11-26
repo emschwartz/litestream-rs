@@ -1,8 +1,11 @@
 //! The checkpoint, the write barrier and the sequence bump.
 //!
-//! The checkpoint runs on the reader through `sqlite3_wal_checkpoint_v2`, after its read
-//! transaction ends and before it is retaken, as Go defers the retake (`db.go:2805-2849`). Ending
-//! and retaking is what moves the [`ReadLockHold`]. The C call, not the pragma, because its result
+//! A PASSIVE or FULL checkpoint runs on the reader through `sqlite3_wal_checkpoint_v2`, after its
+//! read transaction ends and before it is retaken, as Go defers the retake (`db.go:2805-2849`).
+//! Ending and retaking is what moves the [`ReadLockHold`]. A TRUNCATE runs on the writer
+//! connection instead and leaves the read transaction, and so the hold, as it was: the engine's
+//! read is what makes a TRUNCATE busy when anything was committed since the hold began
+//! (`lsr_core`'s checkpoint protocol). The C call, not the pragma, because its result
 //! code tells a checkpoint that ran but was blocked by readers (`SQLITE_BUSY` with both frame
 //! counts set: `busy` in the run) from one that never ran because another connection held the
 //! checkpoint lock (`SQLITE_BUSY` with counts of -1: [`SourceError::Busy`]); the pragma reports
@@ -24,6 +27,40 @@ fn wal_checkpoint(conn: Handle<'_>, mode: CheckpointMode) -> (c_int, c_int, c_in
         CheckpointMode::Full => ffi::SQLITE_CHECKPOINT_FULL,
     };
     conn.wal_checkpoint(mode)
+}
+
+/// How many descriptors this process holds on the file at `path`, `None` when they cannot be
+/// listed. One copy of SQLite opens `-shm` once for all its connections in a process
+/// (`unixOpenSharedMemory`) and keeps its locks in that one node, so a second descriptor is
+/// another copy (or another opener) on the wal-index whose locks this copy cannot see.
+#[cfg(unix)]
+fn descriptors_on(path: &std::path::Path) -> Option<usize> {
+    use std::os::unix::fs::MetadataExt;
+    let target = std::fs::metadata(path).ok()?;
+    let listed = if cfg!(target_os = "linux") {
+        "/proc/self/fd"
+    } else {
+        "/dev/fd"
+    };
+    let mut found = 0_usize;
+    for entry in std::fs::read_dir(listed).ok()? {
+        // A descriptor closed since the listing (the listing's own among them) names nothing.
+        // macOS reports devfs's device for a `/dev/fd` entry, so there only the inode is
+        // compared: a match on another file system's inode counts one too many, which costs a
+        // snapshot, never a proof.
+        if let Ok(meta) = std::fs::metadata(entry.ok()?.path())
+            && (cfg!(target_os = "macos") || meta.dev() == target.dev())
+            && meta.ino() == target.ino()
+        {
+            found = found.saturating_add(1);
+        }
+    }
+    Some(found)
+}
+
+#[cfg(not(unix))]
+const fn descriptors_on(_path: &std::path::Path) -> Option<usize> {
+    None
 }
 
 /// Whether readers blocked the checkpoint, and its two frame counts; an error when it did not run.
@@ -59,6 +96,24 @@ impl Checkpointer for Sqlite {
 
     fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointRun, SourceError> {
         let mut inner = self.lock();
+        if mode == CheckpointMode::Truncate {
+            let shm = inner.shm_path();
+            let alone = descriptors_on(&shm) == Some(1);
+            let (rc, log, checkpointed) = wal_checkpoint(inner.free_writer()?, mode);
+            let one_sqlite = alone && descriptors_on(&shm) == Some(1);
+            // The writer inside a transaction: SQLite ran nothing.
+            if rc & 0xff == ffi::SQLITE_LOCKED {
+                return Err(SourceError::Busy);
+            }
+            let (busy, log, checkpointed) = sort_run(rc, log, checkpointed)?;
+            return Ok(CheckpointRun {
+                busy,
+                log,
+                checkpointed,
+                epoch: inner.epoch,
+                one_sqlite,
+            });
+        }
         inner.end_read()?;
         let (rc, log, checkpointed) = wal_checkpoint(inner.reader.handle(), mode);
         // The read transaction comes back whether or not the checkpoint ran, as Go defers it.
@@ -70,6 +125,7 @@ impl Checkpointer for Sqlite {
             log,
             checkpointed,
             epoch: inner.epoch,
+            one_sqlite: true,
         })
     }
 

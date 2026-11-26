@@ -344,6 +344,11 @@ impl Inner {
         !self.writer.handle().is_autocommit()
     }
 
+    /// The database's wal-index file.
+    pub(crate) fn shm_path(&self) -> PathBuf {
+        suffixed(&self.db_path, "-shm")
+    }
+
     /// Takes the read transaction again (a new epoch).
     pub(crate) fn begin_read(&mut self) -> Result<(), SqliteError> {
         begin_read(self.reader.handle())?;

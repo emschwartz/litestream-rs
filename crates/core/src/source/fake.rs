@@ -131,6 +131,8 @@ struct WalState {
     copied_size: u32,
     /// What [`WalSource::modified`] answers: set by the test, `None` until it is.
     modified: Option<Timestamp>,
+    /// The read transaction lapses at the next `sync`, a step's WAL barrier.
+    lapse_at_sync: bool,
 }
 
 /// A transaction armed to commit at a later read.
@@ -321,6 +323,7 @@ impl FakeWal {
             copied: BTreeMap::new(),
             copied_size: 0,
             modified: None,
+            lapse_at_sync: false,
         };
         state.write_header();
         Self {
@@ -435,6 +438,12 @@ impl FakeWal {
         lock(&self.state).epoch = epoch;
     }
 
+    /// The read transaction lapses and is taken again at the next `sync`: a step that read the
+    /// committed end before it proves nothing at the epoch after it.
+    pub fn lapse_at_next_sync(&self) {
+        lock(&self.state).lapse_at_sync = true;
+    }
+
     /// Answers `committed` with this value, whatever the file holds; `None` goes
     /// back to the truth. For wal-index states the file cannot show (an end
     /// inside a transaction).
@@ -535,17 +544,33 @@ impl FakeWal {
         script: Option<CheckpointScript>,
     ) -> CheckpointRun {
         let mut state = lock(&self.state);
-        state.read_mark = None;
+        // A TRUNCATE runs on the writer connection and keeps the read transaction.
+        let truncate = mode == CheckpointMode::Truncate;
+        if !truncate {
+            state.read_mark = None;
+        }
         let effect = script.map_or(CheckpointEffect::Natural, |s| s.effect);
-        let busy = script.is_some_and(|s| s.busy);
+        let mut busy = script.is_some_and(|s| s.busy);
         match effect {
-            CheckpointEffect::Natural => {
+            CheckpointEffect::Natural
+            | CheckpointEffect::SecondSqlite
+            | CheckpointEffect::ResetTwice => {
                 let full = state.mx_frame;
                 state.backfill(full);
-                if matches!(mode, CheckpointMode::Truncate) && !busy {
+                let clear = state.backfilled == state.mx_frame
+                    && state.read_mark.is_none_or(|mark| mark == 0);
+                if truncate && clear && !busy {
+                    if effect == CheckpointEffect::ResetTwice {
+                        state.restart_in_place();
+                    }
                     state.restart_in_place();
                     state.bytes.clear();
                 }
+                busy |= truncate && !clear;
+            }
+            CheckpointEffect::LostRead => {
+                state.read_mark = None;
+                state.epoch = state.epoch.next();
             }
             CheckpointEffect::Backfill(frames) => {
                 state.backfill(frames);
@@ -555,17 +580,20 @@ impl FakeWal {
                 state.backfill(full);
                 state.restart_in_place();
             }
-            CheckpointEffect::Nothing => {}
+            CheckpointEffect::Nothing | CheckpointEffect::Refused => {}
         }
         let log = state.mx_frame;
         let checkpointed = state.backfilled;
-        state.epoch = state.epoch.next();
-        state.take_read_lock();
+        if !truncate {
+            state.epoch = state.epoch.next();
+            state.take_read_lock();
+        }
         CheckpointRun {
             busy,
             log,
             checkpointed,
             epoch: state.epoch,
+            one_sqlite: effect != CheckpointEffect::SecondSqlite,
         }
     }
 }
@@ -607,7 +635,12 @@ impl WalSource for FakeWal {
     }
 
     fn sync(&mut self) -> Result<(), SourceError> {
-        lock(&self.state).injections.take(SourceOp::Sync)
+        let mut state = lock(&self.state);
+        if std::mem::take(&mut state.lapse_at_sync) {
+            state.epoch = state.epoch.next();
+            state.take_read_lock();
+        }
+        state.injections.take(SourceOp::Sync)
     }
 
     fn modified(&mut self) -> Result<Option<Timestamp>, SourceError> {
@@ -627,6 +660,16 @@ pub enum CheckpointEffect {
     Restart,
     /// Change nothing.
     Nothing,
+    /// End the read transaction and change nothing else: a backend that broke the TRUNCATE's
+    /// promise to keep it.
+    LostRead,
+    /// Never run: another connection holds the checkpoint lock (`SourceError::Busy`).
+    Refused,
+    /// As `Natural`, with another copy of SQLite in the process on the database.
+    SecondSqlite,
+    /// As `Natural`, after a reset nobody saw: a writer that restarted the WAL and died before
+    /// clearing the backfill count, so the TRUNCATE moves `salt1` on by two.
+    ResetTwice,
 }
 
 /// One scripted checkpoint outcome.
@@ -655,7 +698,7 @@ pub enum CheckpointCall {
 ///
 /// A checkpoint releases the read transaction, applies the next script (or the
 /// natural effect), bumps the epoch and retakes the read transaction, as the
-/// real one does.
+/// real one does; a TRUNCATE keeps the read transaction and its epoch.
 #[derive(Debug)]
 pub struct FakeCheckpointer {
     wal: FakeWal,
@@ -725,6 +768,9 @@ impl Checkpointer for FakeCheckpointer {
     fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointRun, SourceError> {
         self.enter(CheckpointCall::Checkpoint(mode), SourceOp::Checkpoint)?;
         let script = (!self.scripts.is_empty()).then(|| self.scripts.remove(0));
+        if script.is_some_and(|s| s.effect == CheckpointEffect::Refused) {
+            return Err(SourceError::Busy);
+        }
         Ok(self.wal.checkpoint_run(mode, script))
     }
 

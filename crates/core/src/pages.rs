@@ -364,17 +364,12 @@ impl PageChecksumTable {
 /// Whether a snapshot for `cause` empties the table first. An operator's
 /// request takes a snapshot of a database whose pages the table still
 /// describes. Every other cause follows a WAL whose frames the table may hold
-/// and the database never got, or, at the checkpoint boundary, a database the
-/// TRUNCATE wrote frames into that the table never saw: the checkpoint ends the
-/// engine's read transaction, so a commit that landed after the last step is
-/// backfilled with the rest, and its pages would read as damage
-/// (docs/decisions.md D121).
+/// and the database never got.
 #[must_use]
 pub(crate) const fn snapshot_clears(cause: &SnapshotCause) -> bool {
     match cause {
         SnapshotCause::OperatorRequested => false,
-        SnapshotCause::CheckpointBoundary
-        | SnapshotCause::FirstSync
+        SnapshotCause::FirstSync
         | SnapshotCause::BehindRemote { .. }
         | SnapshotCause::NewestStagedFileUnreadable
         | SnapshotCause::WalMissing

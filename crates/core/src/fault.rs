@@ -299,8 +299,6 @@ pub enum SnapshotCause {
         /// The committed end read now.
         committed: WalOffset,
     },
-    /// A truncating checkpoint moved the WAL past what was synced.
-    CheckpointBoundary,
     /// An operator asked.
     OperatorRequested,
     /// At boot, staged files the replica did not have yet were not vouched
@@ -342,8 +340,6 @@ pub enum SnapshotCauseKind {
     LastPageMismatch,
     /// [`SnapshotCause::LocalRewound`].
     LocalRewound,
-    /// [`SnapshotCause::CheckpointBoundary`].
-    CheckpointBoundary,
     /// [`SnapshotCause::OperatorRequested`].
     OperatorRequested,
     /// [`SnapshotCause::StagedUnverified`].
@@ -354,7 +350,7 @@ pub enum SnapshotCauseKind {
 
 impl SnapshotCauseKind {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 11] = [
         Self::FirstSync,
         Self::BehindRemote,
         Self::NewestStagedFileUnreadable,
@@ -363,7 +359,6 @@ impl SnapshotCauseKind {
         Self::PrevFrameMismatch,
         Self::LastPageMismatch,
         Self::LocalRewound,
-        Self::CheckpointBoundary,
         Self::OperatorRequested,
         Self::StagedUnverified,
         Self::AheadOfReplica,
@@ -381,7 +376,6 @@ impl From<&SnapshotCause> for SnapshotCauseKind {
             SnapshotCause::PrevFrameMismatch => Self::PrevFrameMismatch,
             SnapshotCause::LastPageMismatch => Self::LastPageMismatch,
             SnapshotCause::LocalRewound { .. } => Self::LocalRewound,
-            SnapshotCause::CheckpointBoundary => Self::CheckpointBoundary,
             SnapshotCause::OperatorRequested => Self::OperatorRequested,
             SnapshotCause::StagedUnverified { .. } => Self::StagedUnverified,
             SnapshotCause::AheadOfReplica { .. } => Self::AheadOfReplica,

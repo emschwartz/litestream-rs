@@ -38,12 +38,11 @@ const fn doubt_only(cause: SnapshotCause) -> bool {
         | SnapshotCause::PrevFrameMismatch
         | SnapshotCause::LastPageMismatch
         | SnapshotCause::NewestStagedFileUnreadable => true,
-        // The database's first copy, a replica ahead of us, frames a checkpoint or a failed
-        // sync moved past staging, a rewind, staged files deleted: commits may be in the file.
+        // The database's first copy, a replica ahead of us, a rewind, staged files deleted:
+        // commits may be in the file.
         SnapshotCause::FirstSync
         | SnapshotCause::BehindRemote { .. }
         | SnapshotCause::LocalRewound { .. }
-        | SnapshotCause::CheckpointBoundary
         | SnapshotCause::StagedUnverified { .. }
         | SnapshotCause::AheadOfReplica { .. } => false,
     }

@@ -3158,7 +3158,7 @@ const fn snapshot_reports_loss(cause: &lsr_core::SnapshotCause, over_files: bool
         // Taken for the replica's own database plus more on evidence, not proof: a database a
         // lying disk rewound reads the same way.
         | C::AheadOfReplica { .. } => true,
-        C::CheckpointBoundary | C::OperatorRequested => false,
+        C::OperatorRequested => false,
     }
 }
 
