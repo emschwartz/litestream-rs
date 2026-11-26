@@ -800,6 +800,15 @@ impl Runner {
         match next {
             Next::Now => {}
             Next::At(at) => {
+                // A real driver also wakes at its poll of the WAL (`lsr_replica`'s
+                // `poll_interval`, 250 ms by default), so a commit a tick passed over waits no
+                // longer than that. The tail judges each commit's lag as a real driver would see
+                // it: there no wait outlasts the second an `OnWalChange` wait takes here.
+                let at = if self.tail {
+                    at.min(self.now().saturating_add(Duration::from_secs(1)))
+                } else {
+                    at
+                };
                 if at > self.now() {
                     self.w.clock.set(at);
                 }
