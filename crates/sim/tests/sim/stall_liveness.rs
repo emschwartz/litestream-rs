@@ -50,31 +50,17 @@ fn a_stall_ends_with_the_fault_that_caused_it() {
 /// An upload whose answer was a size mismatch leaves the engine believing the replica holds a
 /// newest file it does not, and a restart with staging lost then boots over that belief. The
 /// boot's look at the replica's newest file must not fail on the missing file: it would read the
-/// same file at every retry and the drain would never end (seed 0x6b064c43, reduced).
+/// same file at every retry and the drain would never end. The read outage's length picks which
+/// upload the size mismatch lands on, so only some lengths leave the believed newest file missing,
+/// and which ones moves whenever the boot's reads change (the sliced read-back moved them from
+/// 138 to 40..=47). The scenario therefore runs at every fourth length from 0 to 252 (the lengths that matter
+/// have come in runs of eight) and the engine must drain at each, so the plant is caught
+/// wherever those runs fall.
 #[test]
 fn a_boot_over_a_believed_newest_file_the_replica_lacks_still_drains() {
     use lsr_core::StoreOp;
     use lsr_sim::FaultShape;
     use lsr_sim::generate::{EnvFault, Hold, Target};
-    let ops = [
-        Op::Hold {
-            hold: Hold::DiskFull,
-            ticks: 101,
-        },
-        Op::Hold {
-            hold: Hold::StoreDown(StoreOp::Read),
-            ticks: 138,
-        },
-        Op::Shutdown,
-        Op::EnvFault(EnvFault::WipeStaging),
-        Op::StoreFault {
-            target: Target::Remote,
-            op: StoreOp::Upload,
-            ahead: 0,
-            shape: FaultShape::SizeMismatch,
-        },
-        Op::SecondWriter { ticks: 3 },
-    ];
     let opts = Opts {
         drawn: true,
         block_crash_law: true,
@@ -85,7 +71,28 @@ fn a_boot_over_a_believed_newest_file_the_replica_lacks_still_drains() {
         remote_s3: true,
         ..Opts::default()
     };
-    if let Err(failure) = run_ops(Seed::new(0x6b06_4c43), &ops, &opts) {
-        panic!("{failure}");
+    for outage in (0..=255).step_by(4) {
+        let ops = [
+            Op::Hold {
+                hold: Hold::DiskFull,
+                ticks: 101,
+            },
+            Op::Hold {
+                hold: Hold::StoreDown(StoreOp::Read),
+                ticks: outage,
+            },
+            Op::Shutdown,
+            Op::EnvFault(EnvFault::WipeStaging),
+            Op::StoreFault {
+                target: Target::Remote,
+                op: StoreOp::Upload,
+                ahead: 0,
+                shape: FaultShape::SizeMismatch,
+            },
+            Op::SecondWriter { ticks: 3 },
+        ];
+        if let Err(failure) = run_ops(Seed::new(0x6b06_4c43), &ops, &opts) {
+            panic!("with a read outage of {outage} ticks: {failure}");
+        }
     }
 }
