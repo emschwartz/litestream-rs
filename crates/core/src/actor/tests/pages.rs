@@ -14,8 +14,8 @@ fn flip(rig: &mut Rig) {
     rig.db.write_page(three(), &vec![0xEE; PS.bytes()]);
 }
 
-fn mismatch() -> PersistentCause {
-    PersistentCause::DatabasePageMismatch { pgno: three() }
+fn mismatch() -> DegradedCause {
+    DegradedCause::DatabasePageMismatch { pgno: three() }
 }
 
 fn caught_up_with(cfg: ActorConfig) -> (Rig, Actor) {

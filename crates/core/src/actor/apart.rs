@@ -154,6 +154,10 @@ impl<L: ObjectStore> ObjectStore for Apart<'_, L> {
     async fn remove_scratch(&self) -> Result<u64, StoreError> {
         self.inner.remove_scratch().await
     }
+
+    fn free_bytes(&self) -> Option<u64> {
+        self.inner.free_bytes()
+    }
 }
 
 impl<L: Role> Role for Apart<'_, L> {

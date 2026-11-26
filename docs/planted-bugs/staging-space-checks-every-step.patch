@@ -1,0 +1,15 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 623ec828c..62957de8b 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -1767,9 +1767,7 @@ impl Actor {
+                 return Ok(verdict);
+             }
+         };
+-        if matches!(step, Step::Snapshot { .. }) {
+-            self.check_staging_space(env, size, now);
+-        }
++        self.check_staging_space(env, size, now);
+         wal_barrier(&mut *env.wal)?;
+         let synced = sync_step(
+             step,

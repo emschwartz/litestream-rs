@@ -1,11 +1,11 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 4583cc8e3..07f193388 100644
+index b783ff427..c524e4c6e 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1707,7 +1707,9 @@ impl Actor {
-                 return Ok(verdict);
-             }
-         };
+@@ -1770,7 +1770,9 @@ impl Actor {
+         if matches!(step, Step::Snapshot { .. }) {
+             self.check_staging_space(env, size, now);
+         }
 -        wal_barrier(&mut *env.wal)?;
 +        if !matches!(self.engine.course, Course::Local(_)) {
 +            wal_barrier(&mut *env.wal)?;

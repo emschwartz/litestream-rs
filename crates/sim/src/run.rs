@@ -13,8 +13,8 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::time::Duration;
 
 use lsr_core::{
-    Actor, ActorConfig, AppCheckpoints, CheckpointConfig, Clock, Entropy, Env, Event, Fault,
-    MAX_BACKOFF, Maintenance, Next, PersistentCause, Responses, RetentionMode, SeededEntropy,
+    Actor, ActorConfig, AppCheckpoints, CheckpointConfig, Clock, DegradedCause, Entropy, Env,
+    Event, Fault, MAX_BACKOFF, Maintenance, Next, Responses, RetentionMode, SeededEntropy,
     StopCause, SyncConfig, Task, Tick, UploadConfig,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
@@ -321,7 +321,7 @@ fn windows(maintenance: &Maintenance) -> Windows {
 enum Step {
     Ran,
     /// A task kept trying a persistent fault.
-    Degraded(PersistentCause),
+    Degraded(DegradedCause),
     /// A drain finished, naming the newest transaction on the replica.
     Drained(Option<Txid>),
     Stopped(StopCause),
@@ -1182,7 +1182,7 @@ impl Runner {
         match event {
             // A bug kept trying is still a bug, whatever the run expects.
             Event::Degraded {
-                cause: PersistentCause::Bug,
+                cause: DegradedCause::Bug,
                 ..
             } => Err(bug_fault("the engine met a bug and rebuilt itself")),
             Event::Degraded { cause, .. } => Ok(Step::Degraded(*cause)),
@@ -1199,7 +1199,8 @@ impl Runner {
             | Event::Resnapshot(_)
             | Event::Clamped(_)
             | Event::TakeoverWanted(_)
-            | Event::CheckingIdentity { .. } => Ok(Step::Ran),
+            | Event::CheckingIdentity { .. }
+            | Event::StagingShort { .. } => Ok(Step::Ran),
         }
     }
 
@@ -1246,7 +1247,8 @@ impl Runner {
             | Event::WritesHeld { .. }
             | Event::Clamped(_)
             | Event::TakeoverWanted(_)
-            | Event::CheckingIdentity { .. } => return Ok(()),
+            | Event::CheckingIdentity { .. }
+            | Event::StagingShort { .. } => return Ok(()),
         };
         self.forcings
             .judge(CauseKind::from(cause), at_boot, &mut self.report.reach)?;
@@ -1294,7 +1296,8 @@ impl Runner {
             | Event::WritesHeld { .. }
             | Event::Clamped(_)
             | Event::TakeoverWanted(_)
-            | Event::CheckingIdentity { .. } => {}
+            | Event::CheckingIdentity { .. }
+            | Event::StagingShort { .. } => {}
         }
     }
 
@@ -1393,9 +1396,9 @@ impl Runner {
     /// bug, as a stop for it would be. `Bug` is never expected. A stall is a
     /// retried fault that kept failing: as expected as the retries were before
     /// they were reported as a stall.
-    fn degraded_expected(&self, cause: PersistentCause) -> Result<(), Violation> {
+    fn degraded_expected(&self, cause: DegradedCause) -> Result<(), Violation> {
         let expected = cause.stop().is_none_or(|stop| self.stop_expected(stop));
-        if cause != PersistentCause::Bug && expected {
+        if cause != DegradedCause::Bug && expected {
             Ok(())
         } else {
             Err(Violation::UnexpectedDegraded { cause })
@@ -1846,7 +1849,7 @@ impl Runner {
             // believed of the replica and relists before anything else, which
             // judges the other writer's file then: it planned nothing from this
             // listing.
-            let relisting = step == Step::Degraded(PersistentCause::RemoteRegressed);
+            let relisting = step == Step::Degraded(DegradedCause::RemoteRegressed);
             match step {
                 Step::Stopped(cause) if self.stop_expected(cause) => {}
                 Step::Stopped(cause) => {
@@ -2674,23 +2677,23 @@ impl Runner {
     /// a stall (a retried fault that kept failing) may only while the world
     /// still imposes its fault ([`still_imposed`]): an engine still retrying
     /// a fault nothing causes any more is stuck, not degraded.
-    fn excused(&self, cause: PersistentCause) -> bool {
+    fn excused(&self, cause: DegradedCause) -> bool {
         match cause {
-            PersistentCause::Stalled(stall) if self.settling => still_imposed(stall),
-            PersistentCause::Stalled(_)
-            | PersistentCause::StoreDenied(_)
-            | PersistentCause::StoreRefused
-            | PersistentCause::RemoteCorrupt
-            | PersistentCause::OtherWriter
-            | PersistentCause::RemoteRegressed
-            | PersistentCause::WalCorrupt
-            | PersistentCause::WalTruncated
-            | PersistentCause::WalUnlinked
-            | PersistentCause::WalSyncFailed
-            | PersistentCause::PageSizeChanged { .. }
-            | PersistentCause::DatabasePageMismatch { .. }
-            | PersistentCause::ConditionalWritesUnsupported
-            | PersistentCause::Bug => true,
+            DegradedCause::Stalled(stall) if self.settling => still_imposed(stall),
+            DegradedCause::Stalled(_)
+            | DegradedCause::StoreDenied(_)
+            | DegradedCause::StoreRefused
+            | DegradedCause::RemoteCorrupt
+            | DegradedCause::OtherWriter
+            | DegradedCause::RemoteRegressed
+            | DegradedCause::WalCorrupt
+            | DegradedCause::WalTruncated
+            | DegradedCause::WalUnlinked
+            | DegradedCause::WalSyncFailed
+            | DegradedCause::PageSizeChanged { .. }
+            | DegradedCause::DatabasePageMismatch { .. }
+            | DegradedCause::ConditionalWritesUnsupported
+            | DegradedCause::Bug => true,
         }
     }
 
@@ -2699,7 +2702,7 @@ impl Runner {
     fn no_stall_left(&self, tasks: &[Task]) -> Result<(), Violation> {
         for task in tasks.iter().copied() {
             if let Some(degraded) = self.actor.degraded(task)
-                && let PersistentCause::Stalled(stall) = degraded.cause
+                && let DegradedCause::Stalled(stall) = degraded.cause
                 && !still_imposed(stall)
             {
                 return Err(Violation::StuckRetrying {
@@ -2897,7 +2900,8 @@ fn capped(event: &Event, began: Timestamp, slack: u64) -> Result<(), Violation> 
         | Event::Resnapshot(_)
         | Event::Clamped(_)
         | Event::TakeoverWanted(_)
-        | Event::CheckingIdentity { .. } => return Ok(()),
+        | Event::CheckingIdentity { .. }
+        | Event::StagingShort { .. } => return Ok(()),
     };
     let cap = named.map_or(MAX_BACKOFF, |named| named.max(MAX_BACKOFF));
     let millis = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
@@ -3086,22 +3090,22 @@ const fn snapshot_reports_loss(cause: &lsr_core::SnapshotCause, over_files: bool
 /// Whether a degraded state reports that the replica or the local history went back: as
 /// [`stop_reports_loss`] for the cause of the same name; a stall (a retried fault that kept
 /// failing) says nothing about history.
-const fn persistent_reports_loss(cause: PersistentCause) -> bool {
+const fn persistent_reports_loss(cause: DegradedCause) -> bool {
     match cause {
-        PersistentCause::RemoteRegressed
-        | PersistentCause::OtherWriter
-        | PersistentCause::WalCorrupt
-        | PersistentCause::WalTruncated
-        | PersistentCause::WalUnlinked
-        | PersistentCause::WalSyncFailed => true,
-        PersistentCause::StoreDenied(_)
-        | PersistentCause::StoreRefused
-        | PersistentCause::RemoteCorrupt
-        | PersistentCause::PageSizeChanged { .. }
-        | PersistentCause::DatabasePageMismatch { .. }
-        | PersistentCause::ConditionalWritesUnsupported
-        | PersistentCause::Bug
-        | PersistentCause::Stalled(_) => false,
+        DegradedCause::RemoteRegressed
+        | DegradedCause::OtherWriter
+        | DegradedCause::WalCorrupt
+        | DegradedCause::WalTruncated
+        | DegradedCause::WalUnlinked
+        | DegradedCause::WalSyncFailed => true,
+        DegradedCause::StoreDenied(_)
+        | DegradedCause::StoreRefused
+        | DegradedCause::RemoteCorrupt
+        | DegradedCause::PageSizeChanged { .. }
+        | DegradedCause::DatabasePageMismatch { .. }
+        | DegradedCause::ConditionalWritesUnsupported
+        | DegradedCause::Bug
+        | DegradedCause::Stalled(_) => false,
     }
 }
 

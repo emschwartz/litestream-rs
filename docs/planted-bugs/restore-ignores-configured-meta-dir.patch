@@ -1,0 +1,13 @@
+diff --git a/crates/replica/src/restore.rs b/crates/replica/src/restore.rs
+--- a/crates/replica/src/restore.rs
++++ b/crates/replica/src/restore.rs
+@@ -89,8 +89,7 @@
+ pub fn restore(store: &dyn DynStore, to: &Path, how: &Restore) -> Result<Restored, RestoreError> {
+     // A path that names no file has no default meta directory, and is refused before
+     // anything is written rather than restored without a trust record.
+-    let meta = how
+-        .config
++    let meta = Config::default()
+         .meta_dir_for(to)
+         .ok_or_else(|| RestoreError::NoMetaDir {
+             path: to.to_owned(),

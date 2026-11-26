@@ -436,7 +436,7 @@ pub enum Violation {
     #[error("bug fault: a task is degraded: {cause:?}")]
     UnexpectedDegraded {
         /// The cause the engine reported.
-        cause: lsr_core::PersistentCause,
+        cause: lsr_core::DegradedCause,
     },
     /// The engine reported its own bug, or the oracle could not decide.
     #[error("bug fault: {context}")]

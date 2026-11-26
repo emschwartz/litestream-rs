@@ -30,7 +30,7 @@
 //!    and the next listing waits with it. A snapshot read from the database goes a slice a
 //!    tick: its slices go first, the rest of the engine has the tick after each
 //!    [`state::FAIR_SHARE`] of them, no checkpoint runs and nothing is listed until it ends
-//!    (`docs/decisions/D252.md`).
+//!    (`docs/decisions/D254.md`).
 //!
 //!    Fair share: after [`state::FAIR_SHARE`] uploads in a row, prune and
 //!    maintenance, when either has work, take the next unit ahead of uploads
@@ -123,7 +123,7 @@ use crate::env::Clock;
 use crate::failstop::MaxUnreplicatedAge;
 use crate::fault::role::{Replica, Role, Staging};
 use crate::fault::{
-    Action, Backoff, Clamped, Fault, Next, OtherWriter, PersistentCause, Policy, Responses,
+    Action, Backoff, Clamped, DegradedCause, Fault, Next, OtherWriter, Policy, Responses,
     STALLED_AFTER, SnapshotCause, SnapshotCounts, Stall, StopCause, backoff_wait, policy,
 };
 use crate::identity::{self, Identity};
@@ -281,7 +281,7 @@ pub enum Event {
     Uploaded(Did),
     /// A slice of a staged file, or of a level-9 snapshot, went to the replica and more of the
     /// file is left: the tick handed the replica as much as one tick may
-    /// (`docs/decisions/D217.md`, `docs/decisions/D252.md`), and the next slice reads on.
+    /// (`docs/decisions/D217.md`, `docs/decisions/D254.md`), and the next slice reads on.
     /// Nothing is published until the file is whole.
     Sending {
         /// How many bytes of the file were handed to the replica so far.
@@ -303,7 +303,7 @@ pub enum Event {
         /// The task that failed.
         task: Task,
         /// Why.
-        cause: PersistentCause,
+        cause: DegradedCause,
         /// When the task first failed this way without a success between.
         since: Timestamp,
         /// When the retry is due.
@@ -349,6 +349,16 @@ pub enum Event {
     CheckingIdentity {
         /// The replica's newest transaction, the state compared.
         tip: Txid,
+    },
+    /// A whole-database copy is about to be staged and the staging disk has less free space than
+    /// the copy can take. Never a tick's event: handed to [`Env::notice`] as the copy starts,
+    /// which then runs as Go's would, until the disk fills if it does. While the copy may still
+    /// be in staging the sync task reports `local_disk_full` ([`Actor::degraded`]).
+    StagingShort {
+        /// The most the copy can take: the database's size.
+        needed: u64,
+        /// What the staging disk has free.
+        free: u64,
     },
 }
 
@@ -642,7 +652,17 @@ impl Actor {
     /// The task's degraded state, if a persistent failure left it in one.
     #[must_use]
     pub fn degraded(&self, task: Task) -> Option<Degraded> {
-        self.kept.tasks.get(task).degraded()
+        let own = self.kept.tasks.get(task).degraded();
+        match self.kept.staging_short {
+            Some(since) if task == Task::Sync && own.is_none() && !self.caught_up() => {
+                Some(Degraded {
+                    cause: DegradedCause::Stalled(Stall::LocalDiskFull),
+                    since,
+                    retries: 1,
+                })
+            }
+            Some(_) | None => own,
+        }
     }
 
     /// An operator accepts the database file as it is: every page the page
@@ -959,7 +979,7 @@ impl Actor {
         match policy(&fault) {
             Policy::Retry(backoff) => {
                 if let Some(stall) = self.stalled(waiter, &fault) {
-                    return self.persistent(waiter, PersistentCause::Stalled(stall), backoff, now);
+                    return self.persistent(waiter, DegradedCause::Stalled(stall), backoff, now);
                 }
                 let until = self.wait(waiter, backoff, now);
                 self.ran(Event::Retrying { fault, until }, now)
@@ -1019,7 +1039,7 @@ impl Actor {
     /// the configured response, the end of a drain stops.
     fn verdict(&mut self, task: Task, cause: StopCause, now: Timestamp) -> Tick {
         self.lag_failed(Waiter::Task(task), None, now);
-        match PersistentCause::of(cause) {
+        match DegradedCause::of(cause) {
             Some(cause) => self.persistent(Waiter::Task(task), cause, Backoff::Doubling, now),
             None => self.stop(cause),
         }
@@ -1031,7 +1051,7 @@ impl Actor {
     fn persistent(
         &mut self,
         waiter: Waiter,
-        cause: PersistentCause,
+        cause: DegradedCause,
         backoff: Backoff,
         now: Timestamp,
     ) -> Tick {
@@ -1800,6 +1820,9 @@ impl Actor {
                 return Ok(verdict);
             }
         };
+        if matches!(step, Step::Snapshot { .. }) {
+            self.check_staging_space(env, size, now);
+        }
         wal_barrier(&mut *env.wal)?;
         let synced = sync_step(
             step,
@@ -1814,6 +1837,31 @@ impl Actor {
         .await
         .map_err(|failed| failed.fault)?;
         Ok(self.absorb(synced, committed.end(), &*env.wal))
+    }
+
+    /// Before a whole-database copy is staged: tells `env.notice` and the sync task's health when
+    /// the staging disk has less free space than the copy can take. It only reports; the copy
+    /// runs either way, as Go's does, and a disk that cannot say, or a database that cannot be
+    /// sized yet (the step meets that itself), reports nothing.
+    fn check_staging_space<W, P: PageSource, C, L: Role, R>(
+        &mut self,
+        env: &mut Env<'_, W, P, C, L, R>,
+        size: PageSize,
+        now: Timestamp,
+    ) {
+        // A disk that cannot say is not asked about the database: sizing it is a call on the
+        // page source that the step itself makes next.
+        let Some(free) = env.staging.free_bytes() else {
+            self.kept.staging_short = None;
+            return;
+        };
+        self.kept.staging_short = match env.db.page_count().map(|pages| pages.bytes(size)) {
+            Ok(needed) if free < needed => {
+                (env.notice)(&Event::StagingShort { needed, free });
+                Some(self.kept.staging_short.unwrap_or(now))
+            }
+            Ok(_) | Err(_) => None,
+        };
     }
 
     fn plan_step<R: std::io::Read + std::io::Seek>(
@@ -2205,7 +2253,7 @@ impl Actor {
         let upload = self.kept.tasks.get_mut(Task::Upload);
         upload.succeed();
         if let Some(since) = self.kept.unguarded {
-            upload.stand(PersistentCause::ConditionalWritesUnsupported, since);
+            upload.stand(DegradedCause::ConditionalWritesUnsupported, since);
         }
     }
 
@@ -2558,7 +2606,7 @@ impl Actor {
             self.kept
                 .tasks
                 .get_mut(Task::Upload)
-                .stand(PersistentCause::ConditionalWritesUnsupported, since);
+                .stand(DegradedCause::ConditionalWritesUnsupported, since);
         }
         if let Job::Snapshot(_) = job {
             return self.snapshot_merged(job, outcome, now, created_at_read);

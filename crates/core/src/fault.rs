@@ -13,7 +13,7 @@
 //! fix: the store refusing access, a corrupt object, a damaged WAL, a failed
 //! WAL sync, another writer.
 //! What happens then is configuration, one field of [`Responses`] per
-//! [`PersistentCause`] (`docs/PLAN.md`, the degraded-state section). [`Response::KeepTrying`]
+//! [`DegradedCause`] (`docs/PLAN.md`, the degraded-state section). [`Response::KeepTrying`]
 //! puts the task that failed in a degraded state: it retries with the doubling
 //! wait, capped at [`MAX_BACKOFF`] as Go's sync loop is, the other tasks keep
 //! running, and every retry that fails is reported. [`Response::Stop`] stops
@@ -31,7 +31,7 @@
 //! that went backwards is listed again and taken as it now is.
 //!
 //! A [`Policy::Retry`] fault that keeps failing one task is a degraded state too: at the
-//! [`STALLED_AFTER`]th failure in a row the task is degraded as [`PersistentCause::Stalled`],
+//! [`STALLED_AFTER`]th failure in a row the task is degraded as [`DegradedCause::Stalled`],
 //! naming the fault, and it keeps retrying on the same wait. A stall is not configurable and
 //! never stops the engine; it exists so that health never says healthy while a full disk,
 //! a refusing store or the application's readers keep replication from moving. A wait that
@@ -436,7 +436,7 @@ impl SnapshotCounts {
     }
 }
 
-/// Why the engine stopped and waits for a person: a [`PersistentCause`]
+/// Why the engine stopped and waits for a person: a [`DegradedCause`]
 /// whose configured response is to stop, or a drain whose deadline passed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StopCause {
@@ -486,7 +486,7 @@ pub enum StopCause {
 /// A failure that waiting alone is not expected to fix. The configured
 /// [`Responses`] say whether the engine keeps trying or stops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PersistentCause {
+pub enum DegradedCause {
     /// The store refuses access, or could not be reached securely; the kind
     /// says what a person must fix.
     StoreDenied(Denied),
@@ -531,7 +531,7 @@ pub enum PersistentCause {
 }
 
 /// How many failures in a row of a retried fault, on one task, make the task degraded
-/// ([`PersistentCause::Stalled`]). With the doubling wait from Go's one-second interval the
+/// ([`DegradedCause::Stalled`]). With the doubling wait from Go's one-second interval the
 /// eighth failure comes about two minutes after the first.
 pub const STALLED_AFTER: NonZeroU32 = match NonZeroU32::new(8) {
     Some(n) => n,
@@ -616,7 +616,7 @@ impl Stall {
     }
 }
 
-impl PersistentCause {
+impl DegradedCause {
     /// The persistent cause behind a stop cause; `None` for the one stop that
     /// is not configurable, the end of a drain.
     #[must_use]
@@ -640,7 +640,7 @@ impl PersistentCause {
     }
 }
 
-impl PersistentCause {
+impl DegradedCause {
     /// The stop this cause makes when its response is to stop; `None` for a stall, which
     /// never stops the engine.
     #[must_use]
@@ -664,7 +664,7 @@ impl PersistentCause {
     }
 }
 
-/// What the engine does about one [`PersistentCause`].
+/// What the engine does about one [`DegradedCause`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Response {
     /// The task that failed is degraded and retries with the capped doubling
@@ -773,7 +773,7 @@ impl Responses {
 
     /// Whether `cause` stops the engine. A stall never does.
     #[must_use]
-    pub const fn stops(&self, cause: PersistentCause) -> bool {
+    pub const fn stops(&self, cause: DegradedCause) -> bool {
         match self.action(cause) {
             Action::Stop => true,
             Action::Retry | Action::Relist | Action::Rebuild => false,
@@ -792,32 +792,32 @@ impl Responses {
     }
 
     /// What the actor does about `cause`.
-    pub(crate) const fn action(&self, cause: PersistentCause) -> Action {
+    pub(crate) const fn action(&self, cause: DegradedCause) -> Action {
         let response = match cause {
-            PersistentCause::StoreDenied(why) => self.denied(why),
-            PersistentCause::StoreRefused => self.store_refused,
-            PersistentCause::RemoteCorrupt => self.remote_corrupt,
-            PersistentCause::WalCorrupt => self.wal_corrupt,
-            PersistentCause::WalTruncated => self.wal_truncated,
-            PersistentCause::WalUnlinked => self.wal_unlinked,
-            PersistentCause::WalSyncFailed => self.wal_sync_failed,
-            PersistentCause::PageSizeChanged { .. } => self.page_size_changed,
-            PersistentCause::DatabasePageMismatch { .. } => self.database_page_mismatch,
-            PersistentCause::ConditionalWritesUnsupported => self.conditional_writes_unsupported,
-            PersistentCause::Stalled(_) => return Action::Retry,
-            PersistentCause::RemoteRegressed => {
+            DegradedCause::StoreDenied(why) => self.denied(why),
+            DegradedCause::StoreRefused => self.store_refused,
+            DegradedCause::RemoteCorrupt => self.remote_corrupt,
+            DegradedCause::WalCorrupt => self.wal_corrupt,
+            DegradedCause::WalTruncated => self.wal_truncated,
+            DegradedCause::WalUnlinked => self.wal_unlinked,
+            DegradedCause::WalSyncFailed => self.wal_sync_failed,
+            DegradedCause::PageSizeChanged { .. } => self.page_size_changed,
+            DegradedCause::DatabasePageMismatch { .. } => self.database_page_mismatch,
+            DegradedCause::ConditionalWritesUnsupported => self.conditional_writes_unsupported,
+            DegradedCause::Stalled(_) => return Action::Retry,
+            DegradedCause::RemoteRegressed => {
                 return match self.remote_regressed {
                     Response::KeepTrying => Action::Relist,
                     Response::Stop => Action::Stop,
                 };
             }
-            PersistentCause::Bug => {
+            DegradedCause::Bug => {
                 return match self.bug {
                     Response::KeepTrying => Action::Rebuild,
                     Response::Stop => Action::Stop,
                 };
             }
-            PersistentCause::OtherWriter => {
+            DegradedCause::OtherWriter => {
                 return match self.other_writer {
                     OtherWriter::ContinueAndInterleaveHistories => Action::Rebuild,
                     OtherWriter::Stop => Action::Stop,
@@ -869,7 +869,7 @@ pub enum Policy {
     Retry(Backoff),
     /// Keep trying in a degraded state, or stop: the configured [`Responses`]
     /// for this cause decide.
-    Persistent(PersistentCause),
+    Persistent(DegradedCause),
     /// Stop: a drain's deadline passed with work left. Not configurable.
     Shutdown,
     /// Wait without counting a failure, until writes are allowed again: the task never
@@ -900,30 +900,28 @@ pub const fn policy(fault: &Fault) -> Policy {
         | Fault::NothingToSnapshot
         | Fault::StagedLost
         | Fault::ReadTxLost => Policy::Retry(Backoff::Doubling),
-        Fault::PageSizeChanged { was, now } => {
-            Policy::Persistent(PersistentCause::PageSizeChanged {
-                was: *was,
-                now: *now,
-            })
-        }
-        Fault::StoreDenied(why) => Policy::Persistent(PersistentCause::StoreDenied(*why)),
-        Fault::StoreRefused => Policy::Persistent(PersistentCause::StoreRefused),
-        Fault::RemoteCorrupt => Policy::Persistent(PersistentCause::RemoteCorrupt),
-        Fault::RemoteAheadOfLocal => Policy::Persistent(PersistentCause::OtherWriter),
-        Fault::RemoteRegressed => Policy::Persistent(PersistentCause::RemoteRegressed),
-        Fault::WalCorruptBelowCommitted => Policy::Persistent(PersistentCause::WalCorrupt),
-        Fault::WalTruncatedBelowCommitted => Policy::Persistent(PersistentCause::WalTruncated),
-        Fault::WalUnlinked => Policy::Persistent(PersistentCause::WalUnlinked),
-        Fault::WalSyncFailed => Policy::Persistent(PersistentCause::WalSyncFailed),
+        Fault::PageSizeChanged { was, now } => Policy::Persistent(DegradedCause::PageSizeChanged {
+            was: *was,
+            now: *now,
+        }),
+        Fault::StoreDenied(why) => Policy::Persistent(DegradedCause::StoreDenied(*why)),
+        Fault::StoreRefused => Policy::Persistent(DegradedCause::StoreRefused),
+        Fault::RemoteCorrupt => Policy::Persistent(DegradedCause::RemoteCorrupt),
+        Fault::RemoteAheadOfLocal => Policy::Persistent(DegradedCause::OtherWriter),
+        Fault::RemoteRegressed => Policy::Persistent(DegradedCause::RemoteRegressed),
+        Fault::WalCorruptBelowCommitted => Policy::Persistent(DegradedCause::WalCorrupt),
+        Fault::WalTruncatedBelowCommitted => Policy::Persistent(DegradedCause::WalTruncated),
+        Fault::WalUnlinked => Policy::Persistent(DegradedCause::WalUnlinked),
+        Fault::WalSyncFailed => Policy::Persistent(DegradedCause::WalSyncFailed),
         Fault::DatabasePageMismatch { pgno } => {
-            Policy::Persistent(PersistentCause::DatabasePageMismatch { pgno: *pgno })
+            Policy::Persistent(DegradedCause::DatabasePageMismatch { pgno: *pgno })
         }
         Fault::CreateOnlyUnsupported => {
-            Policy::Persistent(PersistentCause::ConditionalWritesUnsupported)
+            Policy::Persistent(DegradedCause::ConditionalWritesUnsupported)
         }
         Fault::ShutdownDeadline => Policy::Shutdown,
         Fault::WritesHeld => Policy::Wait,
-        Fault::Bug(_) => Policy::Persistent(PersistentCause::Bug),
+        Fault::Bug(_) => Policy::Persistent(DegradedCause::Bug),
     }
 }
 

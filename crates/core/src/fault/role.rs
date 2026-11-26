@@ -162,6 +162,10 @@ macro_rules! pass_through {
                 self.0.remove_scratch().await
             }
 
+            fn free_bytes(&self) -> Option<u64> {
+                self.0.free_bytes()
+            }
+
             fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
                 self.0.batch_width(kind)
             }
