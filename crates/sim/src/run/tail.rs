@@ -24,11 +24,11 @@
 
 use std::time::Duration;
 
-use lsr_core::Event;
+use lsr_core::{Entropy, Event};
 use lsr_ltx::Txid;
 
 use super::{Runner, Step};
-use crate::cost::{Allowance, Profile, Spare};
+use crate::cost::{Allowance, Link, Profile, Spare};
 use crate::oracle::{Bound, Violation, within};
 use crate::resources::{SLICES_AHEAD, TickStats};
 use crate::store::{RecorderCounts, RecorderEvent};
@@ -68,19 +68,60 @@ fn puts_since(events: &[RecorderEvent], from: usize) -> u64 {
 }
 
 impl Runner {
-    /// The prices the clock moves by: the run's, or none.
+    /// The prices the clock moves by: the run's, or none. A run with a latency tail is
+    /// charged at the default prices.
     fn prices(&self) -> Option<Profile> {
-        self.cost.or(self.tail.then_some(Profile::DEFAULT))
+        self.cost
+            .or((self.tail || self.latency.is_some()).then_some(Profile::DEFAULT))
     }
 
-    /// Moves the clock on by what the tick that just ran cost, when the run is charged.
-    pub(super) fn charge(&self, remote0: RecorderCounts, staging0: RecorderCounts) {
-        let Some(profile) = self.prices() else {
+    /// The prices in force for the tick under way: the run's, with staging slowed while a
+    /// slow disk holds (`Hold::SlowStaging`), which charges an uncharged run for its staging
+    /// calls alone. The healthy tail is never slowed.
+    pub(super) fn profile_in_force(&self) -> Option<Profile> {
+        let base = self.prices();
+        match self.slow_staging.filter(|_| !self.tail) {
+            Some(factor) => Some(Profile {
+                remote: base.map_or(Link::FREE, |base| base.remote),
+                staging: base
+                    .unwrap_or(Profile::DEFAULT)
+                    .staging
+                    .slowed(u64::from(factor)),
+            }),
+            None => base,
+        }
+    }
+
+    /// Moves the clock on by what the tick that just ran cost, when the run is charged: its
+    /// calls at the prices in force, and with a latency tail, each replica request's draw from
+    /// the tail past the profile's latency (`crate::cost::tail_factor`).
+    pub(super) fn charge(&mut self, remote0: RecorderCounts, staging0: RecorderCounts) {
+        let Some(profile) = self.profile_in_force() else {
             return;
         };
         let remote = crate::resources::delta(remote0, self.w.remote_recorder.counts());
         let staging = crate::resources::delta(staging0, self.w.staging_recorder.counts());
-        self.w.clock.advance(profile.tick(&remote, &staging));
+        let mut tenfold = 0_u64;
+        let tail = match self.latency.as_ref().filter(|_| !self.tail) {
+            Some(stream) => (0..crate::cost::requests(&remote)).fold(0_u64, |sum, _| {
+                let factor = crate::cost::tail_factor(stream.below(crate::cost::TAIL_DRAWS));
+                tenfold = tenfold.saturating_add(u64::from(factor >= 10));
+                sum.saturating_add(
+                    factor
+                        .saturating_sub(1)
+                        .saturating_mul(profile.remote.latency_us),
+                )
+            }),
+            None => 0,
+        };
+        if tenfold > 0 {
+            self.report.reach.add("gray.latency.tenfold", tenfold);
+        }
+        self.w.clock.advance(
+            profile
+                .tick(&remote, &staging)
+                .saturating_add(Duration::from_micros(tail)),
+        );
     }
 
     /// What one tick may cost, from the run's configuration.

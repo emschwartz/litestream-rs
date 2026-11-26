@@ -247,6 +247,9 @@ pub struct World {
     /// The clock the actor and the app read inside a tick, over [`Self::clock`]
     /// under the run's [`ClockLaw`].
     pub sim_clock: Arc<SimClock>,
+    /// Time spent inside the tick under way ([`crate::clock::Stall`]): a hung replica call's
+    /// wait, or a pause of the process.
+    pub stall: crate::clock::Stall,
     /// The latest time the actor has been told: the run loop notes each
     /// tick's, and the recorders read it.
     pub high: HighWater,
@@ -371,7 +374,7 @@ impl FileTimes {
 fn remote_stack(
     backend: RemoteBackend,
     raw: &Bucket,
-    clock: &Arc<FakeClock>,
+    (clock, stall): (&Arc<FakeClock>, &crate::clock::Stall),
     high: &HighWater,
     seed: u64,
 ) -> (RemoteStore, RecorderLog) {
@@ -380,8 +383,9 @@ fn remote_stack(
         recorder = recorder.landed_through(raw.landed());
     }
     let log = recorder.log();
-    let store =
-        Faults::new(YieldEachCall::new(recorder), Vec::new(), seed).corrupting_through(raw.clone());
+    let store = Faults::new(YieldEachCall::new(recorder), Vec::new(), seed)
+        .corrupting_through(raw.clone())
+        .hanging_through(stall.clone(), crate::remote::client_timeout());
     (store, log)
 }
 
@@ -401,6 +405,7 @@ impl World {
         let page_size = sqlite.page_size();
         let clock = Arc::new(FakeClock::new(Timestamp::from_unix_millis(EPOCH_MILLIS)));
         let high = HighWater::default();
+        let stall = crate::clock::Stall::default();
         let staging_raw = StagingRaw::Mem(MemStore::new());
         let remote_mem = MemStore::new();
         let remote_raw = Bucket::Mem(remote_mem.clone());
@@ -417,7 +422,7 @@ impl World {
         let (remote, remote_recorder_log) = remote_stack(
             RemoteBackend::Mem(remote_mem),
             &remote_raw,
-            &clock,
+            (&clock, &stall),
             &high,
             seed.stream(3),
         );
@@ -434,6 +439,7 @@ impl World {
             high.clone(),
             ClockLaw::PerTick,
             seed.stream(16),
+            stall.clone(),
         ));
         let file_times = FileTimes::new(
             sqlite.db_file(),
@@ -445,6 +451,7 @@ impl World {
             sqlite,
             clock,
             sim_clock,
+            stall,
             high,
             sleeper: RecordingSleeper::new(),
             entropy: SeededEntropy::new(seed.stream(4)),
@@ -494,7 +501,7 @@ impl World {
     /// replica starts empty, and its fault schedule and batch widths start over.
     pub fn use_s3_remote(&mut self, parts: Option<Parts>) {
         let parts = parts.map(|parts| (parts, self.seed.stream(26)));
-        let Some((backend, bucket)) = crate::remote::s3(&self.clock, parts) else {
+        let Some((backend, bucket)) = crate::remote::s3(&self.clock, parts, &self.stall) else {
             return;
         };
         if let RemoteBackend::S3(remote) = &backend {
@@ -503,7 +510,7 @@ impl World {
         let (remote, log) = remote_stack(
             backend,
             &bucket,
-            &self.clock,
+            (&self.clock, &self.stall),
             &self.high,
             self.seed.stream(3),
         );
@@ -574,6 +581,7 @@ impl World {
             self.high.clone(),
             law,
             self.seed.stream(16),
+            self.stall.clone(),
         ));
     }
 

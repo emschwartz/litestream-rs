@@ -82,6 +82,17 @@ pub enum FaultShape {
     /// until healed. Draws nothing from the seed and counts as no call, so no schedule that
     /// does not use it moves; the scheduled operation is ignored.
     Scratch(StoreError),
+    /// The call hangs until the client gives up, then fails as the S3 client fails a request
+    /// that timed out ([`timed_out`]), and publishes nothing: the tick's later clock reads are
+    /// the client's timeout later ([`Faults::hanging_through`]). Counted over calls of the
+    /// operation, as [`FaultShape::Error`] is.
+    Hang,
+    /// As [`FaultShape::Hang`], after the commit published the object: the answer never came.
+    /// Counted over commits, `StoreOp::Upload` only.
+    HangAfterPublish,
+    /// From the scheduled call on, every call of the operation hangs as [`FaultShape::Hang`]
+    /// does, until released or healed: an endpoint that stopped answering.
+    HangEvery,
     /// From the scheduled call on, every call of the operation fails with
     /// `err` with probability `per_mille` in a thousand, drawn from the seed.
     Rate {
@@ -156,6 +167,17 @@ struct FaultState {
     widths: [NonZeroUsize; 2],
     // Batch calls that held more than one item.
     batched: u32,
+    // Where a hung call's wait goes, and how long the client waits before it gives up.
+    hang: Option<(crate::clock::Stall, u64)>,
+    // Calls that hung.
+    hung: u32,
+}
+
+/// The error the S3 client returns for a request that got no answer before its timeout: the
+/// store's own mapping of a transport timeout, so a hang fails exactly as the client fails it.
+#[must_use]
+pub fn timed_out(op: StoreOp) -> StoreError {
+    lsr_store_s3::classify_transport(op, &lsr_store_s3::TransportError::Timeout)
 }
 
 impl FaultState {
@@ -182,7 +204,13 @@ impl FaultState {
             self.commits = seen.saturating_add(1);
             seen
         });
-        let Self { schedule, rng, .. } = self;
+        let Self {
+            schedule,
+            rng,
+            hang,
+            hung,
+            ..
+        } = self;
         for entry in schedule.iter_mut().filter(|e| !e.fired && e.op == op) {
             let hit = match &entry.shape {
                 FaultShape::Error(err) => (seen == entry.nth).then(|| Verdict::Fail(err.clone())),
@@ -201,14 +229,30 @@ impl FaultState {
                 FaultShape::FlipByteOnRead { at } => {
                     (call == Call::Read && seen == entry.nth).then_some(Verdict::Flip(*at))
                 }
+                FaultShape::Hang => (seen == entry.nth).then(|| Verdict::Fail(timed_out(op))),
+                FaultShape::HangAfterPublish => {
+                    (commit_seen == Some(entry.nth)).then(|| Verdict::AfterPublish(timed_out(op)))
+                }
+                FaultShape::HangEvery => (seen >= entry.nth).then(|| Verdict::Fail(timed_out(op))),
                 FaultShape::Scratch(_) => None,
                 FaultShape::Rate { per_mille, err } => (seen >= entry.nth
                     && rng.below(1000) < u64::from(*per_mille))
                 .then(|| Verdict::Fail(err.clone())),
             };
             if let Some(verdict) = hit {
-                entry.fired = !matches!(entry.shape, FaultShape::Rate { .. });
+                let hangs = matches!(
+                    entry.shape,
+                    FaultShape::Hang | FaultShape::HangAfterPublish | FaultShape::HangEvery
+                );
+                entry.fired =
+                    !matches!(entry.shape, FaultShape::Rate { .. } | FaultShape::HangEvery);
                 entry.hits = entry.hits.saturating_add(1);
+                if hangs {
+                    *hung = hung.saturating_add(1);
+                    if let Some((stall, millis)) = hang.as_ref() {
+                        stall.add(*millis);
+                    }
+                }
                 return verdict;
             }
         }
@@ -242,10 +286,13 @@ impl FaultHandle {
             FaultShape::ErrorAfterPublish(_)
             | FaultShape::SizeMismatch
             | FaultShape::ChecksumMismatch
-            | FaultShape::CorruptPublish => state.commits,
+            | FaultShape::CorruptPublish
+            | FaultShape::HangAfterPublish => state.commits,
             FaultShape::Error(_)
             | FaultShape::FlipByteOnRead { .. }
             | FaultShape::Rate { .. }
+            | FaultShape::Hang
+            | FaultShape::HangEvery
             | FaultShape::Scratch(_) => *state.count(op),
         };
         state.schedule.push(Entry {
@@ -352,11 +399,17 @@ impl FaultHandle {
         for entry in &mut lock(&self.state).schedule {
             if matches!(
                 entry.shape,
-                FaultShape::Rate { .. } | FaultShape::Scratch(_)
+                FaultShape::Rate { .. } | FaultShape::Scratch(_) | FaultShape::HangEvery
             ) {
                 entry.fired = true;
             }
         }
+    }
+
+    /// Calls that hung ([`FaultShape::Hang`] and its kin).
+    #[must_use]
+    pub fn hung(&self) -> u32 {
+        lock(&self.state).hung
     }
 
     /// One-shot faults that have not fired yet.
@@ -366,7 +419,11 @@ impl FaultHandle {
             .schedule
             .iter()
             .filter(|e| {
-                !e.fired && !matches!(e.shape, FaultShape::Rate { .. } | FaultShape::Scratch(_))
+                !e.fired
+                    && !matches!(
+                        e.shape,
+                        FaultShape::Rate { .. } | FaultShape::Scratch(_) | FaultShape::HangEvery
+                    )
             })
             .count()
     }
@@ -414,6 +471,8 @@ impl<S> Faults<S> {
             rejected: Vec::new(),
             widths: [NonZeroUsize::MIN; 2],
             batched: 0,
+            hang: None,
+            hung: 0,
         };
         Self {
             inner,
@@ -428,6 +487,15 @@ impl<S> Faults<S> {
     #[must_use]
     pub fn corrupting_through(mut self, raw: crate::remote::Bucket) -> Self {
         self.raw = Some(raw);
+        self
+    }
+
+    /// Lets a hung call ([`FaultShape::Hang`]) spend `timeout` of the tick's time in `stall`,
+    /// as a client that waits that long for an answer before it gives up.
+    #[must_use]
+    pub fn hanging_through(self, stall: crate::clock::Stall, timeout: std::time::Duration) -> Self {
+        let millis = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+        lock(&self.state).hang = Some((stall, millis));
         self
     }
 
@@ -474,6 +542,9 @@ impl<S> Faults<S> {
             | FaultShape::ChecksumMismatch
             | FaultShape::CorruptPublish
             | FaultShape::FlipByteOnRead { .. }
+            | FaultShape::Hang
+            | FaultShape::HangAfterPublish
+            | FaultShape::HangEvery
             | FaultShape::Rate { .. } => None,
         }
     }

@@ -106,6 +106,16 @@ pub const REQUIRED: &[&str] = &[
     "send.commit_between_slices",
     "send.then_a_fault",
     "send.then_the_process_ended",
+    // Gray weather (docs/decisions/D276.md): a replica call that hung until the client's
+    // timeout, an endpoint that hung every upload long enough for health to be judged
+    // (ledger: late-retry-forgets-the-failures), a slow staging disk, a pause inside a tick
+    // past a day, and a request from the latency tail ten times its price.
+    "gray.hang.calls",
+    "hold.hang.Upload.halted",
+    "gray.slow_staging.ticks",
+    "gray.pause.fired",
+    "gray.pause.past_a_day",
+    "gray.latency.tenfold",
 ];
 
 /// States printed even at zero but not required of the fixed seed set, each

@@ -145,6 +145,9 @@ pub const fn noted_by_op(op: &Op) -> &'static [Forcing] {
             crate::generate::Hold::LyingDisk => &[Forcing::LyingDisk],
             crate::generate::Hold::ReadersHeld => &[],
             crate::generate::Hold::SecondWriter => &[Forcing::RemoteEdited],
+            crate::generate::Hold::Hang(_) => &[Forcing::RemoteFault],
+            // Slowness fails nothing: it forces nothing.
+            crate::generate::Hold::SlowStaging(_) => &[],
         },
         Op::OurReader { begin: false } => &[Forcing::ReadLockLapsed],
         // The database goes back to an older image: nothing the engine staged vouches for it.
@@ -165,6 +168,7 @@ pub const fn noted_by_op(op: &Op) -> &'static [Forcing] {
         | Op::Crash(_)
         | Op::StoreFault { .. }
         | Op::ClockJump(_)
+        | Op::Pause { .. }
         // When a part lands is the store's own traffic: it forces nothing.
         | Op::Parts(_)
         | Op::Tick
@@ -224,6 +228,8 @@ pub const fn noted_by_opts(opts: &crate::run::Opts) -> &'static [Forcing] {
         // The database's size and the cost of I/O force nothing.
         first_db_pages: _,
         cost: _,
+        // A latency tail only prices requests: it fails none.
+        latency_tail: _,
         // The law's process crashes are noted as they happen, as a crash operation's are.
         kill_after_fault: _,
         // The replica on S3, in parts or not: its provider faults are noted as they are drawn.

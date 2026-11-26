@@ -420,7 +420,12 @@ pub fn fired(handle: &crate::store::FaultHandle) -> Fired {
                 | crate::store::FaultShape::Rate { err, .. } => {
                     (matches!(err, lsr_core::StoreError::Denied { .. }), false)
                 }
+                // A timeout says nothing of whether the request landed.
+                crate::store::FaultShape::Hang | crate::store::FaultShape::HangEvery => {
+                    (false, false)
+                }
                 crate::store::FaultShape::ErrorAfterPublish(_)
+                | crate::store::FaultShape::HangAfterPublish
                 | crate::store::FaultShape::SizeMismatch
                 | crate::store::FaultShape::ChecksumMismatch
                 | crate::store::FaultShape::CorruptPublish => (false, true),

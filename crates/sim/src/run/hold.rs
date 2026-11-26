@@ -164,12 +164,14 @@ enum Placed {
     Staging(HeldFault),
     Readers(Vec<ReaderId>),
     LyingDisk,
+    SlowStaging,
 }
 
 /// The fault's name in reach and in violations.
 fn name(hold: Hold) -> String {
     match hold {
         Hold::StoreDown(op) => format!("store_down.{op:?}"),
+        Hold::Hang(op) => format!("hang.{op:?}"),
         Hold::Wal(op) => format!("wal.{}", variant(&op)),
         Hold::CredentialsRevoked
         | Hold::DiskFull
@@ -177,6 +179,7 @@ fn name(hold: Hold) -> String {
         | Hold::ReadersHeld
         | Hold::LyingDisk
         | Hold::StoreDownAll
+        | Hold::SlowStaging(_)
         | Hold::SecondWriter => variant(&hold),
     }
 }
@@ -184,7 +187,7 @@ fn name(hold: Hold) -> String {
 /// Whether `err`, from a restore made through `hold`, is an error that fault explains.
 fn explained(hold: Hold, err: &RestoreError) -> bool {
     match hold {
-        Hold::StoreDown(_) | Hold::StoreDownAll | Hold::CredentialsRevoked => {
+        Hold::StoreDown(_) | Hold::StoreDownAll | Hold::CredentialsRevoked | Hold::Hang(_) => {
             matches!(err, RestoreError::Inventory(_) | RestoreError::Store(_))
         }
         Hold::LyingReads => matches!(err, RestoreError::File { .. }),
@@ -192,6 +195,7 @@ fn explained(hold: Hold, err: &RestoreError) -> bool {
         | Hold::ReadersHeld
         | Hold::Wal(_)
         | Hold::LyingDisk
+        | Hold::SlowStaging(_)
         | Hold::SecondWriter => false,
     }
 }
@@ -305,7 +309,8 @@ impl Runner {
     /// The view a restore made during `hold` has of the replica, if the fault reaches it.
     fn view(&self, hold: Hold) -> Result<Option<View>, Violation> {
         let lens = match hold {
-            Hold::StoreDown(op) => Lens::Down {
+            // A restore through a hung endpoint fails as one that is down does, a timeout later.
+            Hold::StoreDown(op) | Hold::Hang(op) => Lens::Down {
                 ops: vec![op],
                 auth: false,
             },
@@ -322,6 +327,7 @@ impl Runner {
             | Hold::ReadersHeld
             | Hold::Wal(_)
             | Hold::LyingDisk
+            | Hold::SlowStaging(_)
             | Hold::SecondWriter => {
                 return Ok(None);
             }
@@ -338,6 +344,15 @@ impl Runner {
             Hold::StoreDown(op) => Some(Placed::Remote(vec![
                 self.w.remote_faults.hold(op, held_error(op, false)),
             ])),
+            Hold::Hang(op) => Some(Placed::Remote(vec![self.w.remote_faults.held(
+                op,
+                0,
+                crate::store::FaultShape::HangEvery,
+            )])),
+            Hold::SlowStaging(factor) => {
+                self.slow_staging = Some(factor);
+                Some(Placed::SlowStaging)
+            }
             Hold::StoreDownAll => Some(Placed::Remote(
                 ALL_OPS
                     .into_iter()
@@ -417,6 +432,7 @@ impl Runner {
                 }
             }
             Some(Placed::LyingDisk) => self.w.sqlite.honest_on_our_sync(),
+            Some(Placed::SlowStaging) => self.slow_staging = None,
         }
     }
 

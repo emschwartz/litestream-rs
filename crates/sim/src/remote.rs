@@ -64,11 +64,18 @@ pub type Wire = Arc<FaultTransport<FakeS3>>;
 pub struct WireTransport {
     wire: Wire,
     lanes: Option<Arc<Manual>>,
+    // Where a request that timed out spends the client's timeout (`HttpFault::Hang`).
+    stall: crate::clock::Stall,
 }
 
 impl Transport for WireTransport {
     fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
-        self.wire.send(request)
+        let answer = self.wire.send(request);
+        if matches!(answer, Err(TransportError::Timeout)) {
+            self.stall
+                .add(u64::try_from(client_timeout().as_millis()).unwrap_or(u64::MAX));
+        }
+        answer
     }
 
     fn lanes(&self, _most: NonZeroUsize) -> Arc<dyn Lanes> {
@@ -309,6 +316,17 @@ fn config(parts: Option<Parts>) -> Option<S3Config> {
     })
 }
 
+/// How long the S3 client waits for a request that makes no progress before it fails it as
+/// timed out: the store's configured deadline, at its default (`S3Config::deadline`, 60 s), which
+/// is what lsr gives every S3 replica unless told otherwise. A hang in the simulator
+/// ([`crate::FaultShape::Hang`], [`HttpFault::Hang`]) spends exactly this.
+#[must_use]
+pub fn client_timeout() -> std::time::Duration {
+    config(None).map_or(std::time::Duration::from_secs(60), |config| {
+        config.deadline()
+    })
+}
+
 /// The S3 store, and its parts' lanes when the run sends in parts.
 #[derive(Debug)]
 pub struct S3Remote {
@@ -388,7 +406,11 @@ pub enum Bucket {
 /// bucket. With `parts` (and the seed their landings are drawn from) the store sends in parts
 /// (module doc). `None` only if the fixed configuration were refused.
 #[must_use]
-pub fn s3(clock: &Arc<FakeClock>, parts: Option<(Parts, u64)>) -> Option<(RemoteBackend, Bucket)> {
+pub fn s3(
+    clock: &Arc<FakeClock>,
+    parts: Option<(Parts, u64)>,
+    stall: &crate::clock::Stall,
+) -> Option<(RemoteBackend, Bucket)> {
     let config = config(parts.map(|(parts, _)| parts))?;
     let fake = FakeS3::new(&config, SharedClock(Arc::clone(clock)));
     if parts.is_some() {
@@ -400,6 +422,7 @@ pub fn s3(clock: &Arc<FakeClock>, parts: Option<(Parts, u64)>) -> Option<(Remote
     let transport = WireTransport {
         wire: Arc::clone(&wire),
         lanes: landing.as_ref().map(|landing| Arc::clone(&landing.lanes)),
+        stall: stall.clone(),
     };
     let store = S3Store::with_transport(
         config,
@@ -464,6 +487,10 @@ pub fn provider_fault(fault: HttpFault) -> Option<Fault> {
                 retry_after: None,
             }
         }
+        HttpFault::Hang(on) => Fault::Transport {
+            on: shape(on),
+            err: TransportError::Timeout,
+        },
         HttpFault::DenyDeletes => return None,
     })
 }

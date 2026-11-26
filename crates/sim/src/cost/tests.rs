@@ -147,3 +147,44 @@ fn staging_may_make_a_request_for_each_s3_reread_and_no_more() {
         Bound::StagingTickMicros
     ));
 }
+
+/// The tail's shape, over every draw: the chance a request takes at least `k` times its
+/// latency is `k^-1.5` (within the draws' resolution), it never takes less than the latency,
+/// and never more than the cap, which it reaches.
+#[test]
+fn the_latency_tail_is_pareto_of_shape_one_and_a_half_cut_at_a_thousand() {
+    let mut at_least = [0_u64; 4];
+    let marks = [2_u64, 10, 100, 1000];
+    let mut most = 0;
+    for draw in 0..TAIL_DRAWS {
+        let factor = tail_factor(draw);
+        assert!((1..=TAIL_MAX).contains(&factor), "{draw}: {factor}");
+        most = most.max(factor);
+        for (slot, mark) in at_least.iter_mut().zip(marks) {
+            *slot += u64::from(factor >= mark);
+        }
+    }
+    assert_eq!(most, TAIL_MAX);
+    // count / N against k^-1.5, squared to stay in integers: count² · k³ against N², within 4
+    // percent (2 percent before squaring).
+    let all = u128::from(TAIL_DRAWS) * u128::from(TAIL_DRAWS);
+    for (count, mark) in at_least.into_iter().zip(marks) {
+        let seen = u128::from(count) * u128::from(count) * u128::from(mark).pow(3);
+        assert!(
+            seen * 100 >= all * 96 && seen * 100 <= all * 104,
+            "P(>= {mark}): {count} of {TAIL_DRAWS}"
+        );
+    }
+    assert!(tail_factor(TAIL_DRAWS - 1) == 1 && tail_factor(u64::MAX) == 1);
+}
+
+/// A slowed store costs the factor times as much for the same calls; a free one costs nothing.
+#[test]
+fn a_slowed_link_costs_its_factor_more() {
+    let link = Profile::DEFAULT.staging;
+    let slow = link.slowed(100);
+    let calls = counts(10, 1 << 20, 1 << 20);
+    let ratio = slow.spent(&calls) / link.spent(&calls);
+    assert!((99..=100).contains(&ratio), "{ratio}");
+    assert_eq!(Link::FREE.spent(&calls), 0);
+}

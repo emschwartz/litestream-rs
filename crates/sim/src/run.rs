@@ -269,6 +269,9 @@ pub struct Opts {
     pub judges: Judges,
     /// Which SQLite the engine runs against: the rule model by default.
     pub sqlite: crate::side::SideMaker,
+    /// Each replica request's latency is drawn from a heavy tail and the run is charged for its
+    /// I/O ([`Weights::latency_tail`]). [`run_with`] sets it.
+    pub latency_tail: bool,
     /// The replicator holds the application's writes under this fail-stop setting
     /// (`run/write_gate.rs`); `None`, the default, runs no write gate.
     pub write_gate: Option<lsr_core::IfReplicationStops>,
@@ -371,6 +374,12 @@ struct Runner {
     cost: Option<crate::cost::Profile>,
     // What this boot may still spend past a tick's bound (`crate::cost::Spare`).
     spare: crate::cost::Spare,
+    // Each replica request's latency factor is drawn from this stream, when the run has a
+    // latency tail ([`Opts::latency_tail`]): its own, so the runner's other draws stay.
+    latency: Option<SeededEntropy>,
+    // How many times slower than its price the staging disk is, while a
+    // [`crate::Hold::SlowStaging`] holds.
+    slow_staging: Option<u16>,
     // The healthy tail is running (`run::tail`): every tick is charged.
     tail: bool,
     // The S3 replica's part size, when it sends in parts ([`Opts::remote_parts`]).
@@ -540,6 +549,9 @@ impl Runner {
         runner.truncate_pages = opts.truncate_pages;
         runner.slice_bytes = opts.slice_bytes;
         runner.cost = opts.cost;
+        runner.latency = opts
+            .latency_tail
+            .then(|| SeededEntropy::new(seed.stream(43)));
         runner.part_bytes = opts
             .remote_parts
             .filter(|_| opts.remote_s3)
@@ -576,6 +588,8 @@ impl Runner {
             slice_bytes: None,
             cost: None,
             spare: crate::cost::Spare::default(),
+            latency: None,
+            slow_staging: None,
             tail: false,
             part_bytes: None,
             turns: SendTurns::default(),
@@ -934,6 +948,7 @@ impl Runner {
         let total0 = self.tally.total();
         let began = self.now();
         let hits0 = self.fault_hits();
+        let hung0 = self.w.remote_faults.hung();
         let booting = !self.actor.booted();
         if booting {
             // What this boot attempt finds staged now, files a store outage left in a local
@@ -956,6 +971,7 @@ impl Runner {
         self.denials_baseline();
         let ended = self.run_one(plan);
         self.charge(remote0, staging0);
+        self.note_gray(hung0, began);
         if matches!(ended, TickEnd::Done(_)) {
             self.keep_takeover();
         }
@@ -2236,6 +2252,41 @@ impl Runner {
         self.w.history.note_time(to);
     }
 
+    /// Counts the gray weather the tick met: replica calls that hung, and the time the tick
+    /// took past its start (its stalls and its charged I/O).
+    fn note_gray(&mut self, hung0: u32, began: Timestamp) {
+        let hung = self.w.remote_faults.hung().saturating_sub(hung0);
+        if hung > 0 {
+            self.report.reach.add("gray.hang.calls", u64::from(hung));
+        }
+        if self.slow_staging.is_some() {
+            self.report.reach.bump("gray.slow_staging.ticks");
+        }
+        let took = self.now().unix_millis().saturating_sub(began.unix_millis());
+        if took >= 60_000 {
+            self.report.reach.bump("gray.tick.over_a_minute");
+        }
+    }
+
+    /// The process stops for `millis` before the next tick's `read`th clock read, and that
+    /// tick runs ([`Op::Pause`]): time the engine sees pass inside one of its ticks, between
+    /// two reads, as a suspended process does. A tick with fewer reads ran unpaused: a drawn
+    /// step with nothing to act on.
+    fn pause(&mut self, read: u8, millis: u64) -> Result<(), Violation> {
+        let paused = self.w.sim_clock.paused();
+        self.w.sim_clock.pause_at(read, millis);
+        self.tick()?;
+        let fired = self.w.sim_clock.paused() > paused;
+        if fired {
+            self.report.reach.bump("gray.pause.fired");
+            if millis >= crate::generate::MAX_PAUSE_MS / 2 {
+                // Past the snapshot interval and the retention window, a day each.
+                self.report.reach.bump("gray.pause.past_a_day");
+            }
+        }
+        self.scenario_bool("Pause", fired)
+    }
+
     /// Applies `op`, checks the model still follows SQLite's recovery, then judges the replica
     /// by content at random (see [`crate::history`]).
     fn apply_judged(&mut self, op: &Op) -> Result<(), Violation> {
@@ -2612,6 +2663,7 @@ impl Runner {
             } => self.store_fault(*target, *op, *ahead, shape.clone()),
             Op::EnvFault(fault) => self.env_fault(*fault)?,
             Op::ClockJump(millis) => self.clock_jump(*millis),
+            Op::Pause { read, millis } => self.pause(*read, *millis)?,
             Op::Tick => self.tick()?,
             Op::Settle => self.settle(|event| matches!(event, Event::Idle))?,
             Op::UntilPublished => {
@@ -3034,6 +3086,7 @@ pub fn run_with(
         remote_s3: weights.remote_s3,
         remote_parts: weights.remote_parts,
         no_create_only: weights.no_create_only,
+        latency_tail: weights.latency_tail,
         ..opts.clone()
     };
     run_ops(seed, &history(seed, steps, weights), &opts)
@@ -3248,6 +3301,10 @@ pub(crate) const fn shape_error(shape: &crate::FaultShape) -> Option<&lsr_core::
         crate::FaultShape::Error(err)
         | crate::FaultShape::ErrorAfterPublish(err)
         | crate::FaultShape::Rate { err, .. } => Some(err),
+        // A timeout retries: no stop follows it.
+        crate::FaultShape::Hang
+        | crate::FaultShape::HangAfterPublish
+        | crate::FaultShape::HangEvery => None,
         // The sweep is best effort: no stop follows, whatever its error.
         crate::FaultShape::Scratch(_)
         | crate::FaultShape::SizeMismatch
