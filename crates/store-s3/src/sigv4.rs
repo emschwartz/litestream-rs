@@ -34,7 +34,7 @@ impl PayloadHash {
         Self(Sha256::digest(body).into())
     }
 
-    /// A hash taken in pieces, over a body read again as it is sent (`again.rs`).
+    /// A hash taken in pieces, over a body handed over in chunks (`again.rs`).
     pub(crate) fn from_hasher(hasher: Sha256) -> Self {
         Self(hasher.finalize().into())
     }

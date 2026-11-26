@@ -46,6 +46,7 @@ mod parts;
 mod remote_s3;
 #[cfg(test)]
 mod replay;
+mod requests;
 #[cfg(test)]
 mod restored_staging;
 #[cfg(test)]

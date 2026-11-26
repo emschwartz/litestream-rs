@@ -1,0 +1,7 @@
+# Each sync lists the replica's level 0 though the engine knows its position: one request
+# a sync beyond Go's. The steady-sync request budget sees it (crates/sim/tests/sim/requests.rs).
+name = "sync-lists-the-replica-each-time"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["requests::a_steady_sync_puts_each_level_zero_file_once_and_asks_nothing_else"]

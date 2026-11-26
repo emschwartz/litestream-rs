@@ -1,8 +1,9 @@
 //! Uploads written from a source the store reads again (`Upload::write_from`,
 //! `docs/decisions/D222.md`): the store keeps no part, sends what a buffered upload sends,
 //! and fails with the source's own error, before anything is published, when a later read
-//! gives nothing. Each part is read twice more, for its SHA-256 and as its body, through a
-//! reader of its own. What happens with several parts in flight is in `flight.rs`.
+//! gives nothing. A part of more than one cell is read again as its body, a cell at a time,
+//! through a reader of its own; a part of one cell or less is sent from the bytes it kept and
+//! its source is never read again (`docs/decisions/D270.md`). What happens with several parts in flight is in `flight.rs`.
 
 use std::io::ErrorKind;
 use std::num::NonZeroUsize;
@@ -208,8 +209,8 @@ fn sent(harness: &FakeHarness) -> Vec<(Option<Shape>, usize)> {
 
 /// Two parts, a third that is not full and the commit, written in chunks that align with
 /// neither a part nor a cell: the requests, their sizes and the object are a buffered
-/// upload's, every byte was read back twice (for the SHA-256 and as the body), and each part
-/// read through a reader of its own.
+/// upload's, every cell of a full part was read back once as the body, the last part (of one
+/// cell or less) not at all, and each part read through a reader of its own.
 #[test]
 fn an_upload_from_a_source_sends_what_a_buffered_upload_sends() {
     let bytes = body(2 * PART + 100_000);
@@ -229,14 +230,14 @@ fn an_upload_from_a_source_sends_what_a_buffered_upload_sends() {
         put_from(&sourced.store, &key, &bytes, chunk, &source).unwrap();
         assert_eq!(sent(&sourced), sent(&plain), "chunks of {chunk}");
         assert!(stored(&sourced, &key).as_deref() == Some(&bytes[..]));
-        let cells = u32::try_from(2 * PART.div_ceil(CELL) + 1).unwrap();
-        assert_eq!(source.reads(), 2 * cells, "chunks of {chunk}");
+        let cells = u32::try_from(2 * PART.div_ceil(CELL)).unwrap();
+        assert_eq!(source.reads(), cells, "chunks of {chunk}");
         assert_eq!(source.opens(), 3, "chunks of {chunk}");
     }
 }
 
-/// An object below one part goes up as one PUT read back at the commit, and an empty one
-/// reads nothing.
+/// An object below one part goes up as one PUT at the commit, read back a cell at a time only
+/// when it is longer than one cell; an empty one reads nothing.
 #[test]
 fn an_object_below_one_part_is_one_put_read_back_at_the_commit() {
     let key = key(0, 1, 1);
@@ -250,11 +251,8 @@ fn an_object_below_one_part_is_one_put_read_back_at_the_commit() {
         block_on(upload.commit()).unwrap();
         assert_eq!(shapes(&harness.wire), [Some(Shape::Put)], "{len} bytes");
         assert_eq!(stored(&harness, &key), Some(bytes), "{len} bytes");
-        assert_eq!(
-            source.reads(),
-            2 * u32::try_from(len.div_ceil(CELL)).unwrap(),
-            "{len} bytes"
-        );
+        let again = if len > CELL { len.div_ceil(CELL) } else { 0 };
+        assert_eq!(source.reads(), u32::try_from(again).unwrap(), "{len} bytes");
         assert_eq!(source.opens(), u32::from(len > 0), "{len} bytes");
     }
 }
@@ -368,15 +366,15 @@ fn a_second_read_that_differs_fails_the_write_that_sends_the_part() {
     let mut upload = begin(&harness.store, &key(0, 1, 1));
     let (first, last) = bytes.split_at(2 * PART - CELL);
     block_on(upload.write_from(first, &source)).unwrap();
-    // The first part went when it was whole, read for its SHA-256 and again as its body.
+    // The first part went when it was whole, read again as its body.
     let cells = u32::try_from(PART / CELL).unwrap();
-    assert_eq!(source.reads(), 2 * cells);
+    assert_eq!(source.reads(), cells);
     assert_eq!(count(&harness.wire, Shape::UploadPart), 1);
     source.flip(PART + 5);
     let failed = block_on(upload.write_from(last, &source));
     assert_eq!(failed, Err(changed()));
-    // The second was refused on its first cell: no hash was taken and no request.
-    assert_eq!(source.reads(), 2 * cells + 1);
+    // The second was refused on its first cell: no cell of it was sent.
+    assert_eq!(source.reads(), cells + 1);
     assert_eq!(count(&harness.wire, Shape::UploadPart), 1);
     assert_eq!(count(&harness.wire, Shape::Complete), 0);
     assert!(block_on(upload.write_from(last, &source)).is_err(), "over");
@@ -384,14 +382,17 @@ fn a_second_read_that_differs_fails_the_write_that_sends_the_part() {
     assert_eq!(stored(&harness, &key(0, 1, 1)), None);
 }
 
-/// A read that gives nothing at the commit, on the pass that takes the SHA-256 or on the pass
-/// that is the body, for the one PUT of a small object and for the last part of a large one:
-/// the source's error is the commit's, as it is, and nothing is published.
+/// A read that gives nothing at the commit, on the first cell of the body or on the second,
+/// for the one PUT of a small object and for the last part of a large one: the source's
+/// error is the commit's, as it is, and nothing is published.
 #[test]
 fn a_later_read_that_gives_nothing_fails_the_commit_before_anything_is_published() {
     for err in [changed(), unreadable()] {
-        for (len, publishing) in [(100_000, Shape::Put), (PART + 100_000, Shape::Complete)] {
-            // The one cell left at the commit is read for the SHA-256, then as the body.
+        for (len, publishing) in [
+            (CELL + 100_000, Shape::Put),
+            (PART + CELL + 100_000, Shape::Complete),
+        ] {
+            // The two cells left at the commit are read as the body.
             for pass in [1, 2] {
                 let bytes = body(len);
                 let harness = FakeHarness::with_config(small_parts());
@@ -453,19 +454,19 @@ fn a_parts_failure_is_reported_as_what_it_was() {
 
 /// The store itself uses a cell's bytes only when they are what was first seen, so a source
 /// that breaks its word and gives other bytes, or another count of them, has them neither
-/// hashed nor sent: no request is made for them and nothing is published.
+/// sent: the body ends short and nothing is published.
 #[test]
 fn a_source_that_breaks_its_word_publishes_nothing() {
-    for len in [100_000, PART + 100_000] {
+    for len in [CELL + 100_000, PART + CELL + 100_000] {
         let bytes = body(len);
         let harness = FakeHarness::with_config(small_parts());
         let source = Source::unchecked(&bytes);
         let mut upload = begin(&harness.store, &key(0, 1, 1));
         block_on(upload.write_from(&bytes, &source)).unwrap();
-        let sent = harness.wire.requests().len();
         source.flip(len - 5);
         assert_eq!(block_on(upload.commit()), Err(unseen()), "{len} bytes");
-        assert_eq!(harness.wire.requests().len(), sent, "{len} bytes");
+        assert_eq!(count(&harness.wire, Shape::Put), 0, "{len} bytes");
+        assert_eq!(count(&harness.wire, Shape::Complete), 0, "{len} bytes");
         assert_eq!(stored(&harness, &key(0, 1, 1)), None, "{len} bytes");
     }
 
@@ -488,9 +489,9 @@ fn a_source_that_breaks_its_word_publishes_nothing() {
     }
     let harness = FakeHarness::with_config(small_parts());
     let mut upload = begin(&harness.store, &key(0, 1, 1));
-    block_on(upload.write_from(&body(100), &Short)).unwrap();
+    block_on(upload.write_from(&body(CELL + 100), &Short)).unwrap();
     assert_eq!(block_on(upload.commit()), Err(unseen()));
-    assert!(harness.wire.requests().is_empty());
+    assert_eq!(count(&harness.wire, Shape::Put), 0);
 }
 
 /// A source that cannot open its file fails the write that asked, with its own error.

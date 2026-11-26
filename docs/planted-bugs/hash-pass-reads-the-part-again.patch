@@ -1,0 +1,19 @@
+diff --git a/crates/store-s3/src/again.rs b/crates/store-s3/src/again.rs
+index 216ebe477..44fdce77f 100644
+--- a/crates/store-s3/src/again.rs
++++ b/crates/store-s3/src/again.rs
+@@ -183,7 +183,13 @@ impl Sealed {
+     }
+ 
+     /// The SHA-256 of the part as first handed over.
+-    pub(crate) const fn sha256(&self) -> PayloadHash {
++    pub(crate) fn sha256(&mut self) -> PayloadHash {
++        let stop = AtomicBool::new(false);
++        let mut offset = self.offset;
++        for was in &self.cells {
++            drop(cell(&mut *self.reader, offset, was, &stop));
++            offset = offset.saturating_add(was.len());
++        }
+         self.hash
+     }
+ 
