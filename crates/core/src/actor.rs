@@ -58,7 +58,8 @@
 //!    `docs/decisions/D230.md`).
 //!
 //! Every failure becomes a [`Fault`] and goes through [`policy`] once, in
-//! [`Actor::fault`]. A retry waits on its own task; the others keep running.
+//! [`Actor::fault`]. A retry waits on its own task; the others keep running. A wait runs from
+//! the end of the tick that set it, so a call that hung for longer is not retried at once.
 //! Every store call is an await point, and a future dropped at any of them is
 //! a crash that the next boot recovers from.
 //!
@@ -879,11 +880,64 @@ impl Actor {
         // Boxed: the tick's state machine is the largest future the replicator thread polls,
         // and on the heap it is not part of every poll frame below `block_on`, which in a
         // debug build is what the half-stack headroom gate measures (`lsr_replica::stack`).
+        let waits = self.kept.tasks.untils();
         let tick = Box::pin(self.tick_at(&mut roles, now)).await;
+        let ended = self
+            .kept
+            .clock
+            .map_or(now, |clock| clock.engine_when(env.clock.now()));
+        let tick = self.waits_from_end(tick, waits, now, ended);
         self.kept.work.add_checkpoints(ck.totals());
         self.observe_lag(env.wal, now);
         let tick = self.wake_for_probe(tick);
         self.wake_on_wall(tick)
+    }
+
+    /// The tick with each wait it set timed from `ended`, when its last call returned, rather
+    /// than from `now`, when it began: after a call that hung past its wait (the S3 client's
+    /// deadline is 60 s) the retry would else go the moment the call returned. Go's monitors
+    /// sleep their backoff after the failed call (`replica.go` and `db.go`, `monitor`).
+    fn waits_from_end(
+        &mut self,
+        tick: Tick,
+        before: [Option<Timestamp>; 5],
+        now: Timestamp,
+        ended: Timestamp,
+    ) -> Tick {
+        let late = ended.saturating_duration_since(now);
+        let mut moved = [None; 5];
+        for ((task, was), slot) in Task::ALL.into_iter().zip(before).zip(&mut moved) {
+            let retry = self.kept.tasks.get_mut(task);
+            if let Some(until) = retry.until().filter(|until| Some(*until) != was) {
+                retry.hold(until.saturating_add(late));
+                *slot = Some(until);
+            }
+        }
+        let shift = |at: Timestamp| {
+            if moved.contains(&Some(at)) {
+                at.saturating_add(late)
+            } else {
+                at
+            }
+        };
+        match tick {
+            Tick::Ran { mut event, next } => {
+                if let Event::Retrying { until, .. }
+                | Event::Degraded { until, .. }
+                | Event::WritesHeld { until } = &mut event
+                {
+                    *until = shift(*until);
+                }
+                // A wake from `now`'s view is one from `ended`'s: a deadline that passed while
+                // the tick ran is due now.
+                let next = match next {
+                    Next::At(_) => self.next(ended),
+                    other @ (Next::Now | Next::OnWalChange) => other,
+                };
+                Tick::Ran { event, next }
+            }
+            other @ (Tick::Stopped(_) | Tick::Drained { .. } | Tick::DeadlineReached(_)) => other,
+        }
     }
 
     /// One unit of work at engine time `now` (`clock`).

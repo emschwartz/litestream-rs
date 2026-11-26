@@ -140,6 +140,9 @@ struct Counting {
     /// While set, every upload begun is refused as a dropped connection: a replica that
     /// keeps the engine's staged files from leaving.
     refuse_uploads: Arc<AtomicBool>,
+    /// While set, every upload begun moves this clock on by the duration first: a call that
+    /// hangs until the store client's deadline.
+    hangs_uploads: Arc<std::sync::Mutex<Option<Hang>>>,
     /// Keys whose next read returns its bytes with the middle one flipped,
     /// the stored bytes untouched: one bad read.
     flip_next_read: Arc<std::sync::Mutex<Vec<FileKey>>>,
@@ -162,6 +165,9 @@ struct Counting {
     /// left, that no part is in flight.
     flights: Arc<std::sync::Mutex<std::collections::VecDeque<Flight>>>,
 }
+
+/// The clock a hanging call moves on, and by how much.
+type Hang = (Arc<FakeClock>, Duration);
 
 impl Counting {
     fn calls(&self) -> u32 {
@@ -376,6 +382,9 @@ impl ObjectStore for Counting {
         }
         if let Some((wal, n)) = self.commits_on_upload.lock().unwrap().take() {
             wal.append_tx(&[(pg(1), vec![n; PS.bytes()])], nz(3));
+        }
+        if let Some((clock, by)) = self.hangs_uploads.lock().unwrap().as_ref() {
+            clock.advance(*by);
         }
         let refused = self.refuse_uploads.load(Ordering::SeqCst);
         let begun = self.inner.begin_sized_upload(key, created_at, mode, len);
@@ -2469,6 +2478,7 @@ mod own_checkpoint;
 mod pages;
 mod rejected_snapshot;
 mod requested_snapshot_after_restart;
+mod retry_after_hang;
 mod rewound;
 mod second_writer;
 mod sliced;
