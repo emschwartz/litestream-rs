@@ -425,11 +425,18 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
     moved_until(&replicator, &clock, (POLL, 240), caught_up);
     site.commit(3);
     advance(&replicator, &clock, POLL);
-    let good = replicated(&moved_until(&replicator, &clock, (POLL, 240), caught_up)).unwrap();
+    moved_until(&replicator, &clock, (POLL, 240), caught_up);
     // Before the transaction it corrupts: a snapshot ending there would hide the page.
     settle_maintenance(&replicator, &clock, &site);
     clock.advance(EVERY);
-    wait(&replicator, |h| h.verification.runs.passed == 1);
+    // The point the run verified, not the replicated one read when a poll's health was first
+    // written: that can still name a file before the commits' (the thread reports at the start
+    // of a turn), and the run verifies the newest file.
+    let good = wait(&replicator, |h| h.verification.runs.passed == 1)
+        .verification
+        .last_good
+        .map(|(txid, _)| txid)
+        .unwrap();
     site.commit(2);
     advance(&replicator, &clock, POLL);
     let health = moved_until(&replicator, &clock, (POLL, 240), |h| {
@@ -437,22 +444,32 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
     });
     let (txid, page) = rewrite_newest_page(&site);
     assert_eq!(Some(txid), replicated(&health));
-    assert!(matches!(
-        next_verified(&replicator, &events).1,
-        VerifyOutcome::Passed { .. }
-    ));
-    clock.advance(EVERY);
-    let failed = wait(&replicator, |h| h.verification.runs.failed == 1);
+    // The schedule counts from the boot, not from a run the test saw, so a run can also pass
+    // before the rewrite (even at this very transaction) and move the last good point: the
+    // pin is whatever passed last.
+    // Moved a step at a time, as many as it takes: a run in flight (it started before the rewrite
+    // and read the file before it, so it passes) takes real time while the clock moves on, ends
+    // on the clock as it reads then, and the next is due an interval after.
+    let failed = moved_until(&replicator, &clock, (EVERY, 100), |h| {
+        h.verification.runs.failed == 1
+    });
     let failing = failed.verification.failing.unwrap();
     assert_eq!(failing.txid, txid);
     assert!(
         matches!(failing.found, Mismatch::Pages { first, pages: 1, .. } if first == page),
         "{failing:?}"
     );
-    assert_eq!(failed.verification.kept_restore_point, Some(good));
+    let kept = failed.verification.kept_restore_point;
+    assert_eq!(kept, failed.verification.last_good.map(|(txid, _)| txid));
+    assert!(kept >= Some(good), "{kept:?} below {good:?}");
     assert!(failed.is_degraded());
     assert_eq!(failed.phase, Phase::Running, "a degraded state, not a stop");
-    let seen = next_verified(&replicator, &events);
+    let seen = loop {
+        let seen = next_verified(&replicator, &events);
+        if !matches!(seen.1, VerifyOutcome::Passed { .. }) {
+            break seen;
+        }
+    };
     assert!(
         matches!(seen, (at, VerifyOutcome::Failed(Mismatch::Pages { first, .. })) if at == txid && first == page),
         "{seen:?}"
@@ -460,7 +477,7 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
     // Replication goes on.
     site.commit(1);
     advance(&replicator, &clock, POLL);
-    moved_until(&replicator, &clock, (POLL, 240), |h| {
+    let went_on = moved_until(&replicator, &clock, (POLL, 240), |h| {
         caught_up(h) && replicated(h) > Some(txid)
     });
     // A snapshot rewrites every page; the next run passes and lets the read lock go.
@@ -468,10 +485,14 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
     site.commit(1);
     advance(&replicator, &clock, POLL);
     let fixed = moved_until(&replicator, &clock, (POLL, 240), |h| {
-        caught_up(h) && h.resnapshot.is_none()
+        caught_up(h) && h.resnapshot.is_none() && replicated(h) > replicated(&went_on)
     });
-    clock.advance(EVERY);
-    let passed = wait(&replicator, |h| h.verification.runs.passed == 2);
+    // A run that fell due during the catch-up may have passed at an earlier point already, so
+    // wait for one at the final point.
+    let passed = moved_until(&replicator, &clock, (EVERY, 100), |h| {
+        h.verification.last_good.map(|(txid, _)| txid) == replicated(&fixed)
+            && h.verification.failing.is_none()
+    });
     assert_eq!(passed.verification.failing, None);
     assert_eq!(passed.verification.kept_restore_point, None);
     assert_eq!(
