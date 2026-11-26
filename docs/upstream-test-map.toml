@@ -590,7 +590,6 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestDB_Sync_ErrorMetrics" = { counterpart = "lsr-core::actor::tests::work::a_full_disk_is_reported_until_a_step_stages" }
 "TestDB_Sync_InitErrorMetrics" = { counterpart = "lsr-core::actor::tests::work::a_full_disk_is_reported_until_a_step_stages" }
 "TestDB_Sync_UpdatesMetrics" = { counterpart = "lsr-cli::cli::sidecar::metrics_and_health_are_served_on_exactly_the_given_address" }
-"TestDB_SyncPathWithHash" = { missing = "a database whose name holds #, ? or % opens, replicates and restores byte for byte (#483, upstream #1647)" }
 "TestDB_Verify_WALOffsetAtHeader" = { counterpart = "lsr-core::recover::tests::go_parity_an_end_at_offset_32_continues" }
 "TestDB_Verify_WALOffsetAtHeader_SaltMismatch" = { counterpart = "lsr-core::recover::tests::go_parity_an_unknown_salt_snapshots" }
 "TestDB_WALIndexMaxFrame" = { counterpart = ["lsr-sqlite::sqlite::wal_index::the_committed_read_agrees_with_the_file_across_checkpoints_and_a_restart", "lsr-compat::compat::live_source::committed_read_matches_the_wal_file"] }
@@ -633,6 +632,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestDB_Close_SyncRetry/ZeroTimeoutNoRetry" = { counterpart = ["lsr-replica::replica::replicator::a_zero_deadline_reports_what_was_left_and_the_next_start_continues", "lsr-core::actor::tests::a_zero_deadline_reports_unsynced_bytes_and_does_no_work"] }
 
 ["litestream/db_test.go"]
+"TestDB_SyncPathWithHash" = { missing = "a database whose name holds #, ? or % opens, replicates and restores byte for byte (#483, upstream #1647)" }
 "TestCompaction_PreservesLastTimestamp" = { counterpart = "lsr-core::compact::tests::the_output_header_takes_the_first_and_last_inputs_as_go_does" }
 "TestDB_CRC64" = { counterpart = "lsr-replica::local::tests::checksum_reads_back_what_the_file_holds" }
 "TestDB_CRC64/DB" = { counterpart = "lsr-replica::local::tests::checksum_reads_back_what_the_file_holds" }
