@@ -34,7 +34,7 @@
 //! time cannot close the window, so the engine remembers, in memory, that its
 //! compaction did ([`MaintainState::drained_since`], `docs/decisions/D242.md`).
 //! A job of [`MAX_INPUTS`] files may have left a backlog and closes nothing:
-//! 100 source files drain as four jobs in one window and the last one closes it.
+//! 300 source files drain as three jobs in one window and the last one closes it.
 //! A level is so compacted once per window, as Go's level monitor fires once per
 //! window; a new process, which remembers nothing, may compact once more in the
 //! window it starts in.

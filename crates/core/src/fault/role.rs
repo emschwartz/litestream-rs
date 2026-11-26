@@ -41,14 +41,22 @@ pub(crate) trait Role: ObjectStore {
     const COMPACT_WINDOW: ReadLen;
 
     /// Bytes the reads of all inputs may hold at once. Each input's window is its share of
-    /// this, at most [`Self::COMPACT_WINDOW`] and at least [`STAGING_WINDOW`]: a merge of
-    /// a few inputs reads in big windows (few requests), a merge of 32 in small ones
-    /// (`docs/decisions/D212.md`).
+    /// this, at most [`Self::COMPACT_WINDOW`] and at least [`SMALLEST_WINDOW`]: a merge of
+    /// a few inputs reads in big windows (few requests), a merge of many in small ones
+    /// (`docs/decisions/D212.md`). The fan-in cap is this budget in smallest windows, so every
+    /// merge's reads fit it (`docs/decisions/D295.md`).
     const COMPACT_BUDGET: u64;
 }
 
 /// What a compaction reads of each staged file at a time: twice the largest page.
 pub(crate) const STAGING_WINDOW: ReadLen = ReadLen::or_chunk(128 * 1024);
+
+/// The least a compaction reads of an input at a time, whatever its fan-in: a quarter of
+/// [`STAGING_WINDOW`]. A staged read is answered from the page cache, so a smaller window
+/// costs system calls and no requests; the decoder takes any chunk, so a page larger than the
+/// window arrives over two reads. The staging directory's budget holds
+/// `crate::MAX_INPUTS` of them.
+pub(crate) const SMALLEST_WINDOW: ReadLen = ReadLen::or_chunk(32 * 1024);
 
 /// The staging directory.
 #[derive(Debug)]

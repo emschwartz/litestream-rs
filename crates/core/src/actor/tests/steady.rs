@@ -486,3 +486,44 @@ fn a_steady_writer_with_short_intervals_pays_the_bill_and_no_more() {
     assert!(at(Request::List, 9) <= 12, "{bill:?}");
     assert!(count(&bill, Request::List) <= 284, "{bill:?}");
 }
+
+/// The level schedule of the head-to-head's overlay: a 60 second level 1, then Go's 5 minutes
+/// and 1 hour, so about 60 level-0 files reach each level-1 window.
+fn a_minute_at_level_one() -> ActorConfig {
+    let maintenance = Maintenance::new(
+        vec![
+            Duration::from_secs(60),
+            Duration::from_secs(300),
+            Duration::from_secs(3600),
+        ],
+        Duration::from_secs(86_400),
+        Duration::from_secs(86_400),
+        crate::L0Retention::After(Duration::from_secs(300)),
+    )
+    .unwrap();
+    ActorConfig {
+        maintenance,
+        ..paced()
+    }
+}
+
+/// A 60 second level-1 window holds about 60 level-0 files, and its compaction merges them
+/// all into one level-1 file, as Go's compactor merges every file the level below holds
+/// (`compactor.go`, `Compact`). Level 2 then reads one level-1 file back per minute, as Go
+/// does. Ten minutes at 20 commits a second, after six: ten level-1 windows and two level-2
+/// ones.
+#[test]
+fn a_minute_of_level_zero_files_is_one_level_one_file() {
+    let mut rig = s3_like();
+    let mut actor = Actor::new(a_minute_at_level_one());
+    let start = 600_000_000;
+    let now = drive(&mut rig, &mut actor, start, start + 360_000);
+    let mark = rig.remote.requests_made();
+    drive(&mut rig, &mut actor, now, now + 600_000);
+    let bill = bill(&rig, mark);
+    let at = |request: Request, level: u8| bill.get(&(request, level)).copied().unwrap_or(0);
+    assert!((590..=610).contains(&at(Request::Put, 0)), "{bill:?}");
+    assert_eq!(at(Request::Put, 1), 10, "{bill:?}");
+    assert_eq!(at(Request::Put, 2), 2, "{bill:?}");
+    assert_eq!(at(Request::Get, 1), 10, "{bill:?}");
+}

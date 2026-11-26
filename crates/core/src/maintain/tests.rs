@@ -570,10 +570,10 @@ fn the_earliest_wake_time_wins_and_a_ready_level_is_not_held_by_a_waiting_one() 
 }
 
 #[test]
-fn a_backlog_of_a_hundred_drains_as_four_jobs_in_one_window() {
+fn a_backlog_of_three_hundred_drains_as_three_jobs_in_one_window() {
     let mut model = Model::default();
-    model.files.extend(l0_run(1, 96, T0 - 100_000));
-    model.files.extend(l0_run(97, 100, T0 + 1000));
+    model.files.extend(l0_run(1, 296, T0 - 100_000));
+    model.files.extend(l0_run(297, 300, T0 + 1000));
     let cfg = defaults();
     let mut sizes = Vec::new();
     let mut now = T0 + 5000;
@@ -590,7 +590,7 @@ fn a_backlog_of_a_hundred_drains_as_four_jobs_in_one_window() {
         }
         now += 1;
     }
-    assert_eq!(sizes, vec![32, 32, 32, 4]);
+    assert_eq!(sizes, vec![MAX_INPUTS, MAX_INPUTS, 300 - 2 * MAX_INPUTS]);
 }
 
 #[test]

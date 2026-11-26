@@ -1156,12 +1156,12 @@ notes = "Go hands its SDK the staged file and each part is read from it when sen
 [[row]]
 table = "Maintenance and retention"
 id = "MAINT-1"
-circumstance = "A level's window opened (30 s, 5 min, 1 h by default): merge at most 32 contiguous files from the level below, starting at the transaction after the level's newest file (`compact.rs`). Inputs are never deleted by the merge. A hole in the source ends the run (MAINT-15). A level with no file starts above the newest snapshot, so a first start does not carry the database through levels 1 to 3 (D224)"
+circumstance = "A level's window opened (30 s, 5 min, 1 h by default): merge at most 128 contiguous files from the level below (as many as the staging read budget holds at the smallest read size, so a 60 second level-1 window is one merge, as Go merges every file; `docs/decisions/D295.md`), starting at the transaction after the level's newest file (`compact.rs`). Inputs are never deleted by the merge. A hole in the source ends the run (MAINT-15). A level with no file starts above the newest snapshot, so a first start does not carry the database through levels 1 to 3 (D224)"
 response = "continue"
 signal = "Event `Compacted`"
 at_risk = "None. A crash leaves the inputs, and the output either visible or absent"
 recovery = "n/a"
-detected_by = "core::`inputs_are_capped_at_the_fan_in`, core::`level_one_starts_above_the_snapshot_and_stays_contiguous`, core::`a_level_with_files_takes_what_the_snapshot_holds_too`, core::`the_first_start_uploads_the_database_twice_and_downloads_none`, compat::`levels_start_above_the_first_snapshot`, compat::`go_compacts_over_levels_that_start_above_the_snapshot`, core::`a_hole_in_the_source_is_the_same_hole_in_the_destination`, core::`restoring_the_snapshot_and_the_chain_equals_restoring_the_compacted_file`, sim::`a_level_built_after_the_engine_replaced_the_file_holds_its_pages`; plant::`level-takes-the-snapshots-range`"
+detected_by = "core::`inputs_are_capped_at_the_fan_in`, core::`a_minute_of_level_zero_files_is_one_level_one_file`, core::`level_one_starts_above_the_snapshot_and_stays_contiguous`, core::`a_level_with_files_takes_what_the_snapshot_holds_too`, core::`the_first_start_uploads_the_database_twice_and_downloads_none`, compat::`levels_start_above_the_first_snapshot`, compat::`go_compacts_over_levels_that_start_above_the_snapshot`, core::`a_hole_in_the_source_is_the_same_hole_in_the_destination`, core::`restoring_the_snapshot_and_the_chain_equals_restoring_the_compacted_file`, sim::`a_level_built_after_the_engine_replaced_the_file_holds_its_pages`; plant::`level-takes-the-snapshots-range`, plant::`fan-in-of-thirty-two`"
 recovered_by = "sim::`a_level_built_after_the_engine_replaced_the_file_holds_its_pages`"
 
 [[row]]
@@ -1212,7 +1212,7 @@ detected_by = "core::`a_commit_that_fails_after_publish_is_failed_and_the_next_p
 table = "Maintenance and retention"
 id = "MAINT-6"
 circumstance = "The snapshot interval passed (24 h by default)"
-response = "A level-9 snapshot of every page, under a fresh sync proof. The first one, when level 0 holds every file from transaction 1 to the newest (at most 32), is a merge of those files and reads no database page (D205); one that fails is read from the database next. It is planned before any level while level 1 is empty (D224), and staged files it covers are pruned without waiting for level 1"
+response = "A level-9 snapshot of every page, under a fresh sync proof. The first one, when level 0 holds every file from transaction 1 to the newest (at most 128), is a merge of those files and reads no database page (D205); one that fails is read from the database next. It is planned before any level while level 1 is empty (D224), and staged files it covers are pruned without waiting for level 1"
 signal = "Event `Snapshot`"
 at_risk = "None"
 recovery = "n/a"
@@ -1364,7 +1364,7 @@ notes = "Go writes over the key. Before: one GET of the key per compaction, then
 table = "Maintenance and retention"
 id = "MAINT-20"
 circumstance = "A file is uploaded after its level-1 window's compaction ran (the usual case for a steady writer), or a level above gains a source after its own"
-response = "continue. The level waits for its next window: one compaction per level per window, as Go's level monitor fires once per window. The engine remembers in memory that its compaction closed the window, since the output's own time (its last input's) is from the window before. A compaction of 32 inputs may have left a backlog and closes nothing, so a backlog drains inside one window. A new process may compact once more in the window it starts in (`docs/decisions/D242.md`)"
+response = "continue. The level waits for its next window: one compaction per level per window, as Go's level monitor fires once per window. The engine remembers in memory that its compaction closed the window, since the output's own time (its last input's) is from the window before. A compaction of 128 inputs may have left a backlog and closes nothing, so a backlog drains inside one window. A new process may compact once more in the window it starts in (`docs/decisions/D242.md`)"
 signal = "None"
 at_risk = "None. The file stays at level 0, which retention does not delete before a level above covers it"
 recovery = "n/a"
