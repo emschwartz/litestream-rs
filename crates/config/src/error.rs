@@ -360,11 +360,6 @@ pub enum ProblemKind {
     /// A URL in `path`.
     #[error("replica path cannot be a url, please use the 'url' field instead")]
     ReplicaPathIsUrl,
-    /// `truncate-page-n` without the operator's claim that the application holds no long readers.
-    #[error(
-        "TRUNCATE checkpoints need `litestream-rs: {{app-readers: none}}`: without that claim litestream-rs never truncates"
-    )]
-    TruncateNeedsClaim,
     /// A path that cannot be made absolute.
     #[error("{0}")]
     Path(PathError),
@@ -433,11 +428,6 @@ pub enum WarningKind {
         /// The interval.
         interval: GoDuration,
     },
-    /// Go would TRUNCATE the WAL at 121359 pages; litestream-rs does not without the claim.
-    #[error(
-        "Go checkpoints with TRUNCATE at truncate-page-n (121359 pages by default); litestream-rs does not unless `litestream-rs: {{app-readers: none}}` states the application holds no long readers"
-    )]
-    NoTruncateWithoutClaim,
 }
 
 /// A warning about one key.

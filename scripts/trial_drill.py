@@ -880,10 +880,6 @@ class Drill:
             for db in conf["dbs"]:
                 db.update(per_db)
                 db["replica"].update(per_rep)
-        # lsr refuses truncate-page-n without this claim about the application (docs/differences-from-go.md); Go
-        # reads the section as an unrecognized key and warns, so one file serves both binaries.
-        if any("truncate-page-n" in db for db in conf["dbs"]):
-            conf.setdefault("litestream-rs", {"app-readers": "none"})
         return conf
 
     def write_config(self) -> None:
@@ -1610,7 +1606,7 @@ def main() -> int:
     g.add_argument("--sync-interval", default="1s")
     g.add_argument("--part-size", default=None, help="the replica's part-size (default: unset, the client's own)")
     g.add_argument("--concurrency", type=int, default=None, help="the replica's concurrency (default: unset)")
-    g.add_argument("--truncate-page-n", type=int, default=None, help="the database's truncate-page-n (default: unset; setting it adds the litestream-rs app-readers claim lsr requires)")
+    g.add_argument("--truncate-page-n", type=int, default=None, help="the database's truncate-page-n (default: unset)")
     g.add_argument("--busy-timeout", default=None, help="the database's busy-timeout (default: unset)")
     g.add_argument("--config-overlay", type=Path, default=None, help="a YAML fragment merged over the generated config: top-level keys as they are, plus db: merged into every database and db.replica: into every replica, so a shape under test is passed at run time")
     g.add_argument("--tps", type=float, default=40, help="transactions per second, all databases")
