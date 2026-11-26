@@ -186,6 +186,35 @@ impl Shared {
         }
     }
 
+    /// Waits until `done` holds for a health snapshot or `deadline` passes. The predicate runs
+    /// with no lock held, so it may call any method of the handle, `health()` included.
+    fn wait_for_health(
+        &self,
+        deadline: Timestamp,
+        done: impl Fn(&Health) -> bool,
+    ) -> Option<Health> {
+        loop {
+            let health = {
+                let state = lock(&self.state);
+                let died = state.outcome.is_none() && self.thread_died();
+                snapshot(&state, died, &self.meters)
+            };
+            if done(&health) {
+                return Some(health);
+            }
+            if self.clock.now() >= deadline {
+                return None;
+            }
+            // A change between the snapshot and this wait is seen at the latest after one slice.
+            let state = lock(&self.state);
+            drop(
+                self.changed
+                    .wait_timeout(state, CALLER_SLICE)
+                    .unwrap_or_else(PoisonError::into_inner),
+            );
+        }
+    }
+
     /// Takes this replicator out of the registry, if it is the one registered.
     pub(crate) fn unregister(self: &Arc<Self>) {
         let mut active = lock(&ACTIVE);
@@ -463,11 +492,7 @@ impl Replicator {
             return None;
         }
         let deadline = later(self.shared.clock.now(), within);
-        let meters = Arc::clone(&self.shared.meters);
-        self.shared.wait_for(Some(deadline), |state, died| {
-            let health = snapshot(state, died, &meters);
-            done(&health).then_some(health)
-        })
+        self.shared.wait_for_health(deadline, done)
     }
 
     /// Stops after syncing and uploading everything committed. The deadline is the earlier of
@@ -854,6 +879,31 @@ mod tests {
         assert_eq!(
             forked.stop(Duration::from_secs(60)).wait(),
             StopOutcome::Gone(Gone::Forked)
+        );
+    }
+
+    /// A predicate may read the handle: it runs with no lock held, so `health()` inside it
+    /// answers instead of waiting on the lock the wait itself holds.
+    #[test]
+    fn a_wait_until_predicate_may_call_health() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("db");
+        std::fs::write(&path, b"").unwrap();
+        let file = DatabaseFile::of(&path).unwrap();
+        let shared = Arc::new(Shared::new(file, &Config::default(), &Runtime::system()));
+        let handle = Replicator {
+            _last: Arc::new(LastHandle {
+                shared: Arc::clone(&shared),
+            }),
+            shared,
+        };
+        let seen = handle.wait_until(Duration::from_secs(60), |_| {
+            handle.health().phase == Phase::Booting
+        });
+        assert_eq!(seen.map(|health| health.phase), Some(Phase::Booting));
+        assert_eq!(
+            handle.wait_until(Duration::ZERO, |_| handle.health().phase != Phase::Booting),
+            None
         );
     }
 

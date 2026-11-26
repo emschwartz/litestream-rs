@@ -758,3 +758,8 @@ fn the_planning_fixture_has_the_shape_it_claims() {
     let by_level: BTreeMap<u8, usize> = [0, 1, 2, 9].into_iter().map(|l| (l, count(l))).collect();
     assert_eq!(by_level.values().sum::<usize>(), inventory.files().len());
 }
+/// A store that says nothing of its disk is a store with no free-space answer: the default.
+#[test]
+fn a_store_that_does_not_say_has_no_free_space_answer() {
+    assert_eq!(Spool::build(2, 0, 1).free_bytes(), None);
+}

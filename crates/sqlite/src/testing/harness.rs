@@ -787,6 +787,7 @@ impl<B: Backend> Rig<B> {
             | Event::Resnapshot(_)
             | Event::Clamped(_)
             | Event::CheckingIdentity { .. }
+            | Event::StagingShort { .. }
             // The rig runs no write gate.
             | Event::WritesHeld { .. } => {}
         }

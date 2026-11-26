@@ -152,6 +152,15 @@ pub trait Fs: Clone + Send + Sync + Debug + 'static {
     /// # Errors
     /// As `File::open`.
     fn open(&self, path: &Path) -> io::Result<Self::File>;
+
+    /// Bytes free on the filesystem that holds `dir`, for a writer without privilege. `None`
+    /// when the filesystem cannot say, which is the default.
+    ///
+    /// # Errors
+    /// As `statvfs`: `dir` is missing or unreadable.
+    fn free_bytes(&self, _dir: &Path) -> io::Result<Option<u64>> {
+        Ok(None)
+    }
 }
 
 /// The calls the store makes on an open file.
@@ -242,6 +251,12 @@ impl Fs for RealFs {
 
     fn open(&self, path: &Path) -> io::Result<File> {
         File::open(path)
+    }
+
+    #[cfg(unix)]
+    fn free_bytes(&self, dir: &Path) -> io::Result<Option<u64>> {
+        let stat = rustix::fs::statvfs(dir).map_err(io::Error::from)?;
+        Ok(Some(stat.f_bavail.saturating_mul(stat.f_frsize)))
     }
 }
 

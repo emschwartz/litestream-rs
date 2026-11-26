@@ -598,6 +598,7 @@ impl Worker {
             | EngineEvent::Degraded { .. }
             | EngineEvent::Retrying { .. }
             | EngineEvent::WritesHeld { .. }
+            | EngineEvent::StagingShort { .. }
             | EngineEvent::Clamped(_) => false,
         };
         if !idle {
@@ -661,6 +662,7 @@ impl Worker {
             | EngineEvent::WritesHeld { .. }
             | EngineEvent::CheckpointDeferred { .. }
             | EngineEvent::TakeoverWanted(_)
+            | EngineEvent::StagingShort { .. }
             | EngineEvent::CheckingIdentity { .. } => {}
         }
     }

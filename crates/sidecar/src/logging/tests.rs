@@ -100,6 +100,29 @@ fn lines_below_the_level_are_dropped_and_events_carry_the_database_and_cause() {
     );
 }
 
+/// A whole-database copy that may not fit is a warning with both sizes, so an operator can see how
+/// short the disk is; the engine goes on, as Go does.
+#[test]
+fn a_copy_that_may_not_fit_is_a_warning_with_both_sizes() {
+    let out = Captured::default();
+    let log = Arc::new(Logger::to(
+        LogLevel::Info,
+        LogFormat::Text,
+        Arc::new(At),
+        Box::new(out.clone()),
+    ));
+    let mut events = DbEvents::new(Arc::clone(&log), Path::new("/data/app.db"));
+    events.event(&Event::Engine(EngineEvent::StagingShort {
+        needed: 4096,
+        free: 512,
+    }));
+    let text = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
+    assert_eq!(
+        text,
+        "time=1970-01-01T00:00:00.000Z level=WARN msg=\"staging disk has less free space than the database copy may need, copying anyway\" db=app.db needed=4096 free=512\n"
+    );
+}
+
 /// The line for the application's checkpoints says a checkpoint ran only when one did: a WAL
 /// that grew with nothing copied is reported as that, and a skipped checkpoint of our own is
 /// a debug line, not a retry.
