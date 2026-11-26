@@ -401,17 +401,9 @@ impl Report {
     /// does not plan is [Severity::Unrestorable] whatever the findings say.
     #[must_use]
     pub fn worst(&self) -> Option<Severity> {
-        let planless = match self.latest {
-            PlanOutcome::Plan(_) => false,
-            PlanOutcome::EmptyReplica
-            | PlanOutcome::NoSnapshot { .. }
-            | PlanOutcome::BeyondNewest { .. }
-            | PlanOutcome::AsOfInsideFile { .. }
-            | PlanOutcome::Gap { .. }
-            | PlanOutcome::InsideFile { .. }
-            | PlanOutcome::MalformedSnapshot { .. } => true,
-        };
-        planless
+        self.latest
+            .chain()
+            .is_none()
             .then_some(Severity::Unrestorable)
             .into_iter()
             .chain(self.worst)
@@ -466,16 +458,9 @@ pub async fn verify<S: ObjectStore>(store: &S, depth: Depth) -> Result<Report, V
     let (inventory, mut findings, latest) = listed_names(store).await?;
     let (mut files_read, mut bytes_read) = (0, 0);
     if depth == Depth::Contents {
-        let plan = match &latest {
-            PlanOutcome::Plan(chain) => chain.files(),
-            PlanOutcome::EmptyReplica
-            | PlanOutcome::NoSnapshot { .. }
-            | PlanOutcome::BeyondNewest { .. }
-            | PlanOutcome::AsOfInsideFile { .. }
-            | PlanOutcome::Gap { .. }
-            | PlanOutcome::InsideFile { .. }
-            | PlanOutcome::MalformedSnapshot { .. } => &[],
-        };
+        let plan = latest
+            .chain()
+            .map_or(&[][..], crate::ContiguousChain::files);
         let reads = contents_pass(store, &inventory, plan, &mut findings).await?;
         (files_read, bytes_read) = reads;
     }

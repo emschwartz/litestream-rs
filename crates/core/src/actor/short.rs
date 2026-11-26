@@ -161,22 +161,18 @@ impl Actor {
                 self.maintained(now);
                 let wake = self.engine.maintain.remembered.retention_wake();
                 self.engine.maintain.until = [until, wake].into_iter().flatten().min();
-                let event = Event::Maintained {
-                    event: MaintainedEvent::Waiting { held },
-                    created_at_read,
-                };
-                self.ran(event, now)
+                self.ran_maintained(MaintainedEvent::Waiting { held }, created_at_read, now)
             }
             // A snapshot's last transaction must be at most what was published: with
             // uploads busy it waits, and the next listing with them.
             Due::Run(Job::Snapshot(_)) if !self.uploads_idle() => {
                 self.engine.maintain.stale = true;
                 self.engine.maintain.snapshot_waits = true;
-                let event = Event::Maintained {
-                    event: MaintainedEvent::Waiting { held: None },
+                self.ran_maintained(
+                    MaintainedEvent::Waiting { held: None },
                     created_at_read,
-                };
-                self.ran(event, now)
+                    now,
+                )
             }
             Due::Run(job) => {
                 // Whatever the job does, the next listing is what to plan from.

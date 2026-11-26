@@ -48,7 +48,7 @@ use std::num::NonZeroU32;
 use std::time::Duration;
 
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
-use lsr_wal::{PageMapError, ReadPageError, ResumeError, WalError, WalOffset};
+use lsr_wal::{PageMapError, ReadPageError, WalError, WalOffset};
 
 use crate::compact::CompactError;
 use crate::created_at::ResolveError;
@@ -200,8 +200,6 @@ pub enum BugSite {
     CompactionLeavesAHole,
     /// A file's created-at time was asked for twice in one resolve.
     CreatedAtRepeated,
-    /// The WAL reader was resumed from a cursor its own scan did not give.
-    WalResume,
     /// A WAL page was read back into a buffer of the wrong size.
     WalPageRead,
     /// The page map was fed out of the order one scan produces.
@@ -744,46 +742,34 @@ pub struct Responses {
 impl Responses {
     /// Go's behaviour (the default): keep trying on every cause, stop on a
     /// other writer.
-    pub const GO_LIKE: Self = Self {
-        credentials: Response::KeepTrying,
-        permission_denied: Response::KeepTrying,
-        clock_skew: Response::KeepTrying,
-        bucket_missing: Response::KeepTrying,
-        tls: Response::KeepTrying,
-        store_refused: Response::KeepTrying,
-        remote_corrupt: Response::KeepTrying,
-        remote_regressed: Response::KeepTrying,
-        wal_corrupt: Response::KeepTrying,
-        wal_truncated: Response::KeepTrying,
-        wal_unlinked: Response::KeepTrying,
-        wal_sync_failed: Response::KeepTrying,
-        page_size_changed: Response::KeepTrying,
-        database_page_mismatch: Response::KeepTrying,
-        conditional_writes_unsupported: Response::KeepTrying,
-        bug: Response::KeepTrying,
-        other_writer: OtherWriter::Stop,
-    };
+    pub const GO_LIKE: Self = Self::all(Response::KeepTrying);
 
     /// Stop on every cause.
-    pub const STRICT: Self = Self {
-        credentials: Response::Stop,
-        permission_denied: Response::Stop,
-        clock_skew: Response::Stop,
-        bucket_missing: Response::Stop,
-        tls: Response::Stop,
-        store_refused: Response::Stop,
-        remote_corrupt: Response::Stop,
-        remote_regressed: Response::Stop,
-        wal_corrupt: Response::Stop,
-        wal_truncated: Response::Stop,
-        wal_unlinked: Response::Stop,
-        wal_sync_failed: Response::Stop,
-        page_size_changed: Response::Stop,
-        database_page_mismatch: Response::Stop,
-        conditional_writes_unsupported: Response::Stop,
-        bug: Response::Stop,
-        other_writer: OtherWriter::Stop,
-    };
+    pub const STRICT: Self = Self::all(Response::Stop);
+
+    /// `response` for every cause but the other writer, which always stops; the one place
+    /// that names every field, so a new cause does not build until it is named.
+    const fn all(response: Response) -> Self {
+        Self {
+            credentials: response,
+            permission_denied: response,
+            clock_skew: response,
+            bucket_missing: response,
+            tls: response,
+            store_refused: response,
+            remote_corrupt: response,
+            remote_regressed: response,
+            wal_corrupt: response,
+            wal_truncated: response,
+            wal_unlinked: response,
+            wal_sync_failed: response,
+            page_size_changed: response,
+            database_page_mismatch: response,
+            conditional_writes_unsupported: response,
+            bug: response,
+            other_writer: OtherWriter::Stop,
+        }
+    }
 
     /// Whether `cause` stops the engine. A stall never does.
     #[must_use]
@@ -1061,24 +1047,6 @@ impl Fault {
             },
             WalError::EndNotAtCommit { .. } => Self::WalIndexInconsistent,
             WalError::TooManyFrames | WalError::Io(_) => Self::LocalIo,
-        }
-    }
-
-    /// A resume error that `recover` did not map to one of its own rules.
-    /// `recover` owns `PrevFrame` and `NotAtCommit` (snapshot causes); one
-    /// reaching this fallback is a bug.
-    #[must_use]
-    pub fn from_resume(err: ResumeError) -> Self {
-        match err {
-            ResumeError::Io(_) => Self::LocalIo,
-            ResumeError::PageSizeMismatch { expected, found } => Self::PageSizeChanged {
-                was: found,
-                now: expected,
-            },
-            ResumeError::Truncated { .. } | ResumeError::Restarted { .. } => Self::WalMoved,
-            ResumeError::PrevFrame { .. } | ResumeError::NotAtCommit { .. } => {
-                Self::Bug(BugSite::WalResume)
-            }
         }
     }
 
