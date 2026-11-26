@@ -22,7 +22,7 @@
 //! no pre-apply checksum and `min_txid = 1`, as Go's does.
 
 use std::collections::BTreeMap;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 
 use lsr_ltx::{Header, HeaderFields, PageChecksum, PageSize, Timestamp};
 use lsr_wal::{CommittedEnd, OpenError, PageMap, Salts, WalReader};
@@ -253,12 +253,16 @@ impl Snapshotting {
         self.holds(wal, pages)?;
         let mut reader = self.reader(wal)?;
         let plan = Plan::new(&self.map, None, self.commit, self.page_size);
-        let mut left = budget;
+        // Zero once the budget is spent: a loop on a nonzero count cannot be left spinning on a
+        // wrong comparison, and every pass hands over a byte.
+        let mut left = NonZeroU64::new(budget);
         let open = self
             .open
             .as_mut()
             .ok_or_else(|| BugSite::UploadNeverOpened.hit())?;
-        while !self.filling.whole() && left > 0 {
+        while let Some(room) = left
+            && !self.filling.whole()
+        {
             if !patient
                 && open
                     .flight(Rest::More)
@@ -272,12 +276,17 @@ impl Snapshotting {
             self.filling
                 .encode(&plan, &mut reader, db, pages, self.pinned)?;
             let out = self.filling.out();
-            let n = out.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+            let n = out
+                .len()
+                .min(usize::try_from(room.get()).unwrap_or(usize::MAX));
             let chunk = out.get(..n).ok_or_else(|| BugSite::Encode.hit())?;
             open.write(chunk).await.map_err(|err| S::fault(&err))?;
             out.drain(..n);
             let n = u64::try_from(n).unwrap_or(u64::MAX);
-            (left, self.sent) = (left.saturating_sub(n), self.sent.saturating_add(n));
+            (left, self.sent) = (
+                NonZeroU64::new(room.get().saturating_sub(n)),
+                self.sent.saturating_add(n),
+            );
         }
         pages.pin_past(self.filling.next());
         if !self.filling.whole() {
