@@ -443,6 +443,7 @@ pub fn provider_fault(fault: HttpFault) -> Option<Fault> {
             keep: 16,
         },
         HttpFault::WrongEtag(on) => Fault::WrongEtag { on: shape(on) },
+        HttpFault::BodyMismatch(on) => status(shape(on), 400, "XAmzContentSHA256Mismatch"),
         HttpFault::ConnectionReset(on) => Fault::Transport {
             on: shape(on),
             err: TransportError::ConnectionReset,

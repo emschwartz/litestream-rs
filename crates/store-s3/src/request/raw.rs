@@ -11,6 +11,7 @@ use thiserror::Error;
 use super::{HttpRequest, Method, RequestBuilder, RequestError, UploadId};
 use crate::response::parse_create;
 use crate::response::xml_text;
+use crate::sigv4::PayloadHash;
 use crate::transport::{HttpResponse, Transport, TransportError};
 
 /// The most pages of open uploads [`open_uploads`] follows before it gives up.
@@ -31,7 +32,13 @@ impl RequestBuilder {
         headers: Vec<(&'static str, String)>,
         body: Vec<u8>,
     ) -> Result<HttpRequest, RequestError> {
-        self.sign_raw(now, method, object, query, headers, body)
+        self.sign(
+            now,
+            (method, object),
+            query,
+            headers,
+            (PayloadHash::of(&body), body),
+        )
     }
 }
 
@@ -233,16 +240,11 @@ mod tests {
             .unwrap();
         assert_eq!(request.header("x-tigris-consistent"), Some("true"));
         assert_eq!(request.header("x-extra"), Some("1"));
-        let signed = request
-            .url()
-            .query_pairs()
-            .find(|(name, _)| name == "X-Amz-SignedHeaders")
-            .map(|(_, value)| value.into_owned())
-            .unwrap();
+        let signed = request.signed_headers();
         for (name, _) in request.headers() {
             assert!(
-                signed.split(';').any(|s| s == *name),
-                "{name} unsigned: {signed}"
+                *name == "authorization" || signed.contains(name),
+                "{name} unsigned: {signed:?}"
             );
         }
         let query = request.url().query().unwrap();

@@ -1,0 +1,7 @@
+# A store's refusal of a body that does not match its signed SHA-256
+# (`XAmzContentSHA256Mismatch`) is read as a plain refusal, so the engine degrades as if the
+# operator had to act, where a new upload would succeed (docs/decisions/D250.md).
+name = "sha256-mismatch-not-a-digest-failure"
+fix = "plant"
+package = "lsr-store-s3"
+tests = ["classify::tests::classify_missing_corrupt_and_refused"]

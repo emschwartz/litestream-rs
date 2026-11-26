@@ -381,6 +381,7 @@ mod scenarios {
             HttpFault::Internal(UploadPart),
             HttpFault::AfterPublish(UploadPart),
             HttpFault::WrongEtag(UploadPart),
+            HttpFault::BodyMismatch(UploadPart),
             HttpFault::ConnectionReset(UploadPart),
             HttpFault::Internal(Complete),
             HttpFault::AfterPublish(Complete),

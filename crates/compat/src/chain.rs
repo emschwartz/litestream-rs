@@ -362,6 +362,7 @@ fn config(maintenance: Maintenance) -> ActorConfig {
             min_pages: NonZeroU32::new(40),
             truncate_pages: NonZeroU32::new(120),
         },
+        sync_interval: Duration::ZERO,
         upload: UploadConfig::default(),
         maintenance,
         retry_interval: Duration::from_millis(100),

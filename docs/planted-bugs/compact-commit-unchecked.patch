@@ -1,5 +1,4 @@
 diff --git a/crates/core/src/compact.rs b/crates/core/src/compact.rs
-index d1978bbba..9a87b641a 100644
 --- a/crates/core/src/compact.rs
 +++ b/crates/core/src/compact.rs
 @@ -57,7 +57,6 @@
@@ -19,17 +18,17 @@ index d1978bbba..9a87b641a 100644
  ) -> Result<(Trailer, u32), CompactError> {
      let flush = merge.budget.flush;
      let mut pages = 0_u32;
-@@ -800,7 +799,8 @@
+@@ -797,7 +796,8 @@
+     let encoder = Encoder::new(out, header).map_err(CompactError::Encode)?;
+     let key = FileKey::new(level, inputs.range());
      let created_at = header.fields().timestamp;
-     // A compacted file may be written again over itself (a retried
-     // compaction, Go's output for the same range), as Go's are.
--    let mut upload = Writer::begin(dest, &key, created_at, WriteMode::Replace, None)
+-    let mut upload = Writer::begin(dest, &key, created_at, mode, None)
 +    let mut upload = dest
-+        .begin_upload(&key, created_at, WriteMode::Replace)
++        .begin_upload(&key, created_at, mode)
          .await
          .map_err(CompactError::Dest)?;
      let written = write_output(&mut merge, encoder, &header, &mut upload).await;
-@@ -811,11 +811,7 @@
+@@ -808,11 +808,7 @@
              return Err(err);
          }
      };
@@ -42,7 +41,7 @@ index d1978bbba..9a87b641a 100644
      Ok(Compacted {
          info,
          header,
-@@ -828,7 +824,7 @@
+@@ -825,8 +821,8 @@
  
  /// An abort that fails leaves scratch the store cleans up; the error that made
  /// us abort is the one worth reporting.
@@ -51,3 +50,6 @@ index d1978bbba..9a87b641a 100644
      match upload.abort().await {
          Ok(()) | Err(_) => {}
      }
+-}
++}
+\ No newline at end of file

@@ -1,8 +1,9 @@
 //! Levels above 1 have no hole when level 1 gains two files in one window.
 //!
-//! A level-1 compaction's output carries its last input's time, so a run whose last input
-//! was committed before the window opened leaves the window open, and a commit that lands
-//! while that compaction runs becomes a second level-1 file in the same window. The trial
+//! Level 1 gains two files in one window when its sources outnumber what one compaction
+//! takes: the first job is full and leaves the window open for the rest. (Before a level's
+//! own compaction closed its window, a commit that landed while the compaction ran did the
+//! same, since the output carries its last input's time, from the window before.) The trial
 //! drill saw level 2 then take the files before the first of the two and the second alone,
 //! never the first: a hole Go's compaction refuses to read across
 //! (`non-contiguous transaction ids in input files`, ltx `compactor.go:125`).
@@ -72,6 +73,43 @@ fn write_through_compactions(rig: &mut Rig, actor: &mut Actor, from: i64, until:
     seen
 }
 
+/// A writer that commits four times a second from `from` to `until` (seconds after `T0`):
+/// more level-0 files in each of level 1's ten-second windows than one compaction takes.
+/// Returns every tick, and each compaction output with the time of the tick that wrote it.
+fn write_more_than_one_compaction_takes(
+    rig: &mut Rig,
+    actor: &mut Actor,
+    from: i64,
+    until: i64,
+) -> (Vec<Tick>, Vec<(i64, FileKey)>) {
+    let (mut seen, mut outputs) = (Vec::new(), Vec::new());
+    for quarter in from * 4..until * 4 {
+        let begins = T0 + 100 + quarter * 250;
+        rig.commit(u8::try_from(quarter % 250 + 1).unwrap());
+        let mut now = begins;
+        for _ in 0..100 {
+            let tick = rig.tick(actor, now);
+            if let Some(Event::Maintained {
+                event: MaintainedEvent::Compacted(info),
+                ..
+            }) = event(&tick)
+            {
+                outputs.push((now, info.key));
+            }
+            let next = next_of(&tick);
+            seen.push(tick);
+            match next {
+                Some(Next::Now) => {}
+                Some(Next::At(at)) if at.unix_millis() < begins + 250 => {
+                    now = now.max(at.unix_millis());
+                }
+                Some(Next::At(_) | Next::OnWalChange) | None => break,
+            }
+        }
+    }
+    (seen, outputs)
+}
+
 /// The keys of the compaction outputs published at `level`, in order.
 fn outputs_at(seen: &[Tick], level: u8) -> Vec<FileKey> {
     seen.iter()
@@ -129,16 +167,30 @@ fn two_level_one_files_in_one_window_leave_no_hole_in_the_levels_above() {
         ..cfg()
     });
     rig.settle(&mut actor, T0);
-    write_through_compactions(&mut rig, &mut actor, 0, 130);
-    let one = ranges_at(&rig, 1);
-    // The scenario is the one meant: some window gave level 1 a single-transaction file
-    // right after a longer one.
+    let (seen, outputs) = write_more_than_one_compaction_takes(&mut rig, &mut actor, 0, 130);
+    no_stop(&seen);
+    // The scenario is the one meant: some ten-second window gave level 1 two files.
+    let at_level = |level: u8| {
+        let level = Level::new(level).unwrap();
+        outputs.iter().filter(move |(_, key)| key.level() == level)
+    };
     assert!(
-        one.iter()
-            .zip(one.iter().skip(1))
-            .any(|(a, b)| a.0 < a.1 && b.0 == b.1),
-        "level 1 never gained two files in one window: {one:?}"
+        at_level(1)
+            .zip(at_level(1).skip(1))
+            .any(|(a, b)| a.0 / 10_000 == b.0 / 10_000),
+        "level 1 never gained two files in one window: {outputs:?}"
     );
+    // A level compacts what the one below just produced: each level-2 file ends where the
+    // newest level-1 file written before it ends, the second of a window's two included.
+    let mut below = None;
+    for (_, key) in &outputs {
+        if key.level() == Level::new(1).unwrap() {
+            below = Some(key.range().max());
+        } else if key.level() == Level::new(2).unwrap() {
+            assert_eq!(Some(key.range().max()), below, "{key} of {outputs:?}");
+        }
+    }
+    assert!(at_level(2).count() >= 5, "{outputs:?}");
     for level in 1..=3 {
         let ranges = ranges_at(&rig, level);
         assert!(ranges.len() >= 2, "level {level} holds {ranges:?}");

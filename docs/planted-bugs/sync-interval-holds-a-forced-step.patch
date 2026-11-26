@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -1541,7 +1541,7 @@
+         // Without one of these a step has only new commits to stage, and those wait out the
+         // sync interval: every tick that follows another at once (a file to upload, a
+         // compaction) would else stage the commits made since the last as a file of their own.
+-        let forced = wants_proof || self.pending().is_some() || self.more_wal();
++        let forced = wants_proof;
+         if !forced {
+             if !self.wal_moved(committed) {
+                 return None;

@@ -1,0 +1,9 @@
+# Every request signs the SHA-256 of an empty body whatever it carries, so the store checks
+# each upload against a hash that is not its body's (docs/decisions/D250.md).
+name = "payload-signed-as-no-body"
+fix = "plant"
+package = "lsr-store-s3"
+tests = [
+    "request::tests::every_request_signs_the_hash_of_its_own_body",
+    "request::tests::put_carries_length_hash_and_created_at",
+]
