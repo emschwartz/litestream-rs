@@ -319,6 +319,7 @@ pub struct S3Config {
     provider: Provider,
     part_size: PartSize,
     concurrency: Option<NonZeroUsize>,
+    cell: u64,
     deadline: Duration,
 }
 
@@ -403,6 +404,7 @@ impl S3Config {
                 PartSize::MIN
             },
             concurrency: None,
+            cell: crate::again::CELL,
             deadline: DEFAULT_DEADLINE,
         }
     }
@@ -433,6 +435,15 @@ impl S3Config {
     #[must_use]
     pub fn with_part_size(mut self, part_size: PartSize) -> Self {
         self.part_size = part_size;
+        self
+    }
+
+    /// Replaces the bytes one second read of a staged part asks for, so a test or the simulator
+    /// reaches a part of more than one cell with a file of a few bytes.
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub const fn with_cell(mut self, bytes: std::num::NonZeroU64) -> Self {
+        self.cell = bytes.get();
         self
     }
 
@@ -491,6 +502,11 @@ impl S3Config {
     #[must_use]
     pub fn part_size(&self) -> PartSize {
         self.part_size
+    }
+
+    /// Bytes one second read of a staged part asks for.
+    pub(crate) const fn cell(&self) -> u64 {
+        self.cell
     }
 
     /// How many parts of one multipart upload may be in flight: the
