@@ -1,6 +1,6 @@
 # Go terms
 
-A translation aid for reading this code beside Go Litestream, LTX and SQLite. Each row maps one of our terms to the word the other side uses for the same thing. Locations are in the pinned clones that `just upstream` fetches into `.upstream/` (`litestream` at 041a8c3, `ltx` at v0.5.3). Where a term has no counterpart it says so.
+A translation aid for reading this code beside Go Litestream, LTX and SQLite. Each row maps one of our terms to the word the other side uses for the same thing. Locations are in the pinned clones that `just upstream` fetches into `.upstream/` (`litestream` at 3e0fdc0, `ltx` at v0.5.3). Where a term has no counterpart it says so.
 
 | Our term | Their word | Where |
 |---|---|---|

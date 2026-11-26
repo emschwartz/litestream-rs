@@ -267,6 +267,10 @@ pub const LEFT_TO_THE_SEEDS: &[(&str, &str)] = &[
         "the healthy tail judges the WAL after each commit that reached the replica, unless a fault fired in its window or a reader is open",
     ),
     (
+        "barrier.",
+        "every checkpoint takes the write barrier, and the seeds checkpoint in nearly every run",
+    ),
+    (
         "tick_cost.",
         "every tick of every run is judged against its bound",
     ),

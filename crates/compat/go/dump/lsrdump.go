@@ -148,7 +148,7 @@ func lsrDump(path string) lsrDumpOut {
 		}
 		for _, db := range dbs {
 			// The one field check DB.Open makes before it touches a file (db.go:872 at
-			// 041a8c3); replicate's start fails on it.
+			// 3e0fdc0); replicate's start fails on it.
 			if db.MinCheckpointPageN <= 0 {
 				return lsrDumpOut{Error: "minimum checkpoint page count required", DBs: []lsrDumpDB{}, Config: out.Config}
 			}
