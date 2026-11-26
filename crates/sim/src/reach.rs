@@ -108,7 +108,7 @@ pub const REQUIRED: &[&str] = &[
     "send.then_the_process_ended",
     // Gray weather (docs/decisions/D276.md): a replica call that hung until the client's
     // timeout, an endpoint that hung every upload long enough for health to be judged
-    // (ledger: late-retry-forgets-the-failures), a slow staging disk, a pause inside a tick
+    // (ledger: retry-waits-from-tick-start), a slow staging disk, a pause inside a tick
     // past a day, and a request from the latency tail ten times its price.
     "gray.hang.calls",
     "hold.hang.Upload.halted",
