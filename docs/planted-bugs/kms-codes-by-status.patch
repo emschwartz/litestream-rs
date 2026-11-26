@@ -1,8 +1,8 @@
 diff --git a/crates/store-s3/src/classify.rs b/crates/store-s3/src/classify.rs
-index e4dd8adc2..1e6fe6a76 100644
+index b2d9a25..20ad577 100644
 --- a/crates/store-s3/src/classify.rs
 +++ b/crates/store-s3/src/classify.rs
-@@ -109,10 +109,6 @@ impl S3Code {
+@@ -114,10 +114,6 @@ impl S3Code {
              "AllAccessDisabled" => Self::AllAccessDisabled,
              "RequestTimeTooSkewed" => Self::RequestTimeTooSkewed,
              "ExpiredRequest" => Self::ExpiredRequest,
@@ -11,5 +11,5 @@ index e4dd8adc2..1e6fe6a76 100644
 -            | "KMS.KMSInvalidStateException"
 -            | "KMS.NotFoundException" => Self::KmsKeyUnusable,
              "InvalidObjectState" => Self::InvalidObjectState,
-             "BadDigest" => Self::BadDigest,
+             "BadDigest" | "XAmzContentSHA256Mismatch" => Self::BadDigest,
              "InvalidDigest" => Self::InvalidDigest,
