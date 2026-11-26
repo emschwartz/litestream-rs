@@ -238,3 +238,53 @@ fn a_power_loss_between_ticks_that_takes_a_sent_staged_file_forces_the_snapshot(
     // A torn file is dropped by the boot, which snapshots above the replica's copy of it.
     assert_eq!(snapshots, torn);
 }
+
+/// The engine is down while the application commits more than one sync step takes (the
+/// simulator's cap is 16 KiB of WAL) and another process checkpoints every frame into the
+/// database. The boot continues from the newest staged file, behind the committed end, under
+/// a read transaction on mark 0, which blocks no restart. Its first step stops at the cap, and
+/// the next commit restarts the WAL: the frames past that step are now only in the database
+/// file, and the engine snapshots for `GenerationChanged`. The step that stopped short proved
+/// nothing, so the judge takes the snapshot as forced (a 5,000-step large-profile seed, shrunk).
+#[test]
+fn a_restart_after_a_sync_step_stopped_short_of_a_boot_backlog_justifies_a_snapshot() {
+    let big = || Op::Commit {
+        pages: 32,
+        grow: true,
+    };
+    let mut ops = vec![commit()];
+    ops.extend(std::iter::repeat_n(Op::Tick, 4));
+    ops.extend(std::iter::repeat_n(big(), 8));
+    ops.extend([
+        // The next process's read transaction lands on a slot at the committed end, which lets
+        // another process checkpoint every frame; the process after it then reads on mark 0.
+        Op::Crash(CrashKind::Process),
+        Op::OtherProcessCheckpoint(lsr_sim::OtherProcessMode::Passive),
+        Op::Crash(CrashKind::Process),
+        // The boot, then one step that stops at the cap, and a commit that restarts the WAL.
+        Op::Tick,
+        Op::Tick,
+        commit(),
+    ]);
+    ops.extend(std::iter::repeat_n(Op::Tick, 6));
+    ops.push(Op::Restore);
+    let opts = Opts {
+        trace: true,
+        ..Opts::default()
+    };
+    let report = match run_ops(Seed::new(1), &ops, &opts) {
+        Ok(report) => report,
+        Err(failure) => panic!(
+            "step {}: {}\n{:#?}",
+            failure.step, failure.violation, failure.trace
+        ),
+    };
+    assert!(
+        report
+            .reach
+            .get("needless_snapshot.forced.GenerationChanged")
+            > 0,
+        "{:#?}",
+        report.trace
+    );
+}

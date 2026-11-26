@@ -1256,8 +1256,8 @@ impl Runner {
             self.forcings.note_in_tick(Forcing::PositionUnproven);
         }
         // A boot that continues short of the committed end (a commit it never staged) holds a
-        // position no read transaction pinned, so a restart before its first sync is a change
-        // it cannot follow.
+        // position no read transaction pinned, so a restart before a sync reaches the committed
+        // end is a change it cannot follow.
         if matches!(event, Event::Booted { cause: None }) && self.w.staging_behind_newest_commit() {
             self.forcings.note_in_tick(Forcing::PositionUnproven);
         }
