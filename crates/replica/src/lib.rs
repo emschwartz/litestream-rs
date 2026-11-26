@@ -145,7 +145,10 @@ pub use health::{
     AppNotice, Counters, FailStop, Gone, Health, Mismatch, OpCounters, Phase, Readiness,
     StopOutcome, StoreCounters, Verification, VerifyFailure, VerifyOutcome, VerifyRuns, Writes,
 };
-pub use local::{ClearError, CreateError, IntegrityCheck, IntegrityFailure, clear_journal_files};
+pub use local::{
+    ClearError, CreateError, IntegrityCheck, IntegrityFailure, PublishError, PublishStep,
+    clear_journal_files,
+};
 pub use readers::ReaderGuard;
 pub use replicator::{Ready, Replicator, ReplicatorBuilder, StopFuture};
 pub use restore::{
@@ -160,11 +163,12 @@ pub use store::{BoxFuture, DynStore, DynUpload};
 
 pub use lsr_core::{
     AppCheckpoint, AppCheckpoints, AsOfInside, CallTotals, CheckpointConfig, CheckpointMode, Clock,
-    Degraded, DegradedCause, Denied, Depth, Entropy, FinalRetention, FinalSnapshot,
-    FinalSnapshotFailure, Gate, IfReplicationStops, L0Retention, Maintenance, MaxUnreplicatedAge,
-    OtherWriter, Report, Response, Responses, RestoreOptions, RestoreTarget, Restored, Severity,
-    SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall, StopCause, TakeoverRecord, Task, Trip,
-    WhyBlocked, WorkCounts,
+    Degraded, DegradedCause, Denied, Depth, Entropy, Event as EngineEvent, Fault, FileFault,
+    FileKey, FinalRetention, FinalSnapshot, FinalSnapshotFailure, Gate, IfReplicationStops,
+    InventoryError, L0Retention, Maintenance, MaxUnreplicatedAge, NoPlan, OtherWriter, PlanOutcome,
+    Report, Response, Responses, RestoreOptions, RestoreTarget, Restored, Severity, SinkOp,
+    SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall, StopCause, StoreError, Task, Trip,
+    VerifyError, WhyBlocked, WorkCounts,
 };
-pub use lsr_ltx::{Timestamp, Txid};
+pub use lsr_ltx::{DbChecksum, Timestamp, Txid};
 pub use lsr_sqlite::{ConnectionSetup, Refusal, SetupError, ffi};

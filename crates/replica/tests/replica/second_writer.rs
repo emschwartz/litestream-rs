@@ -325,7 +325,7 @@ fn a_restored_database_replicates_without_a_refusal() {
     ));
     let record = std::fs::read(meta.join("lsr-takeover")).unwrap();
     assert_eq!(
-        lsr_replica::TakeoverRecord::decode(&record).unwrap().txid(),
+        lsr_core::TakeoverRecord::decode(&record).unwrap().txid(),
         reached
     );
     let app = rusqlite::Connection::open(&restored).unwrap();
@@ -516,7 +516,7 @@ fn a_lost_staged_file_is_dropped_after_the_takeover_record_is_written() {
     let path = meta_of(&site).join("lsr-takeover");
     common::moved_until(&replicator, &clock, (poll, 240), |_| path.exists());
     let record = std::fs::read(&path).unwrap();
-    lsr_replica::TakeoverRecord::decode(&record).unwrap();
+    lsr_core::TakeoverRecord::decode(&record).unwrap();
     faulty
         .fail_uploads
         .store(false, std::sync::atomic::Ordering::SeqCst);
