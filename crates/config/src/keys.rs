@@ -130,7 +130,7 @@ const fn other_backend(name: &'static str, read: Read) -> Key {
     )
 }
 
-const MD5: &str = "litestream-rs always sends Content-MD5 on uploads";
+const MD5: &str = "litestream-rs checks every upload by its signed SHA-256";
 const SIGNING: &str = "litestream-rs's S3 client signs requests one fixed way";
 const SSE: &str = "server-side encryption";
 

@@ -127,10 +127,16 @@ fn serve_one(mut stream: TcpStream, port: u16, fake: &FakeS3) -> io::Result<()> 
     };
     let target = request_line.next().unwrap_or("/");
     let url = Url::parse(&format!("http://127.0.0.1:{port}{target}")).map_err(io::Error::other)?;
-    let signed: BTreeSet<String> = url
-        .query_pairs()
-        .find(|(name, _)| name == "X-Amz-SignedHeaders")
-        .map(|(_, value)| value.split(';').map(str::to_owned).collect())
+    let lines: Vec<&str> = lines.collect();
+    // The headers the client added itself (its own user-agent, accept-encoding) are not the
+    // store's: only those its Authorization signs, and the Authorization, reach the fake.
+    let signed: BTreeSet<String> = lines
+        .iter()
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.trim().eq_ignore_ascii_case("authorization"))
+        .and_then(|(_, value)| value.split_once("SignedHeaders="))
+        .and_then(|(_, rest)| rest.split(',').next())
+        .map(|list| list.split(';').map(str::to_owned).collect())
         .unwrap_or_default();
     let mut headers = Vec::new();
     let mut declared = 0_usize;
@@ -142,7 +148,7 @@ fn serve_one(mut stream: TcpStream, port: u16, fake: &FakeS3) -> io::Result<()> 
         if name == "content-length" {
             declared = value.parse().unwrap_or(0);
         }
-        if name != "host" && signed.contains(&name) {
+        if name == "authorization" || (name != "host" && signed.contains(&name)) {
             headers.push((leak(&name), value));
         }
     }

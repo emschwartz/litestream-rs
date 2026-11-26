@@ -64,7 +64,7 @@
 //!   reference, so nothing holds it twice: 26 MiB at the defaults, at most 84 MiB on Tigris
 //!   (`crates/store-s3/tests/store-s3/memory.rs`, `an_upload_through_the_real_client_holds_five_parts`
 //!   and `the_bound_follows_part_size_and_concurrency`). A part is the one unit a request
-//!   must hold whole (its `Content-MD5` is signed before the body goes out), so this term
+//!   must hold whole (its SHA-256 is signed before the body goes out), so this term
 //!   grows with the part size the operator sets; see `docs/decisions/D212.md`.
 //! - **Compaction:** the inputs' windows plus a 256 KiB output buffer that is kept for the
 //!   file. A level-1 compaction reads each staged file in a 128 KiB window: 5 MiB at `F` = 32

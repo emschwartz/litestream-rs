@@ -29,6 +29,7 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 | The S3 permissions Litestream's guide publishes | Work. litestream-rs also tries to list and abort open multipart uploads at start, and skips that sweep, with a warning, when the policy refuses it ([s3-permissions.md](s3-permissions.md)) |
 | The store is down at start, with `hold-start` (litestream-rs only; Go never holds writes) | Starts the application at once | Holds writes while boot attempts fail, up to 15 seconds from the first failure, then releases them and starts the `-exec` child. One failed attempt does not release, because the next may find another writer ([decisions/D207.md](decisions/D207.md)) |
 | `replicate` and `restore` fail | Exit 1 |
+| An upload's bytes are damaged on the way to S3 | Every request is signed with the SHA-256 of its body, and S3 refuses a body that does not match it, so nothing is stored and the upload is tried again. Content-MD5 goes only on deletes, and the ETag S3 answers is not compared with anything. litestream-rs also checks each part's bytes, read again from the staged file to be sent, against the first read ([decisions/D250.md](decisions/D250.md)) |
 
 ### Files waiting to upload at a restart
 
