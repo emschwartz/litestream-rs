@@ -5,5 +5,4 @@ fix = "plant"
 package = "lsr-store-s3"
 tests = [
     "flight::parts_that_end_out_of_order_make_the_same_object",
-    "memory::an_upload_from_a_file_at_a_large_part_size_holds_no_part",
 ]
