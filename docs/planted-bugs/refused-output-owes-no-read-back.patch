@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -3001,9 +3001,7 @@ impl Actor {
+     /// The next listing reads back the header and tail of the newest file of each level before
+     /// anything is planned from it, as after a boot, and removes one whose header or tail fails.
+     fn owe_read_back(&mut self, fault: Fault) {
+-        if fault == Fault::UploadChecksumMismatch {
+-            self.engine.maintain.read_back_owed = true;
+-        }
++        let _ = fault;
+     }
+ 
+     /// Maintenance lists again when the sync task's wait ends, or after the

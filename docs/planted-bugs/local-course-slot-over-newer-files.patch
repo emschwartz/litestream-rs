@@ -1,11 +1,11 @@
 diff --git a/crates/core/src/actor/local.rs b/crates/core/src/actor/local.rs
-index 07ceb7be1..043989044 100644
+index c729a61..7f931a5 100644
 --- a/crates/core/src/actor/local.rs
 +++ b/crates/core/src/actor/local.rs
-@@ -347,7 +347,7 @@ impl Actor {
-             .await
-             .map_err(|err| inventory_fault::<R>(&err))?
-             .newest();
+@@ -344,7 +344,7 @@ impl Actor {
+         let base = newest_level_zero(staging)
+             .await?
+             .map(|info| info.key.range().max());
 -        if held > base || base > Some(oldest) {
 +        if held > base {
              drop_staged_from(&Apart::over(staging, None), Txid::MIN, unsent).await?;

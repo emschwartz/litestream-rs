@@ -141,6 +141,9 @@ pub fn delta(before: RecorderCounts, after: RecorderCounts) -> RecorderCounts {
         written_bytes: after.written_bytes.saturating_sub(before.written_bytes),
         read_bytes: after.read_bytes.saturating_sub(before.read_bytes),
         committed_bytes: after.committed_bytes.saturating_sub(before.committed_bytes),
+        refused_held_bytes: after
+            .refused_held_bytes
+            .saturating_sub(before.refused_held_bytes),
         rereads_given: after.rereads_given.saturating_sub(before.rereads_given),
         rereads_differing: after
             .rereads_differing
@@ -283,8 +286,10 @@ impl SendTurns {
         }
         let was_in_flight = self.in_flight;
         match ended {
-            Some(Event::Sending { .. }) => {
-                self.in_flight = true;
+            // A tick that published a file may have begun the next, which goes first next
+            // tick: it is a slice like one that only sent.
+            Some(Event::Sending { .. } | Event::Uploaded(_)) => {
+                self.in_flight = matches!(ended, Some(Event::Sending { .. }));
                 if !self.waiting {
                     return Ok(());
                 }
@@ -318,7 +323,6 @@ impl SendTurns {
                 | Event::StagingShort { .. }
                 | Event::Synced { .. }
                 | Event::Checkpointed { .. }
-                | Event::Uploaded(_)
                 | Event::Maintained { .. }
                 | Event::Idle
                 | Event::Resnapshot(_)

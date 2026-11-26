@@ -56,12 +56,13 @@ fn commits(n: usize, pages: u8) -> Vec<Op> {
         .collect()
 }
 
-/// The level-9 snapshot of the whole database goes up a slice a tick, and the read-back that
-/// checks the newest file of every level after the boot goes a slice a tick too: the run passes
-/// and judges the tail's lag. Read in one maintenance tick, the read-back held the replica for
-/// ten seconds here and for the whole database at any size.
+/// The level-9 snapshot of the whole database goes up a slice a tick, and the boot's
+/// read-back reads only the header and tail of each level's newest file
+/// (`docs/decisions/D272.md`): no tick passes its bound, and the run judges the tail's lag.
+/// Read whole in one maintenance tick, the read-back held the replica for ten seconds here
+/// and for the whole database at any size.
 #[test]
-fn the_read_back_of_a_large_snapshot_goes_a_slice_a_tick() {
+fn the_boot_read_back_of_a_large_snapshot_stays_within_the_tick_bound() {
     let report = run(&commits(4, 2));
     assert!(
         report.reach.get("liveness.judged") > 0,
@@ -102,26 +103,6 @@ fn a_boot_over_another_writer_reads_the_replica_a_slice_a_tick() {
     };
     assert!(
         report.reach.get("tick_cost.judged") > 0,
-        "{:?}",
-        report.reach
-    );
-}
-
-/// A defect allowance's test (`lsr_sim::cost::s3_rereads`, <https://github.com/emschwartz/litestream-rs/issues/478>): the S3 replica
-/// reads each staged body it puts whole again from staging, to hash it and to send it. It
-/// fails once the store hashes and sends from one read; the allowance goes with it.
-#[test]
-fn an_s3_put_reads_its_staged_body_again() {
-    let opts = Opts {
-        remote_s3: true,
-        ..Opts::default()
-    };
-    let report = match run_ops(Seed::new(1), &commits(5, 1), &opts) {
-        Ok(report) => report,
-        Err(failure) => panic!("{failure}"),
-    };
-    assert!(
-        report.reach.get("tick_cost.s3_rereads_allowed") > 0,
         "{:?}",
         report.reach
     );

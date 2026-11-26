@@ -1097,13 +1097,15 @@ impl Fault {
         }
     }
 
-    /// Whether a failed snapshot may have left an object under its key: the store
-    /// answered the commit with a size or a checksum that is not the one sent.
+    /// Whether a failed snapshot left an object of its own under its key: the store answered
+    /// the commit with a size that is not the one sent. A checksum refusal is no such proof
+    /// (`docs/decisions/D280.md`): the key may hold an earlier attempt's snapshot.
     #[must_use]
     pub(crate) const fn leaves_bad_snapshot(self) -> bool {
         match self {
-            Self::UploadAmbiguous | Self::UploadChecksumMismatch => true,
-            Self::StoreTransient
+            Self::UploadAmbiguous => true,
+            Self::UploadChecksumMismatch
+            | Self::StoreTransient
             | Self::StoreThrottled { .. }
             | Self::StoreDenied(_)
             | Self::RemoteObjectMissing

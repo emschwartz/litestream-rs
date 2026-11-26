@@ -306,5 +306,5 @@ fn dense_as_of_instants_never_fall_between_outcomes() {
             }
         }
     }
-    assert_eq!((restored, inside, no_snapshot), (221, 1, 2));
+    assert_eq!((restored, inside, no_snapshot), (218, 1, 2));
 }

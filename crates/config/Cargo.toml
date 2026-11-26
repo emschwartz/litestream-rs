@@ -22,6 +22,9 @@ lsr-core = { workspace = true, features = ["testing"] }
 lsr-ltx.workspace = true
 lsr-store-s3 = { workspace = true, features = ["testing"] }
 proptest.workspace = true
+# The S3 store resolves the process crypto provider when it opens, and this crate enables none,
+# so the store tests pass alone only with one named here (the workspace build gets it elsewhere).
+rustls = { workspace = true, features = ["aws-lc-rs", "std"] }
 tempfile.workspace = true
 
 [lints]

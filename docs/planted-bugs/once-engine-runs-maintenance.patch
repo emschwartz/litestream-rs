@@ -1,12 +1,12 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 7df938684..73edcb3b9 100644
+index 1e844ae05..4530392f0 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -3104,7 +3104,6 @@ impl Actor {
+@@ -3081,7 +3081,6 @@ impl Actor {
          let turn = self.uploads_idle() || (self.fair_turn() && !maintain.snapshot_waits);
          self.running()
              && self.engine.sliced.is_none()
 -            && !self.kept.cfg.maintenance.is_one_off()
              && self.kept.tasks.ready(Task::Maintenance, now)
              && turn
-             && (maintain.wants_listing(now) || self.engine.reading_back.is_some())
+             && maintain.wants_listing(now)

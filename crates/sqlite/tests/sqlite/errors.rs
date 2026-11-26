@@ -352,3 +352,18 @@ fn a_raw_handle_is_set_up_and_stays_open() {
     conn.execute_batch("INSERT INTO t(v) VALUES (x'01')")
         .unwrap();
 }
+/// A relative path that starts with `file:` is the file of that name, never a URI the bundled
+/// SQLite (`SQLITE_USE_URI`) would read: opened as one, `file://<dir>/app.db` is the database
+/// `app.db` of `<dir>`, which exists, so this open would succeed.
+#[test]
+fn a_path_starting_with_file_colon_is_never_read_as_a_uri() {
+    let (dir, path, _conn) = fresh();
+    let as_uri = format!("file://{}", path.display());
+    let err = Sqlite::open(Path::new(&as_uri)).unwrap_err();
+    assert!(matches!(err, OpenError::Sqlite { .. }), "{err:?}");
+    assert!(path.exists());
+    // A name made of query syntax is not the in-memory database it would ask for.
+    let not_memory = Path::new("file:app.db?mode=memory");
+    Sqlite::open(not_memory).unwrap_err();
+    assert!(!dir.path().join("file:app.db?mode=memory").exists());
+}

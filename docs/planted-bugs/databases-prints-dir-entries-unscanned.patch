@@ -1,0 +1,26 @@
+diff --git a/crates/cli/src/run.rs b/crates/cli/src/run.rs
+index c25d976d9..e15d46d7b 100644
+--- a/crates/cli/src/run.rs
++++ b/crates/cli/src/run.rs
+@@ -840,17 +840,10 @@ fn databases_command(args: &DatabasesArgs) -> Result<Done, CliError> {
+         let kind = db.replica().map_or("", |r| r.kind().word());
+         match db.source() {
+             DbSource::Path(path) => rows.push((path.display().to_string(), kind)),
+-            DbSource::Dir(_) => {
+-                let entry = loaded
+-                    .config
+-                    .only_entry(index)
+-                    .ok_or(CliError::NoDatabase)?;
+-                let plan = lsr_config::plan(&entry, &ProcessEnv).map_err(CliError::Plan)?;
+-                rows.extend(
+-                    plan.dbs()
+-                        .iter()
+-                        .map(|d| (d.path().display().to_string(), kind)),
+-                );
++            DbSource::Dir(dir) => {
++                let _ = index;
++                let path = expand_path(dir.dir(), &ProcessEnv).map_err(CliError::DatabasePath)?;
++                rows.push((path.display().to_string(), kind));
+             }
+         }
+     }

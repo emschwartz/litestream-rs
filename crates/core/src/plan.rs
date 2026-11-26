@@ -3,8 +3,9 @@
 //! Pure: a function of an [`Inventory`] and a [`RestoreTarget`], with no I/O and
 //! no clock. The answer is either a [`ContiguousChain`] that ends exactly where
 //! the target says, or a typed reason there is no exact answer. It is never a
-//! shorter history: upstream's timestamp restore stops at a hole and exits 0,
-//! and this planner reports [`PlanOutcome::Gap`] instead.
+//! shorter history: upstream's timestamp restore refuses a hole whose next file was
+//! created by the instant, but stops at one whose next file was created after it and
+//! exits 0, and this planner reports [`PlanOutcome::Gap`] for both.
 //!
 //! # Contract
 //!
