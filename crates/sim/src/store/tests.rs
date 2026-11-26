@@ -212,6 +212,41 @@ fn a_short_object_whose_delete_fails_is_damage_the_store_keeps() {
     assert_eq!(faults.handle().damaged(), vec![info.key]);
 }
 
+/// A crash that drops the engine's delete of a short object before the store has run it
+/// leaves the object in the store, as a failed delete does: damage a restore may meet, until a
+/// later delete removes it.
+#[test]
+fn a_short_object_whose_delete_a_crash_cut_off_is_damage_the_store_keeps() {
+    let raw = MemStore::new();
+    let faults = Faults::new(
+        YieldEachCall::new(raw.clone()),
+        vec![(StoreOp::Upload, 0, FaultShape::SizeMismatch)],
+        1,
+    )
+    .corrupting_through(crate::remote::Bucket::Mem(raw.clone()));
+    let info = block_on(async {
+        let mut up = faults
+            .begin_upload(
+                &fkey(0, 1, 1),
+                Timestamp::from_unix_millis(5),
+                WriteMode::New,
+            )
+            .await?;
+        up.write(&ltx(1, 1, 1, 1, None)).await?;
+        up.commit().await
+    })
+    .unwrap();
+    assert!(matches!(
+        run_until(faults.delete(&[info.key]), Polls::new(0)),
+        RunEnd::Crashed { polls: 0 }
+    ));
+    assert_eq!(listed(&raw), 1);
+    assert_eq!(faults.handle().damaged(), vec![info.key]);
+    block_on(faults.delete(&[info.key])).unwrap();
+    assert_eq!(listed(&raw), 0);
+    assert!(faults.handle().damaged().is_empty());
+}
+
 #[test]
 fn a_size_mismatch_without_the_raw_store_only_understates_the_size() {
     let raw = MemStore::new();
