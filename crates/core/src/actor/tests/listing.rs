@@ -392,9 +392,9 @@ fn an_hour_that_starts_with_a_chain_of_compactions_lists_a_bounded_number_of_req
 fn an_hour_with_a_level_zero_file_that_stays_lists_a_bounded_number_of_requests() {
     an_hour_stays_within_the_bounds(&Hour {
         stuck_level_zero: true,
-        requests: 640,
-        // 159,000 with the cursor kept across whole listings, 199,000 with it reset each time.
-        entries: 180_000,
+        requests: 450,
+        // 103,000 with the cursor kept across whole listings, more with it reset each time.
+        entries: 120_000,
         ..STEADY
     });
 }

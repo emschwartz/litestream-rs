@@ -161,7 +161,7 @@ fn regressed(seen: &[Tick]) -> bool {
         matches!(
             event(t),
             Some(Event::Degraded {
-                cause: PersistentCause::RemoteRegressed,
+                cause: DegradedCause::RemoteRegressed,
                 ..
             })
         )

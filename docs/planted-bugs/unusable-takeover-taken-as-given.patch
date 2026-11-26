@@ -1,14 +1,14 @@
 diff --git a/crates/replica/src/thread.rs b/crates/replica/src/thread.rs
-index f908e923b..cd14d6e2f 100644
+index dee7f60ac..60222a040 100644
 --- a/crates/replica/src/thread.rs
 +++ b/crates/replica/src/thread.rs
-@@ -317,7 +317,12 @@ impl Worker {
+@@ -321,7 +321,12 @@ impl Worker {
          match takeover {
              Ok(Some(takeover)) => worker.actor.remember_takeover(takeover),
              Ok(None) => {}
--            Err(unusable) => worker.emit(&Event::TakeoverRecordUnusable(unusable)),
+-            Err(unusable) => worker.emit(&Event::TrustRecordUnusable(unusable)),
 +            Err(unusable) => {
-+                worker.emit(&Event::TakeoverRecordUnusable(unusable));
++                worker.emit(&Event::TrustRecordUnusable(unusable));
 +                worker
 +                    .actor
 +                    .remember_takeover(TakeoverRecord::through(lsr_ltx::Txid::MAX));

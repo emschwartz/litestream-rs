@@ -40,7 +40,7 @@ pub enum Event {
     /// If this database is the right one, `lsr trust-local` writes a takeover record and the
     /// next start replicates above them; if the replica is, `lsr restore` gets those
     /// transactions.
-    Refused {
+    UnvouchedReplicaFiles {
         /// The replica's newest transaction.
         through: Txid,
     },
@@ -65,11 +65,11 @@ pub enum Event {
     /// The takeover record in the meta directory (`lsr-takeover`) could not be read or did not
     /// decode at start. It is ignored, as if there were none: the boot builds only on what the
     /// live WAL vouches for, and refuses the rest until `lsr trust-local` writes a sound record.
-    TakeoverRecordUnusable(TakeoverUnusable),
+    TrustRecordUnusable(TrustRecordUnusable),
     /// The engine asked for a takeover record before deleting staged files the replica holds
     /// (`lsr_core::Event::TakeoverWanted`), and it could not be written in the meta directory.
     /// The engine deletes nothing and retries after its backoff.
-    TakeoverNotRecorded {
+    TrustRecordNotWritten {
         /// What the file system said.
         kind: std::io::ErrorKind,
     },
@@ -77,7 +77,7 @@ pub enum Event {
     /// (`lsr_core::Actor::takeover_spent`), and the record could not be deleted from the meta
     /// directory. Deleting it is retried every turn; a restart before it succeeds reads the
     /// stale record back.
-    TakeoverNotRemoved {
+    TrustRecordNotRemoved {
         /// What the file system said.
         kind: std::io::ErrorKind,
     },
@@ -236,9 +236,9 @@ mod tests {
     }
 }
 
-/// Why the takeover record at start was not used ([`Event::TakeoverRecordUnusable`]).
+/// Why the takeover record at start was not used ([`Event::TrustRecordUnusable`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TakeoverUnusable {
+pub enum TrustRecordUnusable {
     /// The file exists and cannot be read.
     Unreadable {
         /// What the file system said.

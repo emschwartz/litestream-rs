@@ -18,6 +18,7 @@ use lsr_core::{
     ReadLen, StoreError, Upload,
 };
 use lsr_ltx::{Encoder, Event as LtxEvent, ReadDecoder, TxidRange};
+use lsr_replica::StartOptions;
 use lsr_replica::{
     ChannelSink, Config, DynStore, Event, EventReceiver, Health, Mismatch, NonZeroDuration, Phase,
     Replicator, Timestamp, Txid, Verification, VerifyOutcome,
@@ -202,7 +203,16 @@ fn the_scheduled_verify_is_off_by_default() {
     assert_eq!(Config::default().verify_interval, None);
     let site = Site::new();
     let (runtime, clock) = fake();
-    let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    let replicator = Replicator::start(
+        &site.db,
+        site.store(),
+        StartOptions {
+            config: config(),
+            runtime: Some(runtime),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
     let events = events(&replicator);
     site.commit(3);
     advance(&replicator, &clock, POLL);
@@ -229,10 +239,19 @@ fn a_run_due_between_polls_wakes_the_thread() {
         },
         ..verifying_quietly()
     };
-    let replicator = Replicator::start_with(&site.db, site.store(), rare_polls, runtime).unwrap();
+    let replicator = Replicator::start(
+        &site.db,
+        site.store(),
+        StartOptions {
+            config: rare_polls,
+            runtime: Some(runtime),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
     wait(&replicator, caught_up);
     // Parked, so the run cannot start with a turn that begins after the clock moves.
-    let parked = lsr_replica::waiting::seen_or(&replicator, &clock, &|_| false).unwrap();
+    let parked = crate::waiting::seen_or(&replicator, &clock, &|_| false).unwrap();
     assert!(parked.is_none());
     clock.advance(EVERY);
     let health = wait(&replicator, |h| runs(h) == 1);
@@ -246,13 +265,22 @@ fn the_verify_thread_lets_the_store_go_once_the_replicator_stops() {
     let store = site.store();
     let held = Arc::downgrade(&store);
     let (runtime, clock) = fake();
-    let replicator = Replicator::start_with(&site.db, store, verifying(), runtime).unwrap();
+    let replicator = Replicator::start(
+        &site.db,
+        store,
+        StartOptions {
+            config: verifying(),
+            runtime: Some(runtime),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
     wait(&replicator, caught_up);
     clock.advance(EVERY);
     wait(&replicator, |h| runs(h) == 1);
     assert!(matches!(
         common::stopped(&replicator, &clock),
-        lsr_replica::Stopped::Drained { .. }
+        lsr_replica::StopOutcome::Drained { .. }
     ));
     // The verify thread drops its handle on the store as it ends, on its own time.
     let mut looks = 0_u32;
@@ -272,7 +300,16 @@ fn the_verify_thread_lets_the_store_go_once_the_replicator_stops() {
 fn a_clock_step_back_does_not_put_off_the_scheduled_verify() {
     let site = Site::new();
     let (runtime, clock) = fake();
-    let replicator = Replicator::start_with(&site.db, site.store(), verifying(), runtime).unwrap();
+    let replicator = Replicator::start(
+        &site.db,
+        site.store(),
+        StartOptions {
+            config: verifying(),
+            runtime: Some(runtime),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
     site.commit(3);
     advance(&replicator, &clock, POLL);
     moved_until(&replicator, &clock, (POLL, 240), caught_up);
@@ -297,7 +334,16 @@ fn the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes() {
     let (runtime, clock) = fake();
     // A poll short of the first run, an interval after the replicator starts.
     let almost = clock.now().saturating_add(EVERY.saturating_sub(POLL));
-    let replicator = Replicator::start_with(&site.db, site.store(), verifying(), runtime).unwrap();
+    let replicator = Replicator::start(
+        &site.db,
+        site.store(),
+        StartOptions {
+            config: verifying(),
+            runtime: Some(runtime),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
     let events = events(&replicator);
     site.commit(3);
     advance(&replicator, &clock, POLL);
@@ -362,8 +408,16 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
     let site = Site::new();
     let store = site.store();
     let (runtime, clock) = fake();
-    let replicator =
-        Replicator::start_with(&site.db, Arc::clone(&store), verifying_quietly(), runtime).unwrap();
+    let replicator = Replicator::start(
+        &site.db,
+        Arc::clone(&store),
+        StartOptions {
+            config: verifying_quietly(),
+            runtime: Some(runtime),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
     let events = events(&replicator);
     // The boot's first file goes up before any commit: a commit that beats the boot is inside
     // that one file, nothing is left to compact, and the schedule then writes no level-1 file
@@ -556,7 +610,16 @@ fn a_run_that_restores_but_finds_the_newest_out_of_reach_fails_as_unrestorable()
     let gated = Arc::new(Gated::new(&site));
     let store: Arc<dyn DynStore> = Arc::<Gated>::clone(&gated);
     let (runtime, clock) = fake();
-    let replicator = Replicator::start_with(&site.db, store, verifying_quietly(), runtime).unwrap();
+    let replicator = Replicator::start(
+        &site.db,
+        store,
+        StartOptions {
+            config: verifying_quietly(),
+            runtime: Some(runtime),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
     // The boot's first file goes up before any commit: a commit that beats the boot is inside
     // that one file, nothing is left to compact, and the schedule then writes no level-1 file
     // and no level-9 snapshot for a day (see `settle_maintenance`).
@@ -599,7 +662,16 @@ fn a_verify_stuck_in_the_store_does_not_delay_syncs() {
     let gated = Arc::new(Gated::new(&site));
     let store: Arc<dyn DynStore> = Arc::<Gated>::clone(&gated);
     let (runtime, clock) = fake();
-    let replicator = Replicator::start_with(&site.db, store, verifying(), runtime).unwrap();
+    let replicator = Replicator::start(
+        &site.db,
+        store,
+        StartOptions {
+            config: verifying(),
+            runtime: Some(runtime),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
     site.commit(3);
     advance(&replicator, &clock, POLL);
     let verified_at = replicated(&moved_until(&replicator, &clock, (POLL, 240), caught_up));

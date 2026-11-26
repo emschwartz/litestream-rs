@@ -181,6 +181,9 @@ pub(super) struct Kept {
     /// permission, and the process does not ask again: the sweep is best effort. Kept across
     /// rebuilds.
     pub(super) scratch_sweep_denied: bool,
+    /// Since when the staging disk had less free space than the newest whole-database copy
+    /// could take, while that copy may still be in staging: a report (`Actor::degraded`).
+    pub(super) staging_short: Option<Timestamp>,
     /// Whether this process may still try the local course (`super::local`). Kept across
     /// rebuilds: the try reads every staged file, so it is made once.
     pub(super) local: LocalTry,
@@ -217,6 +220,7 @@ impl Kept {
             doubt_baseline: None,
             read_lock_violations: 0,
             scratch_sweep_denied: false,
+            staging_short: None,
             local: LocalTry::Open,
         }
     }
@@ -255,6 +259,7 @@ impl Kept {
             doubt_baseline: _,
             read_lock_violations,
             scratch_sweep_denied,
+            staging_short,
             local,
         } = self;
         Self {
@@ -290,6 +295,7 @@ impl Kept {
             doubt_baseline: None,
             read_lock_violations: *read_lock_violations,
             scratch_sweep_denied: *scratch_sweep_denied,
+            staging_short: *staging_short,
             local: *local,
         }
     }

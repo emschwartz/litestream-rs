@@ -1,13 +1,22 @@
 diff --git a/crates/sidecar/src/health.rs b/crates/sidecar/src/health.rs
-index 56fec6b6..748aa217 100644
+index dc40e5b6e..0c43a4d8b 100644
 --- a/crates/sidecar/src/health.rs
 +++ b/crates/sidecar/src/health.rs
-@@ -128,7 +128,7 @@ impl DbView {
+@@ -123,9 +123,7 @@ impl DbView {
              DbState::Failed => true,
              DbState::Running(health) => match health.phase {
                  // A fail-stop trip is 503 under every mode (`crate::failstop`).
--                Phase::Booting | Phase::Running | Phase::Draining => health.held_by.trip.is_some(),
+-                Phase::Booting | Phase::Running | Phase::Draining => {
+-                    health.fail_stop.trip().is_some()
+-                }
 +                Phase::Booting | Phase::Running | Phase::Draining => false,
                  Phase::Stopped(_) | Phase::Gone(_) => true,
              },
          }
+@@ -514,4 +512,4 @@ mod tests {
+         assert_eq!(names.len(), all.len(), "{names:?}");
+         assert!(names.contains("credentials"));
+     }
+-}
++}
+\ No newline at end of file

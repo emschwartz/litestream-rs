@@ -1,0 +1,7 @@
+# Each level-0 retention check lists level 9, as before: a request Go's check does not make.
+name = "retention-check-lists-level-nine"
+fix = "claude/retention-no-level9-list"
+package = "lsr-core"
+tests = [
+    "actor::tests::steady::a_steady_writer_with_short_intervals_pays_the_bill_and_no_more",
+]
