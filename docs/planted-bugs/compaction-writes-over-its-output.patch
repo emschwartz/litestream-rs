@@ -1,10 +1,10 @@
 diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
 --- a/crates/core/src/maintain.rs
 +++ b/crates/core/src/maintain.rs
-@@ -1075,7 +1075,7 @@
+@@ -1081,7 +1081,7 @@ pub(crate) async fn run_compaction<L: Role, R: Role>(
      match guard {
-         Guard::BucketRefuses => {}
-         Guard::Unguarded => match crate::store::exists(replica, &output).await {
+         WriteMode::New => {}
+         WriteMode::Replace => match crate::store::exists(replica, &output).await {
 -            Ok(true) => return Outcome::Replan { key: output },
 +            Ok(true) => {}
              Ok(false) => {}
