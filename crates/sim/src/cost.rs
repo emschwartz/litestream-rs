@@ -251,7 +251,11 @@ pub fn judge(
             .saturating_add(1);
         parts.saturating_mul(REREADS_PER_PART)
     });
-    let staging_extra = parts.saturating_add(s3_rereads(remote.0));
+    // Each file the replica was given was read from its staged copy first, a staging request a
+    // file the staging store's own puts do not count.
+    let staging_extra = parts
+        .saturating_add(s3_rereads(remote.0))
+        .saturating_add(remote.1);
     for (store, link, (counts, puts), extra, what) in [
         (
             Store::Remote,
