@@ -96,6 +96,11 @@ fn a_file_larger_than_the_ticks_bytes_goes_up_a_slice_a_tick() {
     assert_eq!(newest_replica_file(&rig), Some(1));
     let mut slices = 0;
     let put = loop {
+        assert!(
+            slices <= size / SLICE,
+            "the file did not go up within {} slices",
+            size / SLICE
+        );
         let tick = rig.tick(&mut actor, T0 + 1);
         match event(&tick) {
             Some(Event::Sending { bytes }) => {

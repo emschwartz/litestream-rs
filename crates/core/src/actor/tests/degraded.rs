@@ -128,23 +128,17 @@ fn a_refused_retention_delete_leaves_sync_and_upload_running() {
     for err in errors {
         rig.remote.inner.inject_failure(StoreOp::Delete, err);
     }
-    let mut now = T0 + 60_000;
-    let failed_at = loop {
-        let tick = rig.tick(&mut actor, now);
-        if let Some((task, cause, _)) = degraded(&tick) {
-            assert_eq!(
-                (task, cause),
-                (Task::Maintenance, DegradedCause::StoreRefused)
-            );
-            break now;
-        }
-        assert!(!matches!(tick, Tick::Stopped(_)), "{tick:?}");
-        match next_of(&tick) {
-            Some(Next::Now) => {}
-            Some(Next::At(at)) => now = at.unix_millis(),
-            next => panic!("no retention delete ran: {tick:?} {next:?}"),
-        }
-    };
+    let (failed_at, (task, cause)) = tick_until(
+        &mut rig,
+        &mut actor,
+        T0 + 60_000,
+        "a retention delete to be refused",
+        |tick| degraded(tick).map(|(task, cause, _)| (task, cause)),
+    );
+    assert_eq!(
+        (task, cause),
+        (Task::Maintenance, DegradedCause::StoreRefused)
+    );
     assert!(actor.degraded(Task::Maintenance).is_some());
     rig.commit(5);
     let seen = rig.settle(&mut actor, failed_at);
