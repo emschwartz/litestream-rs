@@ -1007,7 +1007,6 @@ fn shape(recovered: &Recovered) -> String {
             | SnapshotCause::GenerationChanged
             | SnapshotCause::PrevFrameMismatch
             | SnapshotCause::LastPageMismatch
-            | SnapshotCause::CheckpointBoundary
             | SnapshotCause::OperatorRequested => format!("{cause:?}"),
         },
     }

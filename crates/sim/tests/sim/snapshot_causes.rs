@@ -14,7 +14,7 @@ fn local() -> Txid {
 }
 
 /// Every cause, pinned by an exhaustive match: a new cause fails to compile here.
-fn all() -> [SnapshotCause; 12] {
+fn all() -> [SnapshotCause; 11] {
     let causes = [
         SnapshotCause::FirstSync,
         SnapshotCause::BehindRemote { local: local() },
@@ -27,7 +27,6 @@ fn all() -> [SnapshotCause; 12] {
             synced: WalOffset::from_frame_index(0, PageSize::MIN),
             committed: WalOffset::from_frame_index(0, PageSize::MIN),
         },
-        SnapshotCause::CheckpointBoundary,
         SnapshotCause::OperatorRequested,
         SnapshotCause::StagedUnverified { from: local() },
         SnapshotCause::AheadOfReplica { tip: local() },
@@ -42,7 +41,6 @@ fn all() -> [SnapshotCause; 12] {
             | SnapshotCause::PrevFrameMismatch
             | SnapshotCause::LastPageMismatch
             | SnapshotCause::LocalRewound { .. }
-            | SnapshotCause::CheckpointBoundary
             | SnapshotCause::OperatorRequested
             | SnapshotCause::StagedUnverified { .. }
             | SnapshotCause::AheadOfReplica { .. } => {}
