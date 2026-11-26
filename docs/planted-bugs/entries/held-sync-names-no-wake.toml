@@ -1,0 +1,8 @@
+# A tick that held a sync for its interval does not name the interval's end as its wake,
+# so a driver that sleeps on the engine's wake stages the commit late or never.
+name = "held-sync-names-no-wake"
+fix = "claude/steady-requests"
+package = "lsr-core"
+tests = [
+    "actor::tests::steady::a_commit_inside_the_interval_waits_for_it_and_the_tick_names_the_wake",
+]

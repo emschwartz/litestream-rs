@@ -1,0 +1,10 @@
+# A level's own compaction does not close its window: the output carries its last input's time,
+# from the window before, so the next file uploaded is compacted at once and a steady writer
+# gets two files per level per window where Go writes one.
+name = "own-compaction-leaves-its-window-open"
+fix = "claude/steady-requests"
+package = "lsr-core"
+tests = [
+    "actor::tests::steady::a_level_is_compacted_once_in_each_window",
+    "maintain::tests::a_level_this_engine_compacted_waits_for_its_next_window",
+]

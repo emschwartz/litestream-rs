@@ -1,0 +1,9 @@
+# A level-1 compaction ignores the tokens of the files this process put, so it reads the
+# last 17 bytes of every level-0 input back from the replica: one GET per level-0 file.
+name = "compaction-reads-back-what-it-sent"
+fix = "claude/steady-requests"
+package = "lsr-core"
+tests = [
+    "actor::tests::steady::a_steady_writer_reads_no_level_zero_file_back",
+    "maintain::tests::a_file_this_process_sent_is_compacted_from_staging_with_no_read_of_the_replica",
+]
