@@ -142,6 +142,50 @@ fn recorder_records_err_after_publish() {
     assert_eq!(*got, wal);
 }
 
+/// A create-only upload of transaction 1, `ltx(1, 1, ..)` in size.
+async fn create_only<S: ObjectStore>(store: &S) -> Result<(), StoreError> {
+    let mut up = store
+        .begin_upload(
+            &fkey(0, 1, 1),
+            Timestamp::from_unix_millis(5),
+            WriteMode::New,
+        )
+        .await?;
+    up.write(&ltx(1, 1, 1, 1, None)).await?;
+    up.commit().await?;
+    Ok(())
+}
+
+#[test]
+fn bytes_refused_for_a_key_the_recorder_saw_land_are_counted_apart() {
+    let recorder = Recorder::new(MemStore::new());
+    let log = recorder.log();
+    block_on(create_only(&recorder)).unwrap();
+    let before = log.counts();
+    assert!(matches!(
+        block_on(create_only(&recorder)),
+        Err(StoreError::AlreadyExists { .. })
+    ));
+    let after = log.counts();
+    let sent = after.written_bytes - before.written_bytes;
+    assert!(sent > 0);
+    assert_eq!(after.refused_held_bytes - before.refused_held_bytes, sent);
+    assert_eq!(after.committed_bytes, before.committed_bytes);
+}
+
+#[test]
+fn bytes_refused_for_a_key_the_recorder_never_saw_land_stay_wasted() {
+    let raw = MemStore::new();
+    block_on(create_only(&raw)).unwrap();
+    let recorder = Recorder::new(raw);
+    let log = recorder.log();
+    assert!(matches!(
+        block_on(create_only(&recorder)),
+        Err(StoreError::AlreadyExists { .. })
+    ));
+    assert_eq!(log.counts().refused_held_bytes, 0);
+}
+
 /// One size-mismatch upload through `faults`: the bytes sent and what the
 /// commit acknowledged.
 fn short_write(faults: &Faults<MemStore>, mode: WriteMode) -> (Vec<u8>, FileInfo) {

@@ -39,9 +39,10 @@ use crate::store::{Flight, Rest, WriteMode};
 use crate::sync::{Filling, PageFrom, Plan, clamp, scan_whole};
 use crate::verify::LivePages;
 
-/// A snapshot that was not written. Nothing is visible under `key`, unless
-/// the fault says the store rejected its own commit (`UploadAmbiguous`,
-/// `UploadChecksumMismatch`): the caller deletes the key then.
+/// A snapshot that was not written. Nothing of this attempt is visible under `key`, unless
+/// the store took the commit at another size (`UploadAmbiguous`): the caller deletes the key
+/// then. After a checksum refusal (`UploadChecksumMismatch`) the key may hold this attempt's
+/// bytes or an earlier one's, so nothing is deleted and the caller owes a read-back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[error("snapshot {key} failed: {fault:?}")]
 pub struct SnapshotFailed {

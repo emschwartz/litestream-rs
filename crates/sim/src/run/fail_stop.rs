@@ -92,6 +92,12 @@ impl Runner {
             && self.w.sqlite.mx_frame() > 0
             && self.nothing_staged_waits();
         self.fail_stop.engine_clock(self.actor.unreplicated_since());
+        // Read only when it can matter: an age trip over a replica the judge sees whole.
+        let unplaced = (matches!(trip, Some(lsr_core::Trip::UnreplicatedTooLong { .. }))
+            && !self.fail_stop.behind())
+        .then(|| self.w.unplaced_staged(&self.staged_at_start))
+        .flatten();
+        self.fail_stop.unplaced(unplaced);
         let judged = self
             .fail_stop
             .judge(trip, tick, bound, booted, unstaged_only);
@@ -107,6 +113,9 @@ impl Runner {
         }
         if now.lying_reads > was.lying_reads {
             self.report.reach.bump("failstop.excused.lying_reads");
+        }
+        if now.unplaced_file > was.unplaced_file {
+            self.report.reach.bump("failstop.excused.unplaced_file");
         }
         if now.unvouched_snapshot > was.unvouched_snapshot {
             self.report

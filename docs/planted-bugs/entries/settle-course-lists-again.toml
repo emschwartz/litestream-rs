@@ -1,0 +1,10 @@
+# A boot that settles a local course's files against the replica lists the whole replica a
+# second time for it, after the listing the boot just made: ten requests a boot beyond Go's
+# (docs/decisions/D241.md). A boot with a course must list no more than a boot without one.
+name = "settle-course-lists-again"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "actor::tests::local::settling_a_course_lists_the_replica_no_more_than_a_boot_without_one",
+]
+unaided_miss = "Costs one extra listing per boot with a local course and changes no restored page; the swarm does not count requests, and only the settle test does."

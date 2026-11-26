@@ -1,0 +1,15 @@
+# A compaction output or a level-9 snapshot the store refused against its checksum is answered
+# with a delete of its key. S3 checks a body against its signed hash before it looks at the key,
+# so the key may hold an earlier attempt's sound file, and the delete takes the only copy
+# retention left (docs/decisions/D280.md).
+name = "refused-output-deletes-the-key"
+fix = "claude/sim-snapshot-judge"
+package = "lsr-core"
+tests = [
+    "maintain::tests::an_output_refused_against_its_checksum_is_left_for_the_read_back",
+    "maintain::tests::a_create_only_output_refused_before_its_key_never_deletes_the_output_there",
+    "actor::tests::rejected_snapshot::a_refused_snapshot_is_kept_and_read_back",
+    "actor::tests::rejected_snapshot::a_refused_database_snapshot_is_kept_and_owes_a_read_back",
+    "actor::tests::audit::a_sound_output_the_store_refused_stays_and_is_read_back",
+]
+unaided_miss = "Needs a store that refuses an output against its checksum while the key holds an earlier sound attempt, a fault pair the swarm does not draw; only the named core tests set it up."

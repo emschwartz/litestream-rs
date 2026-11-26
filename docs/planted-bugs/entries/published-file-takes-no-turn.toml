@@ -1,0 +1,10 @@
+# A tick that publishes a file and begins the next counts no slice: with a backlog of staged files
+# that each end a tick part-way into the next, the WAL step gets no turn until the backlog is up,
+# so commits wait unstaged and the WAL grows unchecked by any checkpoint meanwhile.
+name = "published-file-takes-no-turn"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "actor::tests::sliced::a_tick_that_publishes_a_file_and_starts_the_next_is_a_slice",
+]
+unaided_miss = "Needs a backlog of staged files that each end a tick part-way into the next, so the WAL step starves; the swarm never builds a backlog that deep and the sim's commit-lag judge only fires on the healthy tail."

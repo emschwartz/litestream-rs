@@ -454,6 +454,8 @@ struct Runner {
     jumped: i64,
     /// The replica recorder's length when the fail-stop judge last restored `Latest`.
     fail_stop_seen: usize,
+    /// The level-0 files staging held when this process started.
+    staged_at_start: Vec<lsr_core::FileKey>,
     /// The digest of the model's newest image as the fail-stop judge last took it.
     fail_stop_image: lsr_history::Digest,
     /// How many commits the model held when the fail-stop judge last looked.
@@ -622,6 +624,7 @@ impl Runner {
             op_began: start,
             jumped: 0,
             fail_stop_seen: 0,
+            staged_at_start: Vec::new(),
             puts_judged: 0,
             put_back: 0,
             saved_database: None,
@@ -646,6 +649,7 @@ impl Runner {
     fn reboot(&mut self) {
         self.barrier.process_died();
         self.fail_stop.started();
+        self.staged_at_start = self.w.staged_level_zero();
         self.booted = false;
         self.w.start_driver();
         let base = actor_config();
@@ -809,6 +813,15 @@ impl Runner {
         match next {
             Next::Now => {}
             Next::At(at) => {
+                // A real driver also wakes at its poll of the WAL (`lsr_replica`'s
+                // `poll_interval`, 250 ms by default), so a commit a tick passed over waits no
+                // longer than that. The tail judges each commit's lag as a real driver would see
+                // it: there no wait outlasts the second an `OnWalChange` wait takes here.
+                let at = if self.tail {
+                    at.min(self.now().saturating_add(Duration::from_secs(1)))
+                } else {
+                    at
+                };
                 if at > self.now() {
                     self.w.clock.set(at);
                 }

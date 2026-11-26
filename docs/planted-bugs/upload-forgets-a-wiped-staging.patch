@@ -1,0 +1,10 @@
+--- a/crates/sim/src/forcing.rs
++++ b/crates/sim/src/forcing.rs
+@@ -402,7 +402,6 @@
+         // for its cause. Asked last, and only of an upload that would otherwise have caught
+         // up: it reads every staged file and its copy.
+         let caught_up = !left_behind
+-            && newest_kept
+             && took
+                 .zip(newest_staged)
+                 .is_some_and(|(took, newest)| took >= newest)

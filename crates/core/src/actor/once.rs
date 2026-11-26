@@ -147,6 +147,7 @@ impl Actor {
                 {
                     self.engine.maintain.state.distrust_snapshot(failed.key);
                 }
+                self.owe_read_back(failed.fault);
                 self.kept.final_snapshot =
                     FinalSnapshot::Failed(FinalSnapshotFailure::Fault(failed.fault));
                 self.drained()

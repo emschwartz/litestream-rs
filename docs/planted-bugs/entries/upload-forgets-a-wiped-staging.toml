@@ -1,0 +1,10 @@
+# The simulator's forcing window forgets an edit of staging at an upload that reaches the engine's
+# newest staged file, though staging was wiped under the send and holds nothing: the snapshot the
+# next boot takes above the replica over the empty directory is then called needless.
+name = "upload-forgets-a-wiped-staging"
+fix = "plant"
+package = "lsr-sim"
+tests = [
+    "an_upload_that_leaves_staging_empty_keeps_the_staging_edit",
+]
+unaided_miss = "The plant sits in the simulator's own forcing window and needs staging wiped under an upload to the newest staged file, which the swarm draws too rarely; only its explicit test sets it up."
