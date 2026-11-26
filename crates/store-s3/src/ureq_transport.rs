@@ -16,8 +16,9 @@
 //! plus the time its body, and the body of its answer by the length it declares, need at 16 KiB a
 //! second ([`Bounds`]), so a peer that takes a byte a minute still ends.
 //!
-//! A batch runs on scoped threads ([`send_on_threads`]) over the one agent, so
-//! its requests share the connection pool and each keeps the deadline.
+//! A batch runs on scoped threads ([`send_on_threads`]) and the parts of uploads on the
+//! store's sender threads ([`Sender`]), all over the one agent, so their requests share the
+//! connection pool and each keeps its bounds.
 //!
 //! Response bodies are read whole but bounded: a body over `MAX_BODY` is an
 //! error, so a server that ignores a Range header cannot make a read allocate
@@ -25,10 +26,8 @@
 
 use std::io::{self, Read};
 use std::num::NonZeroUsize;
-use std::time::Duration;
-
-#[cfg(all(unix, not(target_vendor = "apple")))]
 use std::sync::Arc;
+use std::time::Duration;
 
 use ureq::http;
 #[cfg(all(unix, not(target_vendor = "apple")))]
@@ -36,10 +35,11 @@ use ureq::tls::Certificate;
 use ureq::tls::RootCerts;
 
 use crate::ConfigError;
+use crate::lanes::{Lanes, Sender};
 use crate::request::{HttpRequest, Method};
-use crate::transport::{Bounds, StreamedRequest, on_threads};
+use crate::transport::Bounds;
 use crate::transport::{
-    HttpResponse, MAX_BODY, Transport, TransportError, map_io, send_on_threads,
+    HttpResponse, MAX_BODY, StreamedRequest, Transport, TransportError, map_io, send_on_threads,
 };
 use crate::trust::{self, Roots};
 
@@ -223,27 +223,6 @@ fn read_body(
 }
 
 impl UreqTransport {
-    /// Sends `request`, its body read from the request's reader as it goes: the parts of an
-    /// upload that kept no buffer. The `Content-Length` that was signed frames it, so a body
-    /// that fails part-way leaves the server short of a whole one.
-    fn send_one_streamed(
-        &self,
-        mut streamed: StreamedRequest<'_>,
-    ) -> Result<HttpResponse, TransportError> {
-        let mut builder = http::Request::builder()
-            .method(method_name(streamed.request().method()))
-            .uri(streamed.request().url().as_str());
-        for (name, value) in streamed.request().headers() {
-            builder = builder.header(*name, value.as_str());
-        }
-        let len = streamed.len();
-        let body: &mut dyn io::Read = streamed.body();
-        let request = builder
-            .body(ureq::SendBody::from_reader(body))
-            .map_err(|_malformed| TransportError::Io(io::ErrorKind::InvalidInput))?;
-        self.exchange(self.capped(request, len), false)
-    }
-
     /// One request and its whole answer.
     fn exchange(
         &self,
@@ -283,12 +262,29 @@ impl Transport for UreqTransport {
         self.exchange(self.capped(Self::build(&request)?, len), head_only)
     }
 
+    /// The body is read from the request's reader as it goes: the parts of an upload that
+    /// kept no buffer. The `Content-Length` that was signed frames it, so a body that fails
+    /// part-way leaves the server short of a whole one.
     fn send_streamed(
         &self,
-        requests: Vec<StreamedRequest<'_>>,
-        limit: NonZeroUsize,
-    ) -> Vec<Result<HttpResponse, TransportError>> {
-        on_threads(requests, limit, |request| self.send_one_streamed(request))
+        mut streamed: StreamedRequest<'_>,
+    ) -> Result<HttpResponse, TransportError> {
+        let mut builder = http::Request::builder()
+            .method(method_name(streamed.request().method()))
+            .uri(streamed.request().url().as_str());
+        for (name, value) in streamed.request().headers() {
+            builder = builder.header(*name, value.as_str());
+        }
+        let len = streamed.len();
+        let body: &mut dyn io::Read = streamed.body();
+        let request = builder
+            .body(ureq::SendBody::from_reader(body))
+            .map_err(|_malformed| TransportError::Io(io::ErrorKind::InvalidInput))?;
+        self.exchange(self.capped(request, len), false)
+    }
+
+    fn lanes(&self, most: NonZeroUsize) -> Arc<dyn Lanes> {
+        Arc::new(Sender::new(most))
     }
 
     fn send_many(
@@ -469,15 +465,22 @@ mod tests {
 
     /// A server that answers every request on a connection (keep-alive) and counts the
     /// connections it accepted.
-    fn serve_keep_alive() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    /// A keep-alive server that answers no request until `together` requests wait for an
+    /// answer at once, so a batch of that width is in flight whole, on as many connections,
+    /// however the client's threads are scheduled. Counts the connections it accepted.
+    fn serve_keep_alive(
+        together: usize,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         let accepted = std::sync::Arc::new(AtomicUsize::new(0));
         let count = std::sync::Arc::clone(&accepted);
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(together));
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let _seen = count.fetch_add(1, Ordering::SeqCst);
+                let gate = std::sync::Arc::clone(&gate);
                 thread::spawn(move || {
                     let mut stream = stream;
                     let mut head = Vec::new();
@@ -486,6 +489,7 @@ mod tests {
                         head.push(byte[0]);
                         if head.ends_with(b"\r\n\r\n") {
                             head.clear();
+                            let _leader = gate.wait();
                             let reply = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok";
                             if stream.write_all(reply).is_err() {
                                 return;
@@ -504,9 +508,9 @@ mod tests {
     #[test]
     fn a_batch_reuses_the_connections_the_last_batch_left() {
         use std::sync::atomic::Ordering;
-        let (url, accepted) = serve_keep_alive();
-        let transport = UreqTransport::new(Duration::from_secs(5)).expect("a TLS provider");
         let width = crate::READ_CONCURRENCY;
+        let (url, accepted) = serve_keep_alive(width.get());
+        let transport = UreqTransport::new(Duration::from_secs(5)).expect("a TLS provider");
         for _round in 0..4 {
             let batch = (0..width.get()).map(|_| get(&url)).collect();
             let answers = transport.send_many(batch, width);
@@ -607,10 +611,7 @@ mod tests {
             then_fails: false,
         };
         let streamed = StreamedRequest::new(put(&url, whole.len()), 300_000, &mut body);
-        let sent = transport.send_streamed(vec![streamed], NonZeroUsize::MIN);
-        let [Ok(response)] = sent.as_slice() else {
-            panic!("{sent:?}");
-        };
+        let response = transport.send_streamed(streamed).expect("sent");
         assert_eq!(response.body(), b"ok");
         let got = served.join().expect("server");
         let head = got
@@ -636,8 +637,8 @@ mod tests {
             then_fails: true,
         };
         let streamed = StreamedRequest::new(put(&url, 300_000), 300_000, &mut body);
-        let sent = transport.send_streamed(vec![streamed], NonZeroUsize::MIN);
-        assert!(matches!(sent.as_slice(), [Err(_)]), "{sent:?}");
+        let sent = transport.send_streamed(streamed);
+        assert!(sent.is_err(), "{sent:?}");
         let got = served.join().expect("server");
         let head = got
             .windows(4)

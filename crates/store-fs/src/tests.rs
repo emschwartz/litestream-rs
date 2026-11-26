@@ -131,7 +131,7 @@ fn fs_commit_size_mismatch_is_caught_before_rename() {
             .await
             .unwrap();
         up.write(b"data").await.unwrap();
-        up.file.set_len(2).unwrap();
+        up.sink.file().unwrap().set_len(2).unwrap();
         up.commit().await.unwrap_err()
     });
     assert!(
@@ -486,4 +486,136 @@ fn a_regular_file_reads_back_as_itself() {
     assert_eq!((meta.len(), meta.is_empty()), (3, false));
     fs::write(dir.path().join("e"), b"").unwrap();
     assert!(RealFs.metadata(&dir.path().join("e")).unwrap().is_empty());
+}
+
+/// Writes a file records, failing the `fail_at`th write.
+#[derive(Debug, Clone, Default)]
+struct Recording {
+    seen: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    writes: usize,
+    fail_at: Option<usize>,
+}
+
+impl FsFile for Recording {
+    fn metadata(&self) -> io::Result<Meta> {
+        Ok(Meta::new(true, 0, SystemTime::UNIX_EPOCH))
+    }
+
+    fn read_at(&mut self, _offset: u64, _len: u64) -> io::Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.writes = self.writes.saturating_add(1);
+        if self.fail_at == Some(self.writes) {
+            return Err(io::Error::other("disk full"));
+        }
+        self.seen
+            .lock()
+            .map_err(|_poisoned| io::Error::other("poisoned"))?
+            .extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn set_modified(&self, _time: SystemTime) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn sync_all(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Bytes handed over in odd sizes reach the file whole and in order, in blocks of at most
+/// [`BLOCK`], and the file comes back at `settle`.
+#[test]
+fn write_behind_writes_every_byte_in_order_in_whole_blocks() {
+    let file = Recording::default();
+    let seen = file.seen.clone();
+    let mut sink = Sink::Behind(Behind::start(file).unwrap());
+    let all: Vec<u8> = (0..(3 * BLOCK + 12_345))
+        .map(|n| u8::try_from(n % 251).unwrap())
+        .collect();
+    for chunk in all.chunks(77_777) {
+        sink.write(chunk).unwrap();
+    }
+    sink.settle().unwrap();
+    let Sink::Here(file) = &sink else {
+        panic!("the file did not come back");
+    };
+    assert_eq!(*seen.lock().unwrap(), all);
+    assert!(
+        file.writes <= 5,
+        "{} writes of up to a block each",
+        file.writes
+    );
+}
+
+/// A write that fails is the answer of a later `write` or of `settle`, nothing after it is
+/// written, and every byte before it is.
+#[test]
+fn write_behind_reports_a_failed_write_and_writes_nothing_after_it() {
+    let file = Recording {
+        fail_at: Some(2),
+        ..Recording::default()
+    };
+    let seen = file.seen.clone();
+    let mut sink = Sink::Behind(Behind::start(file).unwrap());
+    let block = vec![7u8; BLOCK];
+    let mut failed = false;
+    for _ in 0..6 {
+        failed |= sink.write(&block).is_err();
+    }
+    let settled = sink.settle();
+    assert!(failed || settled.is_err(), "the failure was swallowed");
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        BLOCK,
+        "only the block before the failure"
+    );
+}
+
+/// Through the store: an upload with write-behind commits the bytes it was given, and an
+/// abort leaves no scratch file.
+#[test]
+fn a_write_behind_upload_commits_its_bytes_and_an_abort_leaves_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FsStore::new(dir.path().join("replica")).with_write_behind();
+    let target = key(9, 1, 7);
+    let data: Vec<u8> = (0..(2 * BLOCK + 99))
+        .map(|n| u8::try_from(n % 253).unwrap())
+        .collect();
+    block_on(async {
+        let mut up = store
+            .begin_upload(
+                &target,
+                Timestamp::from_unix_millis(5_000),
+                WriteMode::Replace,
+            )
+            .await
+            .unwrap();
+        for chunk in data.chunks(100_003) {
+            up.write(chunk).await.unwrap();
+        }
+        let info = up.commit().await.unwrap();
+        assert_eq!(info.size, u64::try_from(data.len()).unwrap());
+        let other = key(9, 8, 9);
+        let mut up = store
+            .begin_upload(
+                &other,
+                Timestamp::from_unix_millis(5_000),
+                WriteMode::Replace,
+            )
+            .await
+            .unwrap();
+        up.write(&data).await.unwrap();
+        up.abort().await.unwrap();
+    });
+    let level = dir.path().join("replica/ltx/9");
+    let names: Vec<_> = fs::read_dir(&level)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names.len(), 1, "{names:?}");
+    assert_eq!(fs::read(level.join(&names[0])).unwrap(), data);
 }

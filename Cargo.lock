@@ -1045,6 +1045,7 @@ dependencies = [
 name = "lsr-core"
 version = "0.0.0"
 dependencies = [
+ "crc-fast",
  "lsr-core",
  "lsr-ltx",
  "lsr-spec",

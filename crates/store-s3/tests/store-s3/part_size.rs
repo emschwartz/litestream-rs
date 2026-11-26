@@ -96,7 +96,8 @@ fn an_object_that_fits_is_cut_at_the_configured_part() {
         let (store, wire) = store();
         let mut upload = begin(&store, len).unwrap();
         block_on(upload.write(&vec![0_u8; PART])).unwrap();
-        assert_eq!(wire.requests().len(), 1, "{len:?}: {:?}", wire.requests());
+        // The create, and the part, sent as soon as it was whole.
+        assert_eq!(wire.requests().len(), 2, "{len:?}: {:?}", wire.requests());
         drop(upload);
     }
 }

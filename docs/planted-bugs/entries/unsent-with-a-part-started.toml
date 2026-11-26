@@ -1,0 +1,9 @@
+# Stopping the send in flight drops its upload instead of aborting it, so the staged file may be
+# deleted while a part of it is still being read and sent.
+name = "unsent-with-a-part-started"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "upload::tests::slices::no_staged_file_at_or_past_the_one_in_flight_may_be_deleted_until_the_send_is_stopped",
+    "actor::tests::sliced::a_drain_past_its_deadline_aborts_the_file_in_flight",
+]
