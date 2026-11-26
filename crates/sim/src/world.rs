@@ -919,6 +919,45 @@ impl World {
             .unwrap_or_default()
     }
 
+    /// The header stamp of the first level-0 file in staging past the replica's newest
+    /// transaction, when it is one of `left` (what an earlier life left), no staged file stands
+    /// before it, and its WAL span is in another generation than the replica's level-0 file at
+    /// that transaction, or the replica has none there: a file the boot has nothing to compare
+    /// with, so it counts it as a commit (`crate::failstop::FailStopJudge::unplaced`).
+    #[must_use]
+    pub fn unplaced_staged(&self, left: &[FileKey]) -> Option<Timestamp> {
+        use lsr_core::{Level, ObjectStore, PageLimit};
+        let header = |store: &dyn Fn(&FileKey) -> Result<Vec<u8>, StoreError>, key: &FileKey| {
+            store(key).ok().and_then(|bytes| {
+                bytes
+                    .first_chunk::<{ lsr_ltx::HEADER_LEN }>()
+                    .and_then(|raw| lsr_ltx::Header::decode(raw).ok())
+            })
+        };
+        let tip = self.remote_newest()?;
+        let staged = block_on(self.staging_raw.list(Level::ZERO, None, PageLimit::MAX))
+            .ok()?
+            .files;
+        let first = staged
+            .iter()
+            .find(|file| file.key.range().max().get() > tip)?;
+        let min = first.key.range().min();
+        if !left.contains(&first.key) || staged.iter().any(|file| file.key.range().max() < min) {
+            return None;
+        }
+        let mine = header(&|key| read_all(&self.staging_raw, key), &first.key)?;
+        let theirs = block_on(self.remote_raw.list(Level::ZERO, None, PageLimit::MAX))
+            .ok()?
+            .files
+            .into_iter()
+            .find(|file| file.key.range().max().get() == tip)
+            .and_then(|file| header(&|key| read_all(&self.remote_raw, key), &file.key));
+        let salts = |header: lsr_ltx::Header| header.fields().wal.map(|wal| wal.salts());
+        let placed =
+            theirs.is_some_and(|theirs| salts(theirs).is_some() && salts(theirs) == salts(mine));
+        (!placed).then_some(mine.fields().timestamp)
+    }
+
     /// The newest transaction any replica file holds, at any level, read
     /// around the wrappers; `None` when the replica is empty or cannot list.
     #[must_use]

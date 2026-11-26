@@ -1,0 +1,13 @@
+diff --git a/crates/sqlite/src/capi.rs b/crates/sqlite/src/capi.rs
+index 2df037797..ab18a327e 100644
+--- a/crates/sqlite/src/capi.rs
++++ b/crates/sqlite/src/capi.rs
+@@ -92,7 +92,7 @@ unsafe impl Send for Connection {}
+ /// path that does (`file:x?mode=memory`) would open something else than the file it names.
+ /// `./` in front names the same file and is never a URI.
+ fn plain_name(path: &[u8]) -> Vec<u8> {
+-    if path.starts_with(b"file:") {
++    if path.starts_with(b"file:") && path.is_empty() {
+         [b"./", path].concat()
+     } else {
+         path.to_vec()
