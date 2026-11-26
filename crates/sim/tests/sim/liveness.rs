@@ -60,7 +60,7 @@ fn commits(n: usize, pages: u8) -> Vec<Op> {
 /// The level-9 snapshot of the whole database goes up a slice a tick, but the read-back that
 /// checks it reads the newest file of every level whole in one maintenance tick
 /// (`lsr_core`'s `maintain::audit`): 10 MiB here, the whole database at any size. This pins
-/// that defect (<https://github.com/emschwartz/litestream-rs/issues/476>, `docs/decisions/D263.md`) so the bound is never loosened to hide it; once the
+/// that defect (<https://github.com/emschwartz/litestream-rs/issues/476>, `docs/decisions/D265.md`) so the bound is never loosened to hide it; once the
 /// read-back goes a slice a tick this fails, and the test goes back to asserting that the run
 /// passes and judges the tail's lag.
 #[test]

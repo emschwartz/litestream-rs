@@ -8,7 +8,7 @@
 //! arithmetic on them, so a run's times are as deterministic as its seed.
 //!
 //! The bound ([`Allowance`]) is what one tick may cost, fixed by configuration before any run
-//! (`docs/decisions/D263.md` gives the numbers and their derivation): on each store, a fixed
+//! (`docs/decisions/D265.md` gives the numbers and their derivation): on each store, a fixed
 //! number of requests plus a few for each file put there, a slice of input and the largest
 //! single read the engine asks for, and a slice of output to the replica or what one sync may
 //! stage to staging. It holds of every tick whatever event ends it, so any job that does
@@ -79,7 +79,7 @@ pub struct Profile {
 }
 
 impl Profile {
-    /// The prices every run is judged at (`docs/decisions/D263.md`): the replica at 10 ms a
+    /// The prices every run is judged at (`docs/decisions/D265.md`): the replica at 10 ms a
     /// request and 1 MiB a second, staging at 0.1 ms and 16 MiB a second. Scaled down with
     /// the databases, so a large-profile snapshot of 10 MiB takes seconds as a real one of
     /// tens of gigabytes takes minutes.
@@ -297,7 +297,7 @@ pub fn judge(
 ///   `liveness::a_boot_over_another_writer_reads_the_replica_in_one_tick` fails, and this
 ///   part goes.
 ///
-/// No other boot read of the replica is allowed past the bound (`docs/decisions/D263.md`).
+/// No other boot read of the replica is allowed past the bound (`docs/decisions/D265.md`).
 /// Filled from the stores' own sizes and counts, never from the engine's; a tick that spends
 /// more than this and its own bound fails.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
