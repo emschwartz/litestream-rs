@@ -34,8 +34,9 @@ use crate::counts::WorkCounts;
 use crate::created_at::Known;
 use crate::failstop::{Lag, WalMark};
 use crate::fault::{Next, SnapshotCause, SnapshotCounts, StopCause};
+use crate::identity::Check;
 use crate::layout::FileKey;
-use crate::maintain::{Job, Merging};
+use crate::maintain::{Job, Merging, ReadingBack};
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
 use crate::snapshot::Snapshotting;
@@ -509,6 +510,10 @@ pub(super) struct Engine {
     /// job's next slice, so the two take turns inside a share and neither waits for the
     /// other to end.
     pub(super) job_went_last: bool,
+    /// The boot's read-back part-way, if it is (`crate::maintain::audit`). In memory only.
+    pub(super) reading_back: Option<Box<ReadingBack>>,
+    /// The boot's identity check across its ticks (`crate::identity`). In memory only.
+    pub(super) identity: Option<Check>,
 }
 
 /// A maintenance job that goes to the replica a slice a tick, the engine syncing and uploading
@@ -577,6 +582,8 @@ impl Engine {
             slices_ahead: 0,
             sliced: None,
             job_went_last: false,
+            reading_back: None,
+            identity: None,
         }
     }
 }
