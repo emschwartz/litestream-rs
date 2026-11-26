@@ -8,6 +8,6 @@ diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
 -        Err(CompactError::Dest(StoreError::AlreadyExists { .. })) => {
 -            Outcome::Replan { key: output }
 -        }
-         Err(CompactError::Dest(err)) if leaves_bad_output(&err, mode) => {
+         Err(CompactError::Dest(err)) if leaves_bad_output(&err) => {
              remove_rejected(replica, output, err).await
          }

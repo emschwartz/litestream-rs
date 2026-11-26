@@ -1,12 +1,13 @@
 diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
 --- a/crates/core/src/maintain.rs
 +++ b/crates/core/src/maintain.rs
-@@ -1214,7 +1214,7 @@
+@@ -1348,7 +1348,8 @@ const fn leaves_bad_output(err: &StoreError) -> bool {
+     match err {
+         StoreError::Corrupt { cause, .. } => match cause {
              CorruptCause::CommitSizeMismatch { removed, .. } => !*removed,
-             CorruptCause::ChecksumMismatch { part } => match mode {
-                 WriteMode::Replace => true,
--                WriteMode::New => part.is_none(),
-+                WriteMode::New => true,
-             },
-             CorruptCause::NotARegularFile
+-            CorruptCause::ChecksumMismatch { .. }
++            CorruptCause::ChecksumMismatch { part: Some(_) } => true,
++            CorruptCause::ChecksumMismatch { part: None }
+             | CorruptCause::NotARegularFile
              | CorruptCause::TimestampOutOfRange
+             | CorruptCause::BadCreatedAt => false,

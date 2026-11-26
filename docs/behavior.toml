@@ -985,11 +985,11 @@ recovered_by = "sim::`size_mismatch_on_commit`, sim::`short_write::an_upload_ack
 table = "Upload"
 id = "UP-8"
 circumstance = "The store refuses a body as not the one signed (`XAmzContentSHA256Mismatch`, or `BadDigest`), or a completion names a part ETag it does not hold (`InvalidPart`)"
-response = "retry, `UploadChecksumMismatch`: the key is deleted, best effort, and written again"
+response = "retry, `UploadChecksumMismatch`: the key is written again, and nothing is deleted"
 signal = "\"retrying\""
-at_risk = "None: the store published nothing, so the delete finds no object. A returned ETag is not compared with anything, as in Go (`docs/decisions/D250.md`)"
+at_risk = "None: the store published nothing. The key may hold an earlier attempt's object that an ambiguous commit published, which a delete would have taken off the replica; the retry reads it back (`docs/decisions/D280.md`). A returned ETag is not compared with anything, as in Go (`docs/decisions/D250.md`)"
 recovery = "Automatic"
-detected_by = "sim::`etag_mismatch_on_put`, store-s3::`a_put_refused_against_its_signed_hash_is_corrupt`, store-s3::`a_part_refused_against_its_signed_hash_is_corrupt_and_not_retried`, store-s3::`a_wrong_part_etag_fails_the_completion_as_corrupt`, store-s3::`a_body_mismatch_on_put_is_a_checksum_mismatch_and_publishes_nothing`"
+detected_by = "sim::`etag_mismatch_on_put`, core::`a_refused_create_only_body_deletes_nothing`, core::`a_rejected_commit_deletes_nothing_and_its_retry_reads_the_key_back`, store-s3::`a_put_refused_against_its_signed_hash_is_corrupt`, store-s3::`a_part_refused_against_its_signed_hash_is_corrupt_and_not_retried`, store-s3::`a_wrong_part_etag_fails_the_completion_as_corrupt`, store-s3::`a_body_mismatch_on_put_is_a_checksum_mismatch_and_publishes_nothing`; plant::`rejected-write-deletes-the-key`"
 recovered_by = "sim::`etag_mismatch_on_put`"
 
 [[row]]
@@ -1201,12 +1201,12 @@ recovered_by = "core::`a_newest_file_cut_short_is_caught_and_rebuilt`, sim::`cor
 [[row]]
 table = "Maintenance and retention"
 id = "MAINT-5"
-circumstance = "The store rejected a merge output or snapshot after it may have become visible"
-response = "The key is deleted. If the delete fails, the key is distrusted: retention holds (`OutputDistrusted`) and the delete is planned first"
-signal = "Event `Waiting { held }`"
+circumstance = "The store rejected a merge output or snapshot after it may have become visible: it took the commit at another size than the one sent, or refused the body against its checksum"
+response = "Taken at another size: the key is deleted; if the delete fails, the key is distrusted: retention holds (`OutputDistrusted`) and the delete is planned first. Refused against its checksum: nothing is deleted, since S3 checks a body before the key and the key may hold an earlier attempt's sound file (`docs/decisions/D280.md`); the next listing reads back the header and tail of the newest file of each level before anything is planned from it, as after a boot (MAINT-4), and a file that fails two reads and that lower levels cover is deleted and built again; a body damaged behind a sound header and tail is left to its first whole read, as at boot (`docs/decisions/D272.md`)"
+signal = "Event `Waiting { held }`, event `Repaired`"
 at_risk = "None"
 recovery = "Automatic"
-detected_by = "core::`a_commit_that_fails_after_publish_is_failed_and_the_next_plan_skips_the_level`"
+detected_by = "core::`a_commit_that_fails_after_publish_is_failed_and_the_next_plan_skips_the_level`, core::`an_output_taken_at_another_size_is_deleted_by_the_executor`, core::`an_output_refused_against_its_checksum_is_left_for_the_read_back`, core::`a_create_only_output_refused_before_its_key_never_deletes_the_output_there`, core::`a_refused_snapshot_is_kept_and_read_back`, core::`a_damaged_output_the_store_refused_is_read_back_and_rebuilt`, core::`a_damaged_snapshot_the_store_refused_is_read_back_and_taken_again`; plant::`refused-output-deletes-the-key`, plant::`refused-output-owes-no-read-back`"
 
 [[row]]
 table = "Maintenance and retention"

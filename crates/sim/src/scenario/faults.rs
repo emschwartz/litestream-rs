@@ -747,8 +747,9 @@ pub fn size_mismatch_on_commit() -> Scenario {
     )
 }
 
-/// The store says the stored bytes are not the ones sent. The uploader deletes
-/// the key and writes it again with no listing between.
+/// The store says the stored bytes are not the ones sent. The uploader deletes nothing and
+/// writes the key again with no listing between; the store kept the bytes, so the create-only
+/// retry is refused and reads them back (`docs/decisions/D280.md`).
 #[must_use]
 pub fn etag_mismatch_on_put() -> Scenario {
     let mut s = injected(
@@ -760,37 +761,29 @@ pub fn etag_mismatch_on_put() -> Scenario {
         )],
         vec![retries(FaultKind::UploadChecksumMismatch)],
     );
-    s.check = Some(deleted_then_put_again);
+    s.check = Some(kept_then_put_again);
     s
 }
 
-fn deleted_then_put_again(report: &RunReport) -> Result<(), String> {
-    let mut deleted = None;
-    let mut written_again = false;
-    for event in &report.remote_events {
-        match event {
-            RecorderEvent::Put { key, .. } if deleted == Some(*key) => {
-                written_again = true;
-                break;
-            }
-            RecorderEvent::Delete { keys, .. } if keys.len() == 1 => {
-                deleted = keys.first().copied()
-            }
-            RecorderEvent::Put { .. } | RecorderEvent::Delete { .. } => {}
-        }
-    }
-    if !written_again {
-        return Err("the key was not deleted and then written again".to_owned());
-    }
-    // From the rejection to the next upload, nothing lists the replica.
+fn kept_then_put_again(report: &RunReport) -> Result<(), String> {
+    // The retry's refusal reads the kept bytes back: the key was never deleted.
     let mut rejected = false;
+    let mut confirmed = false;
     for seen in &report.seen {
         match seen {
             Seen::Event(Event::Retrying {
                 fault: Fault::UploadChecksumMismatch,
                 ..
             }) => rejected = true,
-            Seen::Event(Event::Uploaded(_)) if rejected => break,
+            Seen::Event(Event::Uploaded(lsr_core::Did::AlreadyPut(_))) if rejected => {
+                confirmed = true;
+                break;
+            }
+            Seen::Event(Event::Uploaded(other)) if rejected => {
+                return Err(format!(
+                    "the retry did not read the kept key back: {other:?}"
+                ));
+            }
             Seen::Tick { remote_lists, .. } if rejected && *remote_lists != 0 => {
                 return Err(
                     "the replica was listed between the rejection and the rewrite".to_owned(),
@@ -803,6 +796,9 @@ fn deleted_then_put_again(report: &RunReport) -> Result<(), String> {
             | Seen::Oracle
             | Seen::Tick { .. } => {}
         }
+    }
+    if !confirmed {
+        return Err("the retry after the rejection confirmed no kept key".to_owned());
     }
     Ok(())
 }

@@ -63,9 +63,10 @@
 //!
 //! A failure before the commit leaves the state alone (nothing could have been
 //! published). A failure of the commit itself gives [`UploadState::ListFirst`],
-//! except a checksum mismatch: the store may hold wrong bytes under the key, so
-//! the state stays, the key is deleted (best effort, so readers do not see the
-//! bad position while the retry is pending) and the same key is written again.
+//! except a checksum mismatch: the state stays and the same key is written again, with
+//! nothing deleted. The refusal says nothing about the key (S3 refuses a body before it looks
+//! at the create-only condition), which may hold an earlier attempt's object; a retry that
+//! finds the key taken reads it back as any refusal does (`docs/decisions/D280.md`).
 //!
 //! **A slice per step.** A step hands the replica at most its budget of file bytes
 //! ([`SLICE`] a tick), so a file as long as the database does not hold the engine for its
@@ -659,10 +660,9 @@ enum PutError {
     Before(Fault),
     /// The commit failed or its answer cannot be believed.
     Commit(Fault),
-    /// The store says the bytes it took are not the bytes sent. A
-    /// create-only write's object is its own and goes ([`publish::Rejected`]);
-    /// either way the key is written again without asking.
-    Rejected(Fault, Option<publish::Rejected>),
+    /// The store says the bytes are not the bytes sent: the key is written again without
+    /// asking, and nothing is deleted.
+    Rejected(Fault),
 }
 
 /// One staged file part-way to the replica: what the verified copy of it holds between two
@@ -793,34 +793,21 @@ async fn put_step<L: Role, S: Role>(
             let stores = (staging, remote);
             taken(state, stores, &token, newest_staged, in_flight).await
         }
-        outcome => settle_put(state, remote, token.key(), outcome)
-            .await
-            .map(Some),
+        outcome => settle_put(state, token.key(), outcome).map(Some),
     }
 }
 
 /// The state and step a put's outcome gives (a refusal is [`taken`]'s).
-async fn settle_put<S: ObjectStore>(
+fn settle_put(
     state: UploadState,
-    remote: &S,
     key: FileKey,
     outcome: Result<FileInfo, PutError>,
 ) -> Result<Uploaded, UploadFailed> {
     match outcome {
         Ok(info) => Ok(put_done(key, info)),
-        Err(PutError::Before(fault)) => Err(fail(state, fault)),
-        Err(PutError::Rejected(fault, own)) => {
-            // Only a rejected create-only write hands back its object (the
-            // bucket refuses a taken key before it takes any bytes), so only
-            // that object goes. Best effort: the retry replaces the key either
-            // way, and a boot listing reads it back, so a failed delete costs
-            // only visibility. A write that may have replaced an object
-            // deletes nothing.
-            if let Some(own) = own {
-                drop(publish::remove_rejected(remote, own).await);
-            }
-            Err(fail(state, fault))
-        }
+        // A rejected write deletes nothing: the refusal says nothing about what the key holds
+        // (module doc), and the retry writes it again either way.
+        Err(PutError::Before(fault) | PutError::Rejected(fault)) => Err(fail(state, fault)),
         Err(PutError::Commit(fault)) => Err(fail(list_first(state), fault)),
         // Only a `New` write is refused; a refused `Replace` is a store that
         // broke its contract, and a listing finds out what it holds.
@@ -1191,7 +1178,7 @@ impl Sending {
                 Err(PutError::Before(notes.fault::<L, S>(unpublished.error())))
             }
             Err(Unpublished::Taken(_)) => Err(PutError::Taken),
-            Err(Unpublished::Rejected(err, own)) => Err(PutError::Rejected(S::fault(&err), own)),
+            Err(Unpublished::Rejected(err)) => Err(PutError::Rejected(S::fault(&err))),
             Err(Unpublished::Failed(err)) => Err(PutError::Commit(S::fault(&err))),
         }
     }
