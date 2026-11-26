@@ -314,7 +314,7 @@ fn health_compares_the_local_and_replica_positions() {
     clock.advance(POLL);
     let full = moved_until(&replicator, &clock, (POLL, 240), caught_up);
     // The sizes are the files' own, read while the thread is parked.
-    let parked = lsr_replica::waiting::seen_or(&replicator, &clock, &|_| false).unwrap();
+    let parked = crate::waiting::seen_or(&replicator, &clock, &|_| false).unwrap();
     assert!(parked.is_none());
     let health = replicator.health();
     let wal = site.db.with_file_name("app.db-wal");

@@ -213,7 +213,7 @@ fn a_run_due_between_polls_wakes_the_thread() {
     let replicator = Replicator::start_with(&site.db, site.store(), rare_polls, runtime).unwrap();
     wait(&replicator, caught_up);
     // Parked, so the run cannot start with a turn that begins after the clock moves.
-    let parked = lsr_replica::waiting::seen_or(&replicator, &clock, &|_| false).unwrap();
+    let parked = crate::waiting::seen_or(&replicator, &clock, &|_| false).unwrap();
     assert!(parked.is_none());
     clock.advance(EVERY);
     let health = wait(&replicator, |h| runs(h) == 1);

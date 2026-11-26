@@ -123,6 +123,7 @@ mod error;
 mod events;
 mod exec;
 mod health;
+#[doc(hidden)]
 pub mod local;
 mod meta;
 mod readers;
@@ -130,15 +131,16 @@ mod replicator;
 mod restore;
 mod runtime;
 mod scheduled;
+#[doc(hidden)]
 pub mod stack;
 mod store;
 mod thread;
-#[cfg(feature = "testing")]
-pub mod waiting;
 
 pub use config::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
 pub use error::{RestoreError, StartError, TrustLocalError};
+pub use local::{ClearError, CreateError, IntegrityCheck, IntegrityFailure, clear_journal_files};
 pub use events::{ChannelSink, Event, EventReceiver, EventSink, TakeoverUnusable};
+#[doc(hidden)]
 pub use exec::block_on;
 pub use health::{
     AppNotice, Booted, Counters, FailStop, Gone, Health, Mismatch, OpCounters, Phase, Stopped,
@@ -151,7 +153,9 @@ pub use restore::{
 };
 #[cfg(feature = "testing")]
 pub use runtime::FakeClockHandle;
-pub use runtime::{CALLER_SLICE, OsEntropy, Park, Runtime, lock};
+pub use runtime::{CALLER_SLICE, Park, Runtime};
+#[doc(hidden)]
+pub use runtime::{OsEntropy, lock};
 pub use store::{BoxFuture, DynStore, DynUpload};
 
 pub use lsr_core::{

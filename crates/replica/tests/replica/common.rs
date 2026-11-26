@@ -21,8 +21,10 @@ use lsr_core::{
 use lsr_ltx::TxidRange;
 use lsr_replica::{
     Booted, Config, DynStore, FakeClockHandle, Health, Phase, Replicator, RestoreTarget, Runtime,
-    Stopped, Task, Timestamp, restore, waiting,
+    Stopped, Task, Timestamp, restore,
 };
+
+use crate::waiting;
 use lsr_store_fs::FsStore;
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -31,8 +33,8 @@ use tempfile::TempDir;
 pub const START: Timestamp = Timestamp::from_unix_millis(1_700_000_000_000);
 
 /// Long enough that a test never sees it run out unless it is stuck; on the fake clock
-/// [`LOOKS`] is what ends a stuck wait ([`lsr_replica::waiting`]).
-pub use lsr_replica::waiting::{LOOKS, PATIENCE};
+/// [`LOOKS`] is what ends a stuck wait ([`crate::waiting`]).
+pub use crate::waiting::{LOOKS, PATIENCE};
 
 /// A database in a directory of its own, with the application's connection and a replica beside it.
 pub struct Site {
@@ -190,7 +192,7 @@ pub fn stopped_on_system_clock(replicator: &Replicator) -> Stopped {
 }
 
 /// Moves the fake clock `step` at a time, at most `steps` times, until `done` holds; fails the
-/// test if it never does ([`lsr_replica::waiting::moved_until`]).
+/// test if it never does ([`crate::waiting::moved_until`]).
 pub fn moved_until(
     replicator: &Replicator,
     clock: &FakeClockHandle,
