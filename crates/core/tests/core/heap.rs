@@ -165,6 +165,13 @@ pub fn peak_of<R>(f: impl FnOnce() -> R) -> (R, Peak) {
     )
 }
 
+/// Bytes live on this thread now, beyond none in particular: a reading to subtract from a later
+/// one, which says what the code between them left behind (`peak_of`'s `kept` clamps a net
+/// release to zero, so a run of many calls cannot be summed from it).
+pub fn live_now() -> isize {
+    LIVE.with(Cell::get)
+}
+
 /// Runs `f` and counts the allocations of [`LARGE_BLOCK`] or more it made on this thread,
 /// growths of a buffer included: each is a block the allocator may keep after the free, so a
 /// path that allocates one per unit of work, instead of holding one, shows here.

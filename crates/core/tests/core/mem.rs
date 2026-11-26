@@ -492,8 +492,8 @@ impl ObjectStore for Void {
 }
 
 /// A database file whose pages are computed when read: no page is held.
-struct GeneratedDb {
-    pages: u32,
+pub struct GeneratedDb {
+    pub pages: u32,
 }
 
 impl PageSource for GeneratedDb {
