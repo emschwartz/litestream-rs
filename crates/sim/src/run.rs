@@ -721,11 +721,15 @@ impl Runner {
     fn run_one(&mut self, plan: Option<CrashPlan>) -> TickEnd<Tick> {
         let mut wal = self.w.sqlite.source().with_modified(self.w.modified());
         let mut db = self.w.sqlite.pages();
+        let sqlite = self.w.sqlite.clone();
         let mut ck = crate::barrier::Watching::new(
             CountingCheckpointer::new(self.w.sqlite.checkpointer(), self.tally.clone()),
             self.barrier.clone(),
-            self.w.remote_recorder.clone(),
-            self.w.staging_recorder.clone(),
+            (
+                self.w.remote_recorder.clone(),
+                self.w.staging_recorder.clone(),
+            ),
+            Box::new(move || sqlite.backfilled()),
         );
         let staging = self.w.staging.clone();
         let remote = self.w.remote.clone();

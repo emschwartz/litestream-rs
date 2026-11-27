@@ -97,6 +97,9 @@ pub enum Bound {
     BarrierWaitMicros,
     /// Write barriers still held when a tick ended without a crash.
     BarrierHeldAfterTick,
+    /// WAL frames the engine's own checkpoints copied into the database file while it held
+    /// the write barrier, which every application writer waits out (`crate::barrier`).
+    BarrierCopiedFrames,
 }
 
 impl fmt::Display for Bound {
@@ -127,6 +130,7 @@ impl fmt::Display for Bound {
                 "microseconds the application waited on the write barrier in one tick"
             }
             Self::BarrierHeldAfterTick => "write barriers held when a tick ended",
+            Self::BarrierCopiedFrames => "frames copied under the write barrier",
         };
         f.write_str(name)
     }

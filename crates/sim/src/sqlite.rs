@@ -127,7 +127,7 @@ pub enum OtherProcessMode {
 impl From<CheckpointMode> for OtherProcessMode {
     fn from(mode: CheckpointMode) -> Self {
         match mode {
-            CheckpointMode::Passive => Self::Passive,
+            CheckpointMode::Passive | CheckpointMode::Backlog => Self::Passive,
             CheckpointMode::Truncate => Self::Truncate,
             CheckpointMode::Full => Self::Full,
         }
@@ -2278,9 +2278,9 @@ impl Checkpointer for SimCheckpointer {
         let mut state = lock(&self.state);
         state.app_call(Some(SourceOp::Checkpoint));
         state.writes_allowed()?;
-        // lsr-sqlite runs a TRUNCATE on the writer connection and leaves the read transaction
-        // alone.
-        if mode == CheckpointMode::Truncate {
+        // lsr-sqlite runs a TRUNCATE and a backlog copy on the writer connection and leaves the
+        // read transaction alone.
+        if matches!(mode, CheckpointMode::Truncate | CheckpointMode::Backlog) {
             state.faults.take(SourceOp::Checkpoint)?;
             if state.barrier.is_some() {
                 return Err(SourceError::Io(io::ErrorKind::InvalidInput));
@@ -2328,6 +2328,25 @@ impl Checkpointer for SimCheckpointer {
             epoch: state.epoch,
             one_sqlite: true,
         })
+    }
+
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError> {
+        let mut state = lock(&self.state);
+        state.app_call(Some(SourceOp::RenewRead));
+        // lsr-sqlite ends the read transaction and begins it again; a begin that fails leaves it
+        // lapsed, for the next read to take again.
+        let injected = state.faults.take(SourceOp::RenewRead);
+        match injected {
+            Err(SourceError::ReadTxLost) => {
+                state.end(Conn::Ours);
+                return Err(SourceError::ReadTxLost);
+            }
+            Err(err) => return Err(err),
+            Ok(()) => {}
+        }
+        state.end(Conn::Ours);
+        state.begin(Conn::Ours);
+        Ok(state.epoch)
     }
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {

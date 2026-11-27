@@ -102,6 +102,10 @@ impl Checkpointer for BeforeBarrier<'_> {
         self.inner.checkpoint(mode)
     }
 
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError> {
+        self.inner.renew_read()
+    }
+
     fn bump_seq(&mut self) -> Result<(), SourceError> {
         self.inner.bump_seq()
     }

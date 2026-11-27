@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/checkpoint.rs b/crates/core/src/checkpoint.rs
+index 625a05363..113fda2eb 100644
+--- a/crates/core/src/checkpoint.rs
++++ b/crates/core/src/checkpoint.rs
+@@ -661,7 +661,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
+     /// transaction the PASSIVE retook still held ([`Self::truncate_held`]).
+     async fn checkpoint(&mut self, truncate: bool) -> Result<CheckpointOutcome, Fault> {
+         let before = self.header()?;
+-        if self.backlog()? > self.barrier_frames {
++        if self.backlog()? > u32::MAX {
+             if !self.copy_backlog().await? {
+                 return Ok(CheckpointOutcome::LockBusy);
+             }

@@ -90,7 +90,8 @@ fn arm(
                 | SourceOp::EndBarrier
                 | SourceOp::Checkpoint
                 | SourceOp::BeginWriteLock
-                | SourceOp::EndWriteLock => {}
+                | SourceOp::EndWriteLock
+                | SourceOp::RenewRead => {}
             }
         }));
     });
@@ -296,7 +297,8 @@ fn arm_truncate_overtaken(writer: Connection, reader: Connection) -> Rc<RefCell<
                 | SourceOp::ReadPage
                 | SourceOp::EndBarrier
                 | SourceOp::BeginWriteLock
-                | SourceOp::EndWriteLock => {}
+                | SourceOp::EndWriteLock
+                | SourceOp::RenewRead => {}
             }
         }));
     });

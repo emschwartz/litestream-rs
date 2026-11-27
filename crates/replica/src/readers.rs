@@ -22,7 +22,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, SourceError};
+use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, ReadLockHold, SourceError};
 use lsr_sqlite::{Sqlite, WritesHeld};
 
 use crate::config::ReaderTracking;
@@ -107,10 +107,15 @@ impl Checkpointer for Guarded {
             CheckpointMode::Truncate | CheckpointMode::Full if !self.may_wait() => {
                 Err(SourceError::ReadersHeld)
             }
-            CheckpointMode::Truncate | CheckpointMode::Full | CheckpointMode::Passive => {
-                self.sqlite.checkpoint(mode)
-            }
+            CheckpointMode::Truncate
+            | CheckpointMode::Full
+            | CheckpointMode::Passive
+            | CheckpointMode::Backlog => self.sqlite.checkpoint(mode),
         }
+    }
+
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError> {
+        self.sqlite.renew_read()
     }
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {
