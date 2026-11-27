@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use super::super::window::{SPAN_BYTES, Window};
 use super::*;
-use crate::layout::CreatedAt;
+use crate::layout::{CreatedAt, ListedTime};
 use crate::store::{BatchKind, ListAt, Listing, PageLimit, ReadStream};
 
 const PS: u32 = 4096;
@@ -362,6 +362,23 @@ fn an_object_that_is_not_its_listed_size_restores_whole() {
     }
 }
 
+/// A window opens for a file of two spans exactly and not for one a byte shorter.
+#[test]
+fn two_spans_is_the_least_a_window_opens_for() {
+    let store = Spans::new(replica(&[(9, 1, 1, b"abc")]), 2);
+    let len = ReadLen::new(3).unwrap();
+    for (size, spans) in [(2 * SPAN_BYTES - 1, 0), (2 * SPAN_BYTES, 1)] {
+        let info = FileInfo {
+            key: key(9, 1, 1),
+            size,
+            listed: ListedTime::LastModified(Timestamp::from_unix_millis(0)),
+        };
+        let got = block_on(super::super::window::stream(&store, &info).next(len)).unwrap();
+        assert_eq!(got, b"abc");
+        assert_eq!(store.opened(key(9, 1, 1)).len(), spans, "size {size}");
+    }
+}
+
 /// The window's bytes, taken `len` at a time, until a short piece.
 fn drain(window: &mut Window<'_, MemStore>, len: u32) -> Vec<u8> {
     let len = ReadLen::new(len).unwrap();
@@ -382,7 +399,7 @@ proptest! {
     #[test]
     fn a_window_hands_out_the_object_in_order(
         size in 1_usize..3_000,
-        listed in 1_u64..3_200,
+        listed in 0_u64..3_200,
         span in 1_u64..400,
         width in 1_usize..6,
         len in 1_u32..700,

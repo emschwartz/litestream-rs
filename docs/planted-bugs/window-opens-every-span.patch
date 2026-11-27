@@ -1,12 +1,13 @@
 diff --git a/crates/core/src/restore/window.rs b/crates/core/src/restore/window.rs
+index b3af24ed6..27af5a76d 100644
 --- a/crates/core/src/restore/window.rs
 +++ b/crates/core/src/restore/window.rs
-@@ -79,7 +79,7 @@
+@@ -79,7 +79,7 @@ impl<'s, S: ObjectStore> Window<'s, S> {
  
      /// Opens spans until `width` are open or the last one is.
      fn fill(&mut self) {
--        while self.open.len() < self.width && self.next < self.size {
-+        while self.width > 0 && self.next < self.size {
+-        while self.open.len() < self.width && self.next <= self.size {
++        while self.width > 0 && self.next <= self.size {
              let start = self.next;
              let end = start.saturating_add(self.span);
              if end >= self.size {

@@ -1,7 +1,8 @@
 diff --git a/crates/store-s3/src/store/stream.rs b/crates/store-s3/src/store/stream.rs
+index 457fa3b23..6d81224c5 100644
 --- a/crates/store-s3/src/store/stream.rs
 +++ b/crates/store-s3/src/store/stream.rs
-@@ -97,7 +97,7 @@
+@@ -121,7 +121,7 @@ impl<T: Transport> S3Stream<T> {
          let got = u64::try_from(out.len()).unwrap_or(u64::MAX);
          *left = left.map(|left| left.saturating_sub(got));
          let ended = got < want;
@@ -10,10 +11,3 @@ diff --git a/crates/store-s3/src/store/stream.rs b/crates/store-s3/src/store/str
              // The connection failed, or ended before the body did.
              self.state = State::Done;
              read?;
-@@ -138,4 +138,4 @@
-         left = left.saturating_sub(u64::try_from(read).unwrap_or(u64::MAX));
-     }
-     Ok(())
--}
-+}
-\ No newline at end of file

@@ -1,19 +1,13 @@
 diff --git a/crates/core/src/retry.rs b/crates/core/src/retry.rs
+index 970fa911f..6ff926922 100644
 --- a/crates/core/src/retry.rs
 +++ b/crates/core/src/retry.rs
-@@ -534,7 +534,7 @@
-         Box::pin(async move {
-             let (core, key, offset) = (self.core, self.key, self.offset);
+@@ -568,7 +568,7 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> ReadStream for Resuming<'_, S, P, E
+             let (core, key, offset, end) = (self.core, self.key, self.offset, self.end);
              let reopen = move || async move {
--                let mut fresh = core.inner.read_stream(key, offset);
-+                let mut fresh = core.inner.read_stream(key, 0);
+                 let mut fresh = match end {
+-                    None => core.inner.read_stream(key, offset),
++                    None => core.inner.read_stream(key, 0),
+                     Some(end) => core.inner.read_span(key, offset, end),
+                 };
                  let bytes = fresh.next(len).await?;
-                 Ok((fresh, bytes))
-             };
-@@ -622,4 +622,4 @@
- }
- 
- #[cfg(test)]
--mod tests;
-+mod tests;
-\ No newline at end of file

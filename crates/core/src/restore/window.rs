@@ -79,7 +79,7 @@ impl<'s, S: ObjectStore> Window<'s, S> {
 
     /// Opens spans until `width` are open or the last one is.
     fn fill(&mut self) {
-        while self.open.len() < self.width && self.next < self.size {
+        while self.open.len() < self.width && self.next <= self.size {
             let start = self.next;
             let end = start.saturating_add(self.span);
             if end >= self.size {
