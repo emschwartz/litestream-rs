@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/witness.rs b/crates/core/src/witness.rs
-index a38e4b75f..ebcf308c5 100644
+index e94c4e26a..04bf8bd0c 100644
 --- a/crates/core/src/witness.rs
 +++ b/crates/core/src/witness.rs
-@@ -221,7 +221,7 @@ impl Witnessed {
+@@ -134,7 +134,7 @@ impl Witnessed {
  
-     /// [`Self::matches`] for a tally already sealed.
-     fn matches_sealed(&self, bytes: Sealed, checksum: FileChecksum) -> bool {
+     /// [`Self::matches`] for bytes already taken in whole.
+     fn matches_seen(&self, bytes: Seen, checksum: FileChecksum) -> bool {
 -        self.bytes == bytes && self.checksum == checksum
-+        self.bytes.size == bytes.size && self.checksum == checksum
++        self.bytes.len() == bytes.len() && self.checksum == checksum
      }
  
      /// A token for a staged file the boot read whole and verified.
