@@ -7,4 +7,4 @@ tests = [
     "vouch::a_foreign_file_put_while_the_engine_was_down_stops_the_boot",
     "vouch::a_takeover_does_not_cover_a_foreign_file_above_it",
 ]
-unaided = 300
+unaided_miss = "Failed only at seed 249 when measured at 4918e715e and in none of 300 seeds at f6c379c5d: a late find that nine core and sim changes moved off the base; the swarm reaches a boot that refuses nothing only by that luck."

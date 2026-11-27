@@ -200,7 +200,7 @@ planted-bugs-diff base shard="0/1":
 planted-bugs *args:
     uv run scripts/planted-bugs.py {{args}}
 
-# The swarm alone against each planted bug, no named test run, judged (docs/decisions/D296.md): a
+# The swarm alone against each planted bug, no named test run, judged (docs/decisions/D297.md): a
 # plant must fail within its `unaided` budget, a plant marked `unaided_miss` must still not be
 # found within `seeds`. Nightly in CI, in shards: `just planted-bugs-unaided 100 --shard 0/8`.
 planted-bugs-unaided seeds="100" *args:

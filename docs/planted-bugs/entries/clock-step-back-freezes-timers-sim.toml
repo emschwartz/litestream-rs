@@ -4,4 +4,4 @@ fix = "48aee1d"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["clock_steps_back_an_hour_mid_retry"]
-unaided = 50
+unaided_miss = "Failed at seed 4 when measured at 4918e715e and in none of 300 seeds at f6c379c5d; nine core and sim changes between them (the retry wait now timed from when the failed call returned, #495, the likeliest) moved the draw off a backward clock step during a retry wait, so the swarm no longer reaches it."

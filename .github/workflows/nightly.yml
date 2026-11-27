@@ -184,7 +184,7 @@ jobs:
           tool: cargo-nextest,just
       - run: just planted-bugs --shard "${{ matrix.shard }}/8"
 
-  # The swarm alone against each planted bug, judged (docs/decisions/D296.md): a plant must fail
+  # The swarm alone against each planted bug, judged (docs/decisions/D297.md): a plant must fail
   # within its `unaided` budget and a plant marked `unaided_miss` must still go unfound, so a swarm
   # that stops finding a plant, or starts finding a marked miss, fails here. The same deterministic
   # base as the measuring run, so it is a regression gate. About 26,000 seeds over 219 plants: an
