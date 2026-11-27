@@ -710,7 +710,11 @@ fn torn_wal_index_reads_end_the_snapshot_only_past_the_bound() {
             rig.wal.inject(SourceOp::Committed, SourceError::Busy);
         }
         let sliced = slice(&mut rig, &mut snapshot, &mut pages, 100);
-        let expected = if ends { Err(Fault::SqliteBusy) } else { Ok(None) };
+        let expected = if ends {
+            Err(Fault::SqliteBusy)
+        } else {
+            Ok(None)
+        };
         assert_eq!(sliced, expected, "{torn} torn reads");
         block_on(snapshot.abort());
     }
