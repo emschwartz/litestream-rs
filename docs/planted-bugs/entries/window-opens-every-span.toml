@@ -1,0 +1,10 @@
+# A restore's window of ranged reads opens every span of a large file at once instead of at most
+# the store's width of them. Pages and checksums stay right, so nothing but the bound sees it: on
+# S3 each open span reads up to 16 MiB ahead, so a 68 GB file would hold its whole size in memory.
+name = "window-opens-every-span"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "restore::tests::window::a_window_holds_at_most_the_stores_width_of_spans",
+]
+unaided_miss = "the simulator's stores read one span at a time and its replicas are smaller than two 8 MiB spans, so no swarm seed opens a window"

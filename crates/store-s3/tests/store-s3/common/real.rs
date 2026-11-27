@@ -947,6 +947,7 @@ macro_rules! shared_cases {
                 created_at_of_an_overwritten_file_is_refused,
                 read_with_created_at_agrees_with_read_and_created_at,
                 read_stream_agrees_with_read,
+                read_span_agrees_with_read,
                 list_many_agrees_with_list,
                 created_at_many_agrees_with_created_at,
             );

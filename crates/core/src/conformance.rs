@@ -938,6 +938,50 @@ pub async fn read_stream_agrees_with_read<H: Harness>(h: &H) -> Check {
     Ok(())
 }
 
+/// `read_span` hands out what `read` does from its start, no byte at or past its end: a short
+/// piece where the span or the object ends, then nothing. A missing key fails as `read` does.
+///
+/// # Errors
+/// A [`Failure`] naming the rule that broke.
+pub async fn read_span_agrees_with_read<H: Harness>(h: &H) -> Check {
+    let store = h.store();
+    let target = key(6, 5, 5)?;
+    let absent = key(6, 6, 6)?;
+    put_with_created_at(store, target, b"abcdefgh", at(CREATED_AT)).await?;
+    let len = read_len(3)?;
+    let spans = [
+        (0, 8, b"abcdefgh".as_slice()),
+        (2, 5, b"cde"),
+        (1, 7, b"bcdefg"),
+        (6, 20, b"gh"),
+    ];
+    for (start, end, want) in spans {
+        let mut stream = store.read_span(target, start, end);
+        let mut got = Vec::new();
+        let mut ended = false;
+        // At most eight bytes in pieces of three end by the fourth piece.
+        for _ in 0..4 {
+            let piece = stream.next(len).await;
+            let Ok(piece) = piece else {
+                return Err(Failure(format!("a span's piece failed: {piece:?}")));
+            };
+            ended = piece.len() < 3;
+            got.extend(piece);
+            if ended {
+                break;
+            }
+        }
+        ensure_eq!(got.as_slice(), want, "the span's bytes");
+        ensure_eq!(ended, true, "the span ends with a short piece");
+    }
+    ensure_eq!(
+        store.read_span(absent, 0, 4).next(len).await,
+        Err(StoreError::NotFound { key: absent }),
+        "a span of a missing key"
+    );
+    Ok(())
+}
+
 /// `list_many` answers each listing as `list` does, in order.
 ///
 /// # Errors
@@ -1052,6 +1096,7 @@ macro_rules! conformance_suite {
             created_at_of_an_overwritten_file_is_refused,
             read_with_created_at_agrees_with_read_and_created_at,
             read_stream_agrees_with_read,
+            read_span_agrees_with_read,
             list_many_agrees_with_list,
             created_at_many_agrees_with_created_at,
         );

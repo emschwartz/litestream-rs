@@ -490,6 +490,9 @@ pub enum BatchKind {
     Lists,
     /// [`ObjectStore::created_at_many`].
     ResolvedCreatedAt,
+    /// Spans of one object read at once, each its own [`ObjectStore::read_span`]: a restore's
+    /// window over a large file (`crate::restore`). One, the default, reads it as one stream.
+    Spans,
 }
 
 /// A backend holding a replica's LTX objects, keyed by [`FileKey`].
@@ -531,6 +534,23 @@ pub trait ObjectStore: Send + Sync {
             store: self,
             key,
             offset,
+            end: None,
+        })
+    }
+
+    /// Bytes `start` to `end` (exclusive) of `key` as one stream ([`ReadStream`]), for a reader
+    /// that reads up to [`BatchKind::Spans`] spans of one object side by side. Its pieces end at
+    /// `end` as a [`Self::read_stream`]'s end at the object's end. A store whose
+    /// [`BatchKind::Spans`] width is above one makes it one request and reads it ahead of the
+    /// caller, a bounded number of pieces, so the spans download at once while the caller takes
+    /// them in turn; the request may go out before the first piece is asked for. The default reads
+    /// each piece with [`Self::read`]. A wrapper forwards it.
+    fn read_span(&self, key: FileKey, start: u64, end: u64) -> Box<dyn ReadStream + '_> {
+        Box::new(Ranged {
+            store: self,
+            key,
+            offset: start,
+            end: Some(end),
         })
     }
 
@@ -897,16 +917,28 @@ pub trait ReadStream: Send {
     fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>>;
 }
 
-/// [`ObjectStore::read_stream`]'s default: one [`ObjectStore::read`] a piece.
+/// [`ObjectStore::read_stream`]'s and [`ObjectStore::read_span`]'s default: one
+/// [`ObjectStore::read`] a piece, none past `end`.
 struct Ranged<'a, S: ?Sized> {
     store: &'a S,
     key: FileKey,
     offset: u64,
+    end: Option<u64>,
 }
 
 impl<S: ObjectStore + ?Sized> ReadStream for Ranged<'_, S> {
     fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
         Box::pin(async move {
+            let len = match self.end {
+                None => len,
+                Some(end) => {
+                    let left = end.saturating_sub(self.offset).min(len.get());
+                    match u32::try_from(left).ok().and_then(ReadLen::new) {
+                        Some(len) => len,
+                        None => return Ok(Vec::new()),
+                    }
+                }
+            };
             let bytes = self.store.read(&self.key, self.offset, len).await?;
             let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
             self.offset = self.offset.saturating_add(read);

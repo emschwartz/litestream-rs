@@ -20,6 +20,7 @@ use crate::store::WriteMode;
 use crate::store::{StoreOp, Upload};
 
 mod tail;
+mod window;
 
 fn txid(n: u64) -> Txid {
     Txid::new(n).unwrap()

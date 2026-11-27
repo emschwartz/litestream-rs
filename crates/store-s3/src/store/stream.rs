@@ -12,6 +12,8 @@
 
 use std::io;
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 
 use lsr_core::{BoxFuture, FileKey, ReadLen, ReadStream, StoreError, StoreOp};
 
@@ -25,6 +27,8 @@ pub(crate) struct S3Stream<T> {
     inner: Arc<Inner<T>>,
     key: FileKey,
     from: u64,
+    /// Where it ends (exclusive) for a span, `None` for the rest of the object.
+    end: Option<u64>,
     state: State,
 }
 
@@ -45,6 +49,18 @@ impl<T: Transport> S3Stream<T> {
             inner,
             key,
             from,
+            end: None,
+            state: State::Unsent,
+        }
+    }
+
+    /// Bytes `from` to `end` (exclusive) through one GET.
+    pub(crate) const fn span(inner: Arc<Inner<T>>, key: FileKey, from: u64, end: u64) -> Self {
+        Self {
+            inner,
+            key,
+            from,
+            end: Some(end),
             state: State::Unsent,
         }
     }
@@ -52,9 +68,10 @@ impl<T: Transport> S3Stream<T> {
     fn open(&self) -> Result<State, StoreError> {
         let op = StoreOp::Read;
         let key = self.key;
-        let request = self
-            .inner
-            .request(op, |b, now| b.get_from(now, &key, self.from))?;
+        let request = self.inner.request(op, |b, now| match self.end {
+            None => b.get_from(now, &key, self.from),
+            Some(end) => b.get_span(now, &key, self.from, end),
+        })?;
         let (mut head, mut body) = self
             .inner
             .transport
@@ -76,6 +93,11 @@ impl<T: Transport> S3Stream<T> {
             // A server that ignored the Range header sends the whole object.
             consume(&mut *body, self.from, |_| {})?;
             left = left.map(|declared| declared.saturating_sub(self.from));
+        }
+        if let Some(end) = self.end {
+            // A whole object sent for a span runs past it: what is past `end` is never read.
+            let span = end.saturating_sub(self.from);
+            left = Some(left.map_or(span, |left| left.min(span)));
         }
         Ok(State::Open { body, left })
     }
@@ -136,4 +158,108 @@ fn consume(body: &mut dyn Body, count: u64, mut sink: impl FnMut(&[u8])) -> Resu
         left = left.saturating_sub(u64::try_from(read).unwrap_or(u64::MAX));
     }
     Ok(())
+}
+
+/// The most pieces a span's thread reads ahead: a restore's 8 MiB span whole, so it downloads
+/// while the spans before it are taken, and never more than 16 MiB however long a span is asked.
+const AHEAD_PIECES: u64 = 16;
+
+/// Bytes a span's thread reads at a time.
+const AHEAD_PIECE: ReadLen = ReadLen::CHUNK;
+
+/// A span read ahead on a thread of its own ([`ObjectStore::read_span`](lsr_core::ObjectStore::read_span)):
+/// one GET, sent when the span is opened, its pieces queued for the caller [`AHEAD_PIECES`] deep,
+/// so a restore that opens several spans has them all downloading while it takes each in turn.
+/// Memory per span: the queued pieces (up to [`AHEAD_PIECES`]), the one the thread is reading
+/// and the one being handed out.
+/// The thread ends when the span does, when a read fails (the failure is the last piece), or at
+/// its next piece once the caller drops the span; a read in progress first runs to its end or to
+/// the transport's deadline.
+pub(crate) struct Ahead {
+    pieces: Receiver<Result<Vec<u8>, StoreError>>,
+    held: Vec<u8>,
+    at: usize,
+    ended: bool,
+}
+
+impl Ahead {
+    pub(crate) fn spawn<T: Transport + 'static>(
+        inner: Arc<Inner<T>>,
+        key: FileKey,
+        start: u64,
+        end: u64,
+    ) -> Self {
+        // The whole span waits read ahead, up to [`AHEAD_PIECES`].
+        let depth = end
+            .saturating_sub(start)
+            .div_ceil(AHEAD_PIECE.get())
+            .clamp(1, AHEAD_PIECES);
+        let (queue, pieces) = mpsc::sync_channel(usize::try_from(depth).unwrap_or(1));
+        let mut stream = S3Stream::span(inner, key, start, end);
+        let full = usize::try_from(AHEAD_PIECE.get()).unwrap_or(usize::MAX);
+        // A thread that cannot start drops the sender: the span's first piece fails as Transient.
+        let spawned = thread::Builder::new()
+            .name("lsr-span".to_owned())
+            .spawn(move || {
+                loop {
+                    let piece = stream.piece(AHEAD_PIECE);
+                    let last = !matches!(&piece, Ok(bytes) if bytes.len() == full);
+                    if queue.send(piece).is_err() || last {
+                        return;
+                    }
+                }
+            });
+        match spawned {
+            Ok(_) | Err(_) => {}
+        }
+        Self {
+            pieces,
+            held: Vec::new(),
+            at: 0,
+            ended: false,
+        }
+    }
+
+    /// The next `len` bytes, fewer only at the span's end.
+    fn take(&mut self, len: ReadLen) -> Result<Vec<u8>, StoreError> {
+        let want = usize::try_from(len.get()).unwrap_or(usize::MAX);
+        let mut out = Vec::new();
+        while out.len() < want {
+            if let Some(rest) = self.held.get(self.at..).filter(|rest| !rest.is_empty()) {
+                let take = rest.len().min(want.saturating_sub(out.len()));
+                out.extend_from_slice(rest.get(..take).unwrap_or_default());
+                self.at = self.at.saturating_add(take);
+                continue;
+            }
+            if self.ended {
+                break;
+            }
+            match self.pieces.recv() {
+                Ok(Ok(piece)) => {
+                    self.ended = u64::try_from(piece.len()).unwrap_or(u64::MAX) < AHEAD_PIECE.get();
+                    self.held = piece;
+                    self.at = 0;
+                }
+                Ok(Err(err)) => {
+                    self.ended = true;
+                    return Err(err);
+                }
+                Err(_gone) => {
+                    // The thread never started, or stopped without a last piece.
+                    self.ended = true;
+                    return Err(StoreError::Transient {
+                        op: StoreOp::Read,
+                        kind: io::ErrorKind::Other,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+impl ReadStream for Ahead {
+    fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move { self.take(len) })
+    }
 }

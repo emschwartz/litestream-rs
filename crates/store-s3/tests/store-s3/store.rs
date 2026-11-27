@@ -220,6 +220,59 @@ mod cases {
         assert_eq!(sleeper.waits().len(), 1);
     }
 
+    /// The pieces of a span, `len` bytes asked each time, until one comes back short.
+    fn span_pieces(
+        store: &impl ObjectStore,
+        k: FileKey,
+        span: (u64, u64),
+        len: u32,
+    ) -> Vec<Vec<u8>> {
+        let mut stream = store.read_span(k, span.0, span.1);
+        let len = ReadLen::new(len).unwrap();
+        let mut out = Vec::new();
+        loop {
+            let piece = block_on(stream.next(len)).unwrap();
+            let short = u64::try_from(piece.len()).unwrap() < len.get();
+            out.push(piece);
+            if short {
+                return out;
+            }
+        }
+    }
+
+    #[test]
+    fn a_span_is_one_get_however_many_pieces_it_hands_out() {
+        let h = FakeHarness::new();
+        let k = key(0, 1, 1);
+        put_through(&h.store, &k, b"abcdefghi").unwrap();
+        let before = count(&h.wire, Shape::Get);
+        assert_eq!(
+            span_pieces(&h.store, k, (1, 8), 3),
+            [&b"bcd"[..], b"efg", b"h"]
+        );
+        assert_eq!(count(&h.wire, Shape::Get), before + 1);
+    }
+
+    /// Through the retry layer a span cut short goes on from the bytes it handed out, to the
+    /// span's end and no further.
+    #[test]
+    fn a_span_cut_short_goes_on_from_where_it_stopped_under_retrying() {
+        let (wire, sleeper, store) = retried(FakeHarness::new());
+        let k = key(0, 1, 1);
+        put_through(&store, &k, b"abcdefghi").unwrap();
+        wire.push(Fault::TruncateBody {
+            on: Shape::Get,
+            keep: 2,
+        });
+        let before = count(&wire, Shape::Get);
+        assert_eq!(
+            span_pieces(&store, k, (1, 8), 3),
+            [&b"bcd"[..], b"efg", b"h"]
+        );
+        assert_eq!(count(&wire, Shape::Get), before + 2);
+        assert_eq!(sleeper.waits().len(), 1);
+    }
+
     #[test]
     fn a_failed_listing_in_a_batch_fails_only_its_own_slot() {
         let (wire, store) = store_with(4);

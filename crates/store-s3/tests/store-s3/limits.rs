@@ -167,6 +167,16 @@ fn creation_time_heads_go_sixteen_at_a_time() {
     assert_eq!(store.batch_width(BatchKind::ResolvedCreatedAt).get(), 16);
 }
 
+/// A restore reads as many spans of one file at once as the `concurrency` setting, Go's key for
+/// parts in flight, says: the provider's default when unset.
+#[test]
+fn spans_follow_the_concurrency_setting() {
+    let (generic, _) = store_for(config());
+    assert_eq!(generic.batch_width(BatchKind::Spans).get(), 5);
+    let (set, _) = store_for(config().with_concurrency(n(8)));
+    assert_eq!(set.batch_width(BatchKind::Spans).get(), 8);
+}
+
 #[test]
 fn listings_go_eight_at_a_time() {
     let (store, limits) = store_for(config());

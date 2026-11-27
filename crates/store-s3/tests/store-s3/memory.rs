@@ -499,8 +499,9 @@ fn ltx_bytes(n: u64, commit: u32, pages: std::ops::RangeInclusive<u32>) -> Vec<u
     encoder.finish(None).unwrap().0
 }
 
-/// Restores a snapshot of `mib` MiB through the real client and returns the heap peak.
-fn restore_peak(mib: usize) -> usize {
+/// Restores a snapshot of `mib` MiB through the real client reading `spans` spans of a file at
+/// once, and returns the heap peak.
+fn restore_peak(mib: usize, spans: usize) -> usize {
     let fake = fake();
     let pages = u32::try_from(mib * 256).unwrap();
     let bytes = ltx_bytes(1, pages, 1..=pages);
@@ -510,7 +511,7 @@ fn restore_peak(mib: usize) -> usize {
         bytes,
         &[("x-amz-meta-litestream-timestamp", &now().to_string())],
     );
-    let store = store_on(serve(&fake), PartSize::MIN.get().try_into().unwrap(), 5);
+    let store = store_on(serve(&fake), PartSize::MIN.get().try_into().unwrap(), spans);
     let pages = Arc::new(AtomicU64::new(0));
     let sink = Discard {
         pages: Arc::clone(&pages),
@@ -539,8 +540,8 @@ fn restore_bound() -> usize {
 /// connection as the decoder takes it, never held whole.
 #[test]
 fn a_restore_through_the_real_client_holds_one_chunk() {
-    let few = restore_peak(72);
-    let many = restore_peak(144);
+    let few = restore_peak(72, 1);
+    let many = restore_peak(144, 1);
     eprintln!(
         "restore 72 MiB: {} KiB, 144 MiB: {} KiB (bound {} KiB)",
         few >> 10,
@@ -558,6 +559,32 @@ fn a_restore_through_the_real_client_holds_one_chunk() {
             "the gate saw {peak} bytes: it cannot see the chunk"
         );
     }
+}
+
+/// Bytes a restore's span covers: core's `restore::window::SPAN_BYTES`.
+const SPAN: usize = 8 * MIB;
+
+/// A restore reading five spans at once holds the spans read ahead, each its 8 MiB and the
+/// mebibyte its thread is reading and the one being handed out, beside the chunk; and no more as
+/// the database doubles.
+#[test]
+fn a_restore_through_a_window_of_spans_holds_the_window() {
+    let few = restore_peak(72, 5);
+    let many = restore_peak(144, 5);
+    let bound = 5 * (SPAN + 2 * MIB) + restore_bound();
+    eprintln!(
+        "restore in spans 72 MiB: {} KiB, 144 MiB: {} KiB (bound {} KiB)",
+        few >> 10,
+        many >> 10,
+        bound >> 10
+    );
+    for peak in [few, many] {
+        assert!(peak <= bound, "restore held {peak} bytes, over {bound}");
+    }
+    assert!(
+        few >= 2 * SPAN,
+        "the gate saw {few} bytes: no span was read ahead"
+    );
 }
 
 /// A ranged read of 12 MiB (a compaction's replica reads are a mebibyte; the largest a

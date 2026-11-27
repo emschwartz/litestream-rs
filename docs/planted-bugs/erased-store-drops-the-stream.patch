@@ -1,8 +1,8 @@
 diff --git a/crates/replica/src/store.rs b/crates/replica/src/store.rs
-index 241ce134f..12bf60f31 100644
+index bad5b8877..9bd88616f 100644
 --- a/crates/replica/src/store.rs
 +++ b/crates/replica/src/store.rs
-@@ -219,10 +219,6 @@ where
+@@ -226,10 +226,6 @@ where
          self.0.read_boxed(key, offset, len).await
      }
  
@@ -10,6 +10,6 @@ index 241ce134f..12bf60f31 100644
 -        self.0.read_stream_dyn(key, offset)
 -    }
 -
-     async fn hold_stream(
-         &self,
-         key: FileKey,
+     fn read_span(&self, key: FileKey, start: u64, end: u64) -> Box<dyn ReadStream + '_> {
+         self.0.read_span_dyn(key, start, end)
+     }

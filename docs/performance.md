@@ -47,7 +47,7 @@ One counted run per row, through a proxy in front of MinIO, at 27a41bd04.
 
 ## Not measured at the current code
 
-- **Restore.** Last measured on 3c384ab27, from a file replica only. 1314261bd since changed how a restore reads each file (one GET per file instead of ranged reads), so those numbers are not repeated here.
+- **Restore.** Last measured on 3c384ab27, from a file replica only. 1314261bd since changed how a restore reads each file (one GET per file instead of ranged reads), and a file of 16 MiB or more is now read through a window of 8 MiB ranged GETs side by side (docs/decisions/D312.md), so those numbers are not repeated here.
 - **Steady state** (20 commits a second to MinIO). Last measured on c5c8f9817, before later changes to the upload and compaction paths, so its CPU, memory and request counts are not repeated here.
 - **Other machines and real providers.** Every row above is one Linux VM against MinIO on loopback. A provider's latency changes the balance: this run hides the cost of a round trip that a real bucket charges.
 - **Larger databases**, and an `lsr` that has run for days.
