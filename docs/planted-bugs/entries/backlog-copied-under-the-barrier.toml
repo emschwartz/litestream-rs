@@ -1,0 +1,11 @@
+# A checkpoint copies a backlog that something held back (a level-9 snapshot holds the read for
+# its whole upload) inside the PASSIVE under the write barrier, every application writer waiting
+# for the whole copy. lsr-sim's barrier oracle judges the frames copied under the barrier.
+name = "backlog-copied-under-the-barrier"
+fix = "claude/snapshot-hold"
+package = "lsr-core"
+tests = [
+    "checkpoint::tests::a_backlog_past_the_bound_is_copied_with_no_barrier_held",
+    "checkpoint::tests::a_backlog_at_the_bound_is_copied_under_the_barrier",
+]
+unaided = 50

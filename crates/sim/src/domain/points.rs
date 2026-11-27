@@ -124,7 +124,8 @@ pub const fn point_cell(call: SourceOp, action: Action) -> Cell {
             | SourceOp::BumpSeq
             | SourceOp::BeginWriteLock
             | SourceOp::EndWriteLock
-            | SourceOp::Sync,
+            | SourceOp::Sync
+            | SourceOp::RenewRead,
             Action::Commit
             | Action::ReaderBegin
             | Action::ReaderEnd
@@ -146,7 +147,8 @@ pub const fn point_cell(call: SourceOp, action: Action) -> Cell {
             | SourceOp::BumpSeq
             | SourceOp::BeginWriteLock
             | SourceOp::EndWriteLock
-            | SourceOp::Sync,
+            | SourceOp::Sync
+            | SourceOp::RenewRead,
             Action::CheckpointFull,
         ) => Cell::Unmodelled(
             "the generator draws no FULL checkpoint by another process; only scenarios run one",

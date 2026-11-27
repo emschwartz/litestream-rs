@@ -2163,6 +2163,7 @@ impl Actor {
             &mut *env.ck,
             env.staging,
             &self.kept.cfg.sync,
+            &self.kept.cfg.checkpoint,
             env.clock,
         )
         .await;

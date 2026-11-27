@@ -16,6 +16,10 @@ impl Checkpointer for Grants {
         Err(SourceError::Busy)
     }
 
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError> {
+        Ok(ReadLockHold::first())
+    }
+
     fn bump_seq(&mut self) -> Result<(), SourceError> {
         Ok(())
     }
@@ -25,8 +29,8 @@ fn watching(watch: &BarrierWatch) -> Watching<Grants> {
     Watching::new(
         Grants,
         watch.clone(),
-        RecorderLog::default(),
-        RecorderLog::default(),
+        (RecorderLog::default(), RecorderLog::default()),
+        Box::new(|| 0),
     )
 }
 

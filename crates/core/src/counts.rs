@@ -15,7 +15,7 @@ use lsr_wal::HEADER_LEN;
 
 use crate::env::Clock;
 use crate::fault::Fault;
-use crate::position::Position;
+use crate::position::{Position, ReadLockHold};
 use crate::source::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, SourceError};
 
 /// One kind of call's totals.
@@ -83,7 +83,8 @@ impl CheckpointTotals {
 
     const fn get(&self, mode: CheckpointMode) -> CallTotals {
         match mode {
-            CheckpointMode::Passive => self.passive,
+            // A backlog copy is a PASSIVE to SQLite, from the other connection.
+            CheckpointMode::Passive | CheckpointMode::Backlog => self.passive,
             CheckpointMode::Full => self.full,
             CheckpointMode::Truncate => self.truncate,
         }
@@ -91,7 +92,7 @@ impl CheckpointTotals {
 
     const fn get_mut(&mut self, mode: CheckpointMode) -> &mut CallTotals {
         match mode {
-            CheckpointMode::Passive => &mut self.passive,
+            CheckpointMode::Passive | CheckpointMode::Backlog => &mut self.passive,
             CheckpointMode::Full => &mut self.full,
             CheckpointMode::Truncate => &mut self.truncate,
         }
@@ -134,6 +135,10 @@ impl<C: Checkpointer> Checkpointer for Counted<'_, C> {
         let took = self.clock.now().saturating_duration_since(began);
         self.totals.record(mode, run.is_err(), took);
         run
+    }
+
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError> {
+        self.inner.renew_read()
     }
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {

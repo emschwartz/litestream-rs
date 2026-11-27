@@ -51,7 +51,9 @@ impl Runner {
         if let Some(armed) = armed {
             self.w.sqlite.arm_app_in_tick(when, armed);
         }
-        self.tick()?;
+        let ticked = self.tick();
+        self.in_tick_pages = 0;
+        ticked?;
         let ran = self.w.take_app_in_tick();
         let outcome = if ran.is_some() { "ran" } else { "missed" };
         self.report
@@ -89,6 +91,7 @@ impl Runner {
             let added = self.all_pages(new_size).into_iter();
             all.extend(added.filter(|(page, _)| page.get() > size));
         }
+        self.in_tick_pages = u64::try_from(all.len()).unwrap_or(u64::MAX);
         self.w.arm_app_commit_in_tick(all, new_size);
     }
 
