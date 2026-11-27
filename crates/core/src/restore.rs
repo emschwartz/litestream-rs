@@ -732,18 +732,35 @@ async fn apply_file<S: ObjectStore, K: DatabaseSink>(
     let key = info.key;
     let mut read = LtxRead::new(key, chunk_len());
     let applied = read
-        .read_verified(store, |event| match event {
-            Event::Header(header) => check_header(key, &header, previous)
-                .map_err(|fault| RestoreError::File { key, fault }),
-            Event::Page(page) => sink.write_page(page).map_err(sink_fault(SinkOp::WritePage)),
-        })
+        .read_verified(store, |event| on_event(key, previous, sink, event))
         .await;
     *bytes_read = bytes_read.saturating_add(read.bytes_read());
     let verified = applied.map_err(|fault| read_abort(key, fault))?;
+    end_file(sink, &verified)?;
+    Ok(verified)
+}
+
+/// One decoder event of file `key` into `sink`: the header checked against the file before
+/// it, a page written.
+fn on_event<K: DatabaseSink>(
+    key: FileKey,
+    previous: Previous<'_>,
+    sink: &mut K,
+    event: Event<'_>,
+) -> Result<(), RestoreError> {
+    match event {
+        Event::Header(header) => {
+            check_header(key, &header, previous).map_err(|fault| RestoreError::File { key, fault })
+        }
+        Event::Page(page) => sink.write_page(page).map_err(sink_fault(SinkOp::WritePage)),
+    }
+}
+
+/// A file read to its end: the sink cut to the size the file's header gives.
+fn end_file<K: DatabaseSink>(sink: &mut K, verified: &Verified) -> Result<(), RestoreError> {
     let header = verified.header();
     sink.truncate(header.pages(), header.page_size())
-        .map_err(sink_fault(SinkOp::Truncate))?;
-    Ok(verified)
+        .map_err(sink_fault(SinkOp::Truncate))
 }
 
 /// A restore to transaction `tip` read a budget of bytes at a time, for a caller that gives its
@@ -754,8 +771,7 @@ async fn apply_file<S: ObjectStore, K: DatabaseSink>(
 /// published. A file is one stream held between steps where the store can hold one
 /// ([ObjectStore::hold_stream]).
 pub(crate) struct Stepped<K> {
-    /// The file being read, and those after it.
-    key: FileKey,
+    /// The files after the one being read.
     rest: std::vec::IntoIter<FileInfo>,
     read: LtxRead,
     held: Option<Box<dyn ReadStream>>,
@@ -768,7 +784,7 @@ pub(crate) struct Stepped<K> {
 impl<K> std::fmt::Debug for Stepped<K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Stepped")
-            .field("key", &self.key)
+            .field("key", &self.read.key())
             .field("rest", &self.rest.len())
             .field("read", &self.read.bytes_read())
             .finish_non_exhaustive()
@@ -816,7 +832,6 @@ impl<K: DatabaseSink> Stepped<K> {
             .await
             .map_err(|err| once(read_abort(key, ReadFault::Store(err))))?;
         Ok(Self {
-            key,
             rest: chain
                 .files()
                 .iter()
@@ -844,7 +859,7 @@ impl<K: DatabaseSink> Stepped<K> {
         let (mut spent, mut opened) = (0_u64, 0_u32);
         let mut slot: Option<Box<dyn ReadStream + '_>> = None;
         while spent < budget && opened < FILES_PER_STEP {
-            let key = self.key;
+            let key = self.read.key();
             let before = self.read.bytes_read();
             let stream: &mut (dyn ReadStream + '_) = match self.held.as_mut() {
                 Some(held) => &mut **held,
@@ -853,13 +868,7 @@ impl<K: DatabaseSink> Stepped<K> {
             let (previous, sink) = (self.previous.as_ref(), &mut self.sink);
             let next = self
                 .read
-                .next(stream, |event| match event {
-                    Event::Header(header) => check_header(key, &header, previous)
-                        .map_err(|fault| RestoreError::File { key, fault }),
-                    Event::Page(page) => {
-                        sink.write_page(page).map_err(sink_fault(SinkOp::WritePage))
-                    }
-                })
+                .next(stream, |event| on_event(key, previous, sink, event))
                 .await;
             spent = spent.saturating_add(self.read.bytes_read().saturating_sub(before));
             let verified = match next {
@@ -867,10 +876,7 @@ impl<K: DatabaseSink> Stepped<K> {
                 Ok(Next::End(verified)) => verified,
                 Err(fault) => return Err(once(read_abort(key, fault))),
             };
-            let header = verified.header();
-            self.sink
-                .truncate(header.pages(), header.page_size())
-                .map_err(sink_fault(SinkOp::Truncate))?;
+            end_file(&mut self.sink, &verified)?;
             let Some(info) = self.rest.next() else {
                 not_empty(key, &verified)?;
                 verify_end_state(&mut self.sink, &verified)?;
@@ -880,7 +886,6 @@ impl<K: DatabaseSink> Stepped<K> {
                 });
             };
             self.previous = Some(verified);
-            self.key = info.key;
             self.read = LtxRead::new(info.key, self.len);
             slot = None;
             opened = opened.saturating_add(1);

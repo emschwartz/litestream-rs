@@ -1312,13 +1312,13 @@ fn a_step_opens_at_most_sixteen_files() {
             panic!("one step restored it all");
         };
         assert_eq!(
-            (stepped.key, stepped.read.bytes_read()),
+            (stepped.read.key(), stepped.read.bytes_read()),
             (key(0, 17, 17), 0)
         );
         let Stepping::Going(stepped) = stepped.step(&store, u64::MAX).await.unwrap() else {
             panic!("the second step restored it all");
         };
-        assert_eq!(stepped.key, key(0, 33, 33));
+        assert_eq!(stepped.read.key(), key(0, 33, 33));
         let Stepping::Done { last, .. } = stepped.step(&store, u64::MAX).await.unwrap() else {
             panic!("the restore did not end");
         };
