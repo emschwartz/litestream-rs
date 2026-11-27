@@ -39,9 +39,9 @@ that caught it must fail.
 - An entry's `patch` field names another entry's patch when the same production change is planted
   against the tests of a second package (most often a `-sim` entry beside its core one), so each
   distinct patch exists once.
-- `just planted-bugs-apply` runs `git apply --check` on every patch in seconds. It runs nightly
-  (`.github/workflows/nightly.yml`), not in `just check`: a change that moves a line near a planted
-  site does not block its land, and the stale patch is re-expressed afterwards.
+- `just planted-bugs-apply` runs `git apply --check` on every patch in seconds. It is in `just check`
+  (so CI's `check` job) and runs nightly too (`.github/workflows/nightly.yml`): a change that moves
+  a line a patch needs re-expresses the patch in the same pull request.
 
 Mutation testing covers the lines a pull request changes: `just mutants-diff` (CI job `mutants-diff`)
 runs `cargo mutants --in-diff` over `lsr-core` and `lsr-ltx`. A missed mutant fails the job unless

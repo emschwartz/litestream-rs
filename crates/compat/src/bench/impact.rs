@@ -11,7 +11,7 @@
 //!
 //! The arms ([`plan::ARMS`]) are lsr as it is (B), and binaries built from patches kept beside
 //! the bench ([`crates/compat/bench-patches`], built by [`scripts/build-bench-arms.sh`]) that read
-//! with a pace, advise the kernel to drop what the copy read, or read twice (the known-bad
+//! with a pace or read twice (the known-bad
 //! control). None of them is in the engine. The experiment's order is: a calibration round (each
 //! arm once, verified by restore, which also fixes the copy's duration and rate), the A/A gate (the
 //! noise floor, and from it the rounds), then the rounds, one run of every arm each, the order
