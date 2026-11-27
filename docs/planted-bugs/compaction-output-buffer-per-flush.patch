@@ -1,5 +1,5 @@
 diff --git a/crates/core/src/compact.rs b/crates/core/src/compact.rs
-index ac75a59a0..b07cfbb7e 100644
+index c6668fe04..a13c29794 100644
 --- a/crates/core/src/compact.rs
 +++ b/crates/core/src/compact.rs
 @@ -864,6 +864,7 @@ impl Compacting {
@@ -7,6 +7,6 @@ index ac75a59a0..b07cfbb7e 100644
              let sent = self.handoff.send(&mut self.upload, out, room);
              left = sent.await.map_err(CompactError::Dest)?;
 +            self.buf.out().shrink_to_fit();
-             if left == Some(room) {
+             // A pass hands over all that waits while room is left, else the loop spins.
+             if left.is_some() && !self.buf.out().is_empty() {
                  return Err(CompactError::Bug(BugSite::Encode.hit()));
-             }

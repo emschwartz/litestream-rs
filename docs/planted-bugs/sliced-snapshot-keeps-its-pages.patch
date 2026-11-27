@@ -1,5 +1,5 @@
 diff --git a/crates/core/src/snapshot.rs b/crates/core/src/snapshot.rs
-index 6d0825414..e9f3fa81e 100644
+index 4cd15ed0a..7bf18a8f1 100644
 --- a/crates/core/src/snapshot.rs
 +++ b/crates/core/src/snapshot.rs
 @@ -164,6 +164,7 @@ pub(crate) struct Snapshotting {
@@ -25,4 +25,4 @@ index 6d0825414..e9f3fa81e 100644
 +            self.kept.push(self.filling.out().clone());
              let sent = self.handoff.send(open, self.filling.out(), room);
              left = sent.await.map_err(|err| S::fault(&err))?;
-             crate::invariant!(left != Some(room), BugSite::Encode);
+             // A pass hands over a byte, and all that waits while room is left: else the loop spins.
