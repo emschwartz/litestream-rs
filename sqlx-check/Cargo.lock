@@ -565,6 +565,7 @@ dependencies = [
  "lsr-ltx",
  "lsr-sqlite",
  "lsr-store-fs",
+ "percent-encoding",
  "thiserror",
 ]
 
