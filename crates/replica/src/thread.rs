@@ -65,6 +65,7 @@ use crate::events::{Event, EventSink, TrustRecordUnusable};
 use crate::exec::{block_on, block_on_tick};
 use crate::health::{Counters, FailStop, Gone, Phase, StopOutcome, Writes};
 use crate::meta::{MetaLock, remove_takeover, write_takeover};
+use crate::pace::Paced;
 use crate::readers::Guarded;
 use crate::replicator::Shared;
 use crate::runtime::{Runtime, later};
@@ -496,7 +497,15 @@ impl Worker {
     /// One engine tick, or why the closed connections could not be reopened.
     fn tick(&mut self, now: Timestamp) -> Result<Tick, Reopen> {
         let sqlite = self.connection()?;
-        let (mut wal, mut db) = (sqlite.clone(), sqlite.clone());
+        // Reads are paced only while the application's writes go through: a read that runs
+        // while the replicator holds them (the boot's identity check) would hold them longer.
+        let limit = self
+            .blocked
+            .is_none()
+            .then_some(self.config.snapshot_read_limit)
+            .flatten();
+        let mut wal = sqlite.clone();
+        let mut db = Paced::new(sqlite.clone(), self.runtime.clone(), limit);
         let mut ck = Guarded::new(
             sqlite,
             Arc::clone(&self.shared.readers),

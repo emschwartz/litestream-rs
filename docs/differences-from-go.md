@@ -100,6 +100,8 @@ The replicator saves each batch of changes in its working folder (the folder whe
 
 ## litestream-rs has it, Go does not
 
+- `snapshot-read-limit` (`litestream-rs` section, off by default): a byte rate a second on every whole-database read, so a copy of a large database beside an in-process application does not slow it down for the copy's whole length ([decisions/D309.md](decisions/D309.md), [running.md](running.md)). Go has no such setting; as a separate process it can be put in a cgroup, which an in-process replicator cannot. The price is a longer copy and a WAL that grows for its length.
+
 - Holding the application back when replication cannot continue ([decisions/D177.md](decisions/D177.md)). Under Go the application always runs. Here the `if-replication-stops` setting decides, with three values:
   - `report`: the application is never held back. Health and metrics report the problem. This is what Go does.
   - `hold-start`, the default: the application is not started if the replicator stops at startup or S3 refuses it there, for example over wrong credentials. Once the application is running, a problem is only reported.

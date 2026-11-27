@@ -19,6 +19,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -508,6 +509,7 @@ fn measure(
             usage.map_or(f64::NAN, |u| mib(u.peak_rss)),
             if window.timed_out { 1.0 } else { 0.0 },
             to_f64(u64::try_from(during.len()).unwrap_or(0)),
+            ms(tally::percentile(&commits, 500)),
         ],
     }
 }
@@ -697,15 +699,17 @@ fn gate(ctx: &mut Ctx<'_>, pairs: usize, forced: bool) -> Result<bool, CompatErr
     Ok(passed)
 }
 
-/// The arms in the order of round [`round`]: the list rotated by the round number, reversed on
-/// odd rounds, so every arm meets every position.
+/// The arms in the order of round [`round`]: the list rotated by the round number, reversed in
+/// every second lap of that rotation, so every arm meets every position and no two of the first
+/// `2 * arms` rounds share an order (an even count of arms would repeat if it reversed on odd
+/// rounds).
 fn order(arms: &[ArmDef], round: usize) -> Vec<ArmDef> {
     let mut list = arms.to_vec();
-    if !list.is_empty() {
-        let by = round.checked_rem(list.len()).unwrap_or(0);
-        list.rotate_left(by);
-    }
-    if !round.is_multiple_of(2) {
+    if let Some(len) = NonZeroUsize::new(list.len()) {
+        list.rotate_left(round.checked_rem(len.get()).unwrap_or(0));
+        if !round.checked_div(len.get()).unwrap_or(0).is_multiple_of(2) {
+            return list;
+        }
         list.reverse();
     }
     list
