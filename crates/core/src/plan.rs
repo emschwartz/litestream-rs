@@ -211,6 +211,18 @@ impl ContiguousChain {
         self.is_contiguous_in(Listed::all(inventory))
     }
 
+    /// The chain's first `len` files, `None` for none: the part a restore already applied
+    /// when the file after it was gone.
+    pub(crate) fn first(&self, len: usize) -> Option<Self> {
+        let files: Vec<FileInfo> = self.files.iter().take(len).copied().collect();
+        let reaches = files.last()?.key.range().max();
+        Some(Self {
+            snapshot: self.snapshot,
+            files,
+            reaches,
+        })
+    }
+
     /// The files to apply, oldest state first: the base, then each extension.
     #[must_use]
     pub fn files(&self) -> &[FileInfo] {
@@ -408,6 +420,21 @@ pub(crate) fn plan_without(
     plan_exact(Listed::without(inventory, gone), target.into())
 }
 
+/// The rest of a restore whose first files, `applied`, are already in the database: the
+/// chain extended from `applied`'s end over [`inventory`], which need no longer hold the
+/// applied files. A restore uses it when a file it planned was gone after the files before it
+/// were applied, as the writer's compaction and retention delete files at any time: the files
+/// that replaced it cover the same transactions, so the database built so far is kept and only
+/// the files after it are planned again. The outcome is the one [`plan`] gives for a chain
+/// that began as `applied` does: a plan exactly when the extension reaches the target.
+pub(crate) fn plan_after(
+    inventory: &Inventory,
+    applied: ContiguousChain,
+    target: KeyTarget,
+) -> PlanOutcome {
+    extend_to(Listed::all(inventory), applied, target.into())
+}
+
 /// The exact planner for any [`RestoreTarget`], the oracle for [`AsOfPlanner`]
 /// in tests and the fuzz checker.
 ///
@@ -452,9 +479,15 @@ fn plan_unchecked(listed: Listed<'_>, target: RestoreTarget) -> PlanOutcome {
         .filter(|info| is_snapshot_start(info))
         .max_by_key(|info| base_order(info))
         .and_then(|info| ContiguousChain::start(*info));
-    let Some(mut chain) = base else {
+    let Some(chain) = base else {
         return inside_the_base(listed, target).unwrap_or_else(|| no_snapshot(listed));
     };
+    extend_to(listed, chain, target)
+}
+
+/// [`chain`] extended over the eligible files toward [`target`], and what it reached.
+fn extend_to(listed: Listed<'_>, mut chain: ContiguousChain, target: RestoreTarget) -> PlanOutcome {
+    let pool = || listed.files().filter(|info| eligible(info, target));
     extend(&mut chain, Sweep::new(listed, target));
     if let RestoreTarget::AsOf(_) = target {
         return as_of_outcome(listed, chain, target);
