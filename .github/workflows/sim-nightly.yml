@@ -14,6 +14,9 @@ on:
       day:
         description: The UTC date whose seeds to run, YYYYMMDD (empty for today)
         default: ""
+      long_seconds:
+        description: How long each large-profile shard runs seeds for
+        default: "1200"
 
 permissions:
   contents: read
@@ -42,4 +45,33 @@ jobs:
         with:
           name: sim-reach
           path: target/sim-reach.json
+          if-no-files-found: warn
+
+  # The large profile (docs/decisions/D277.md): 5,000-step histories with larger transactions, in
+  # four shards that run disjoint seeds from the upper half of the night's range. Each shard
+  # uploads its own reach; the marks are gated by the job above, not here, since a shard runs
+  # tens of seeds.
+  long:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["0/4", "1/4", "2/4", "3/4"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,just
+      - run: just sim-long "${SECONDS_INPUT:-1200}" "${DAY_INPUT:-$(date -u +%Y%m%d)}" "${SHARD}"
+        env:
+          SECONDS_INPUT: ${{ inputs.long_seconds }}
+          DAY_INPUT: ${{ inputs.day }}
+          SHARD: ${{ matrix.shard }}
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: sim-reach-long-${{ strategy.job-index }}
+          path: target/sim-reach-long.json
           if-no-files-found: warn

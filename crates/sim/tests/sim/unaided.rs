@@ -98,6 +98,9 @@ pub fn weights(seed: Seed) -> Weights {
     if std::env::var("LSR_SIM_NIGHTLY_LAWS").is_ok() {
         weights = weights.with_nightly_laws(seed);
     }
+    if std::env::var("LSR_SIM_LARGE").is_ok() {
+        weights = weights.with_large_sizes();
+    }
     weights.lying_wal_sync |= std::env::var("LSR_SIM_LYING_SYNC").is_ok();
     if let Ok(weight) = std::env::var("LSR_SIM_APP_IN_TICK") {
         weights.app_in_tick = weight.parse().expect("LSR_SIM_APP_IN_TICK is a weight");

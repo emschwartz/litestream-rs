@@ -224,3 +224,31 @@ fn gray_weather_draws_every_kind_and_the_default_mix_none() {
             .any(is_gray)
     );
 }
+
+#[test]
+fn the_large_sizes_scale_commits_and_leave_every_draw_in_place() {
+    let small = Weights::default();
+    let large = Weights::default().with_large_sizes();
+    let scale = large.size_scale;
+    assert!(scale > 1);
+    let mut commits = 0;
+    for n in 0..8 {
+        let (a, b) = (history(seed(n), 300, &small), history(seed(n), 300, &large));
+        assert_eq!(a.len(), b.len());
+        for (was, now) in a.iter().zip(&b) {
+            match (was, now) {
+                (Op::Commit { pages: p, grow: g }, Op::Commit { pages: q, grow: h }) => {
+                    commits += 1;
+                    assert_eq!(*q, p * scale);
+                    assert!(!g || *h, "a commit that grew still grows");
+                }
+                (Op::CommitInTick { pages: p }, Op::CommitInTick { pages: q }) => {
+                    assert_eq!(*q, p * scale);
+                }
+                (Op::Vacuum { .. }, Op::Vacuum { page_size }) => assert_eq!(*page_size, None),
+                (was, now) => assert_eq!(was, now),
+            }
+        }
+    }
+    assert!(commits > 0);
+}

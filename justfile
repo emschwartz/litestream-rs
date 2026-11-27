@@ -97,7 +97,7 @@ sim-tally seeds="200" base="1":
 
 # Runs rotating simulator seeds for the given seconds from a base seed (default: now).
 sim-soak seconds base=`date +%s`:
-    LSR_SIM_BASE_SEED={{base}} LSR_SIM_SECONDS={{seconds}} cargo nextest run --profile long --cargo-profile sim -p lsr-sim --test sim -E 'test(/^soak::/)' --run-ignored only --no-capture --locked
+    LSR_SIM_BASE_SEED={{base}} LSR_SIM_SECONDS={{seconds}} cargo nextest run --profile long --cargo-profile sim -p lsr-sim --test sim -E 'test(=soak::rotating_seeds)' --run-ignored only --no-capture --locked
 
 # The nightly rotating seed set: seeds follow from the UTC date (YYYYMMDD), a million per night,
 # so no two nights share one and a night is rerun with `just sim-nightly <seconds> <YYYYMMDD>`.
@@ -106,7 +106,14 @@ sim-soak seconds base=`date +%s`:
 # row or fault class no seed reached fails the run (crates/sim/src/marks.rs). The `long` nextest
 # profile lets a run last up to two hours (`just sim-nightly 3600`).
 sim-nightly $LSR_SIM_SECONDS="900" $LSR_SIM_DAY=`date -u +%Y%m%d`:
-    env -u LSR_SIM_BASE_SEED LSR_SIM_COMMIT="$(git rev-parse HEAD)" LSR_SIM_REACH_OUT="${LSR_SIM_REACH_OUT:-$PWD/target/sim-reach.json}" cargo nextest run --profile long --cargo-profile sim -p lsr-sim --test sim -E 'test(/^soak::/)' --run-ignored only --no-capture --locked
+    env -u LSR_SIM_BASE_SEED LSR_SIM_COMMIT="$(git rev-parse HEAD)" LSR_SIM_REACH_OUT="${LSR_SIM_REACH_OUT:-$PWD/target/sim-reach.json}" cargo nextest run --profile long --cargo-profile sim -p lsr-sim --test sim -E 'test(=soak::rotating_seeds)' --run-ignored only --no-capture --locked
+
+# The nightly's large-profile set (docs/decisions/D277.md): long histories and larger transactions
+# from the upper half of the night's seeds, one shard of n jobs: `just sim-long <seconds>
+# <YYYYMMDD> <i>/<n>`. Same rules as sim-nightly; a failing seed is printed last with its replay
+# line. The summed reach goes to target/sim-reach-long.json and is not gated.
+sim-long $LSR_SIM_SECONDS="900" $LSR_SIM_DAY=`date -u +%Y%m%d` $LSR_SIM_SHARD="0/1":
+    env -u LSR_SIM_BASE_SEED LSR_SIM_COMMIT="$(git rev-parse HEAD)" LSR_SIM_REACH_OUT="${LSR_SIM_REACH_OUT:-$PWD/target/sim-reach-long.json}" cargo nextest run --profile long --cargo-profile sim -p lsr-sim --test sim -E 'test(=soak::long_seeds)' --run-ignored only --no-capture --locked
 
 # The nightly toolchain for the sanitizer, Miri and fuzz recipes; override with LSR_NIGHTLY=nightly-YYYY-MM-DD.
 nightly := env("LSR_NIGHTLY", "nightly")
