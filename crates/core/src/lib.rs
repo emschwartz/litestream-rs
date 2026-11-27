@@ -124,8 +124,9 @@ pub use recover::{
     RecoverEvent, Recovered, Verdict, WalView, recover_traced,
 };
 pub use restore::{
-    AsOfInside, DatabaseSink, FileFault, MAX_ATTEMPTS, NoPlan, PublishFailure, PublishLeft,
-    RestoreError, RestoreOptions, Restored, SinkOp, restore, restore_with,
+    AsOfInside, DatabaseSink, FileFault, MAX_ATTEMPTS, MAX_TAIL_PLANS, NoPlan, PublishFailure,
+    PublishLeft, Replan, RestoreError, RestoreOptions, Restored, SinkOp, restore, restore_noting,
+    restore_with,
 };
 #[cfg(any(test, feature = "testing"))]
 pub use restore::{Database, MemPublishError, MemSink};

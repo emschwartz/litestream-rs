@@ -19,6 +19,18 @@
 //! a gap every attempt planned is refused as [RestoreError::NoPlan]. Every other store error ends the restore; retry
 //! with backoff belongs to a store wrapper, and core holds no timer.
 //!
+//! A file gone before any of its bytes were read, after the files before it were applied, keeps
+//! them: the sink holds exactly their verified database, so only the files after it are planned
+//! again from a fresh listing (`plan_after`) and applied on top, linked to the last kept file as
+//! any next file is. The writer's compaction replaces the files it deletes with files covering
+//! the same transactions, and the snapshot is the one file of a large database that takes long
+//! to read, so a restore whose small files are compacted while its snapshot downloads reads the
+//! snapshot once (Go starts over from it, up to three times). The rest aims at the first plan's
+//! target, an instant fixed to the transaction its plan reached; at most [MAX_TAIL_PLANS] times.
+//! A file gone part-way leaves pages no verified file vouches for, so it starts over, as does a
+//! rest that no longer reaches the target (retention removed it under a newer snapshot), on the
+//! listing that showed it. [restore_noting] hears each [Replan] as it happens.
+//!
 //! The replica's store is required to list its own writes (docs/decisions/D173.md), so the
 //! listing is the replica: no read is made past it. A restore of the newest state inside a
 //! store's listing lag can give an earlier committed state, with success; a store whose
@@ -48,7 +60,9 @@ use crate::created_at::{ResolveError, ResolvedCreatedAt, drive, resolve_counted}
 use crate::inventory::{Inventory, InventoryError, Listing, Scope};
 use crate::layout::{FileInfo, FileKey};
 use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, Next, ReadFault, check_link};
-use crate::plan::{AsOfPlanner, ContiguousChain, KeyTarget, PlanOutcome, RestoreTarget, plan};
+use crate::plan::{
+    AsOfPlanner, ContiguousChain, KeyTarget, PlanOutcome, RestoreTarget, plan, plan_after,
+};
 use crate::store::{ObjectStore, ReadLen, ReadStream, StoreError};
 
 #[cfg(any(test, feature = "testing"))]
@@ -65,6 +79,12 @@ pub use mem_sink::{Database, MemPublishError, MemSink};
 
 /// Plans attempted before the replica is called unstable.
 pub const MAX_ATTEMPTS: u8 = 3;
+
+/// Times a restore plans again only the files after the part it built
+/// ([Replan::Tail]) before the replica is called unstable. Each costs a listing and the
+/// small files after the kept part, never the snapshot, so the bound is wider than
+/// [MAX_ATTEMPTS]; it still ends a restore whose files vanish faster than it can read them.
+pub const MAX_TAIL_PLANS: u8 = 8;
 
 /// Bytes asked of the store per read: memory per file stays one chunk plus one
 /// page, whatever the file's size.
@@ -313,6 +333,38 @@ pub enum RestoreError {
     },
 }
 
+/// What a restore did when a file it planned was gone, reported as it happens
+/// ([restore_noting]) so a long restore says why it is reading again.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Replan {
+    /// `missing` was gone before any of it was read, with the database built through
+    /// transaction `kept`: the database is kept and only the files after it are planned again,
+    /// from a fresh listing.
+    Tail {
+        /// The file that was gone.
+        missing: FileKey,
+        /// The last transaction the kept database holds.
+        kept: Txid,
+    },
+    /// `missing` was gone with nothing to keep (it was the first file, or part of it was
+    /// already written): the database is emptied and the restore starts over.
+    Restart {
+        /// The file that was gone.
+        missing: FileKey,
+    },
+    /// After `missing` was gone, the files past transaction `kept` no longer lead to the
+    /// target (`outcome`), as when retention removed them under a newer snapshot: the database
+    /// is emptied and the restore starts over on the same listing.
+    NoTail {
+        /// The file that was gone.
+        missing: FileKey,
+        /// The last transaction the database held.
+        kept: Txid,
+        /// Why the files after it are no plan.
+        outcome: PlanOutcome,
+    },
+}
+
 /// A [PlanOutcome] that is not a plan: why the replica has no exact answer.
 /// Only [restore] builds one, so "no plan: here is a plan" cannot exist.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -367,7 +419,8 @@ impl Restored {
         self.commit
     }
 
-    /// Files applied in the successful attempt.
+    /// Files in the chain that built the database, the ones kept from an earlier attempt
+    /// included.
     #[must_use]
     pub const fn files(&self) -> usize {
         self.files
@@ -413,6 +466,11 @@ impl Restored {
 enum Abort {
     /// A planned file was gone: plan again.
     Vanished(FileKey),
+    /// A planned file was gone before any of it was read, after the files before it were
+    /// applied: the sink holds exactly their database, so only the rest is planned again.
+    Kept(Box<Resume>),
+    /// The files after a kept part no longer reach the target: start over on its listing.
+    NoTail(Box<TailGone>),
     /// The listing planned a gap. A listing is not a snapshot of the store: a directory
     /// read that races a writer's rename may miss a file and see a later one. Plan again
     /// on a fresh listing; a gap every attempt shows is the replica's.
@@ -428,6 +486,36 @@ impl From<RestoreError> for Abort {
 
 /// The file applied last, which fixes the page size and checksum for the next.
 type Previous<'a> = Option<&'a Verified>;
+
+/// A restore cut short after its first files, with what it needs to plan the rest.
+struct Resume {
+    /// The files applied: the sink holds the database they built and nothing else.
+    applied: ContiguousChain,
+    /// The last of them, which the next file must link to.
+    last: Verified,
+    /// The file that was gone.
+    missing: FileKey,
+    /// What the rest is planned toward: the first plan's target, an instant fixed to the
+    /// transaction its plan reached, so the answer stays the state the instant was given.
+    target: KeyTarget,
+    /// The first plan's straddling file, when it was accepted.
+    inside_file: Option<FileKey>,
+}
+
+/// Why the files after a kept part are no plan, and the listing that showed it.
+struct TailGone {
+    missing: FileKey,
+    kept: Txid,
+    outcome: PlanOutcome,
+    listing: Inventory,
+}
+
+/// An attempt that built the whole database.
+struct Applied {
+    chain: ContiguousChain,
+    last: Verified,
+    inside_file: Option<FileKey>,
+}
 
 fn sink_fault(op: SinkOp) -> impl FnOnce(io::Error) -> RestoreError {
     move |source| RestoreError::Sink { op, source }
@@ -460,12 +548,28 @@ pub async fn restore_with<S: ObjectStore, K: DatabaseSink>(
     options: RestoreOptions,
     sink: K,
 ) -> Result<Restored, RestoreError> {
-    restore_within(store, None, target, options, sink, MAX_ATTEMPTS).await
+    restore_noting(store, target, options, sink, |_| {}).await
 }
 
-/// [restore], with each reason to list again allowed `limit` attempts. Its first attempt plans over
-/// the borrowed `listed` when given instead of listing again. A retry after a vanished file always
-/// lists afresh. A caller that hands a listing is checking those files.
+/// [restore_with], calling `note` each time a planned file is gone and the restore plans again,
+/// before it reads on, so a caller can say why a long restore is reading again.
+///
+/// # Errors
+/// As [restore].
+pub async fn restore_noting<S: ObjectStore, K: DatabaseSink>(
+    store: &S,
+    target: RestoreTarget,
+    options: RestoreOptions,
+    sink: K,
+    mut note: impl FnMut(&Replan) + Send,
+) -> Result<Restored, RestoreError> {
+    restore_within(store, None, target, options, sink, MAX_ATTEMPTS, &mut note).await
+}
+
+/// [restore], with each reason to start over allowed `limit` attempts and [MAX_TAIL_PLANS] plans of
+/// the rest after a kept part. Its first attempt plans over the borrowed `listed` when given
+/// instead of listing again. A retry after a vanished file always lists afresh. A caller that
+/// hands a listing is checking those files. `note` hears each [Replan].
 pub(crate) async fn restore_within<S: ObjectStore, K: DatabaseSink>(
     store: &S,
     mut listed: Option<&Inventory>,
@@ -473,24 +577,38 @@ pub(crate) async fn restore_within<S: ObjectStore, K: DatabaseSink>(
     options: RestoreOptions,
     mut sink: K,
     limit: u8,
+    note: &mut (dyn FnMut(&Replan) + Send),
 ) -> Result<Restored, RestoreError> {
     let mut attempt = 1_u8;
     let mut bytes_read = 0_u64;
     let mut created_at_read = 0_u64;
     let mut retries = Retries::new(limit);
+    let mut resume: Option<Box<Resume>> = None;
+    let mut relisted: Option<Inventory> = None;
     loop {
-        let applied = attempt_once(
-            store,
-            listed.take(),
-            target,
-            options,
-            &mut sink,
-            &mut bytes_read,
-            &mut created_at_read,
-        )
-        .await;
+        let fresh = relisted.take();
+        let given = fresh.as_ref().or(listed.take());
+        let applied = match resume.take() {
+            Some(resume) => attempt_tail(store, *resume, &mut sink, &mut bytes_read).await,
+            None => {
+                attempt_once(
+                    store,
+                    given,
+                    target,
+                    options,
+                    &mut sink,
+                    &mut bytes_read,
+                    &mut created_at_read,
+                )
+                .await
+            }
+        };
         match applied {
-            Ok((chain, last, inside_file)) => {
+            Ok(Applied {
+                chain,
+                last,
+                inside_file,
+            }) => {
                 verify_end_state(&mut sink, &last)?;
                 sink.publish().map_err(|err| RestoreError::Publish {
                     left: err.left(),
@@ -510,28 +628,52 @@ pub(crate) async fn restore_within<S: ObjectStore, K: DatabaseSink>(
                 });
             }
             Err(Abort::Fatal(err)) => return Err(err),
-            Err(abort) => {
-                // A gap stops the plan before the first file: nothing to reset.
-                let applied_nothing = matches!(abort, Abort::Gap(_));
-                retries.after(abort, attempt)?;
-                if !applied_nothing {
-                    sink.reset().map_err(sink_fault(SinkOp::Reset))?;
-                }
-                attempt = attempt.saturating_add(1);
+            Err(Abort::Kept(kept)) => {
+                retries.tail(kept.missing, attempt)?;
+                note(&Replan::Tail {
+                    missing: kept.missing,
+                    kept: kept.applied.reaches(),
+                });
+                resume = Some(kept);
             }
+            Err(Abort::NoTail(gone)) => {
+                let TailGone {
+                    missing,
+                    kept,
+                    outcome,
+                    listing,
+                } = *gone;
+                retries.vanished(missing, attempt)?;
+                note(&Replan::NoTail {
+                    missing,
+                    kept,
+                    outcome,
+                });
+                sink.reset().map_err(sink_fault(SinkOp::Reset))?;
+                relisted = Some(listing);
+            }
+            Err(Abort::Vanished(missing)) => {
+                retries.vanished(missing, attempt)?;
+                note(&Replan::Restart { missing });
+                sink.reset().map_err(sink_fault(SinkOp::Reset))?;
+            }
+            // A gap stops the plan before the first file: nothing to reset.
+            Err(Abort::Gap(outcome)) => retries.gap(outcome)?,
         }
+        attempt = attempt.saturating_add(1);
     }
 }
 
 /// Why a restore listed again, counted toward the limits on each reason.
 struct Retries {
-    /// Attempts each reason is allowed: [MAX_ATTEMPTS], or one for a caller that retries
-    /// itself.
+    /// Starts over each reason is allowed: [MAX_ATTEMPTS].
     limit: u8,
-    /// Attempts that found a planned file gone.
+    /// Starts over after a planned file was gone.
     vanished: u8,
     /// Attempts whose listing planned a gap.
     gaps: u8,
+    /// Plans of the rest after a kept part.
+    tails: u8,
 }
 
 impl Retries {
@@ -540,32 +682,42 @@ impl Retries {
             limit,
             vanished: 0,
             gaps: 0,
+            tails: 0,
         }
     }
 
-    /// Counts `abort`, made by attempt `attempt`, or fails when its reason is exhausted.
-    fn after(&mut self, abort: Abort, attempt: u8) -> Result<(), RestoreError> {
-        match abort {
-            Abort::Fatal(err) => Err(err),
-            Abort::Vanished(missing) => {
-                self.vanished = self.vanished.saturating_add(1);
-                if self.vanished >= self.limit {
-                    return Err(RestoreError::Unstable {
-                        attempts: attempt,
-                        missing,
-                    });
-                }
-                Ok(())
-            }
-            Abort::Gap(outcome) => {
-                self.gaps = self.gaps.saturating_add(1);
-                if self.gaps >= self.limit {
-                    return Err(RestoreError::NoPlan(NoPlan(outcome)));
-                }
-                Ok(())
-            }
-        }
+    /// Counts one start over after `missing` was gone in attempt `attempt`, or fails when
+    /// they are exhausted.
+    fn vanished(&mut self, missing: FileKey, attempt: u8) -> Result<(), RestoreError> {
+        self.vanished = self.vanished.saturating_add(1);
+        exhausted(self.vanished, self.limit, missing, attempt)
     }
+
+    /// Counts one plan of the rest after `missing` was gone in attempt `attempt`.
+    fn tail(&mut self, missing: FileKey, attempt: u8) -> Result<(), RestoreError> {
+        self.tails = self.tails.saturating_add(1);
+        exhausted(self.tails, MAX_TAIL_PLANS, missing, attempt)
+    }
+
+    /// Counts one listing that planned a gap.
+    fn gap(&mut self, outcome: PlanOutcome) -> Result<(), RestoreError> {
+        self.gaps = self.gaps.saturating_add(1);
+        if self.gaps >= self.limit {
+            return Err(RestoreError::NoPlan(NoPlan(outcome)));
+        }
+        Ok(())
+    }
+}
+
+/// [RestoreError::Unstable] once `count` vanished files reach `limit`.
+fn exhausted(count: u8, limit: u8, missing: FileKey, attempt: u8) -> Result<(), RestoreError> {
+    if count >= limit {
+        return Err(RestoreError::Unstable {
+            attempts: attempt,
+            missing,
+        });
+    }
+    Ok(())
 }
 
 /// One listing, one plan and the chain applied, or why not.
@@ -577,7 +729,7 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
     sink: &mut K,
     bytes_read: &mut u64,
     created_at_read: &mut u64,
-) -> Result<(ContiguousChain, Verified, Option<FileKey>), Abort> {
+) -> Result<Applied, Abort> {
     let planned = match (given, target) {
         (Some(inventory), _) => plan_target(store, inventory, target, created_at_read).await?,
         (None, RestoreTarget::AsOf(instant)) => {
@@ -600,8 +752,55 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
         Err(gap @ PlanOutcome::Gap { .. }) => return Err(Abort::Gap(gap)),
         Err(other) => return Err(RestoreError::NoPlan(NoPlan(other)).into()),
     };
-    let last = apply_chain(store, &chain, sink, bytes_read).await?;
-    Ok((chain, last, inside_file))
+    let rest = match target {
+        RestoreTarget::Latest => KeyTarget::Latest,
+        RestoreTarget::Txid(txid) => KeyTarget::Txid(txid),
+        RestoreTarget::AsOf(_) => KeyTarget::Txid(chain.reaches()),
+    };
+    apply_chain(store, chain, None, rest, inside_file, sink, bytes_read).await
+}
+
+/// The rest of a restore cut short after a kept part: a fresh listing, a plan of the files after
+/// the part, and those files applied on top of it.
+async fn attempt_tail<S: ObjectStore, K: DatabaseSink>(
+    store: &S,
+    resume: Resume,
+    sink: &mut K,
+    bytes_read: &mut u64,
+) -> Result<Applied, Abort> {
+    let listing = Inventory::load(store)
+        .await
+        .map_err(RestoreError::Inventory)?;
+    let Resume {
+        applied,
+        last,
+        missing,
+        target,
+        inside_file,
+    } = resume;
+    let kept = applied.reaches();
+    let done = applied.files().len();
+    let chain = match plan_after(&listing, applied, target).into_chain() {
+        Ok(chain) => chain,
+        Err(outcome) => {
+            return Err(Abort::NoTail(Box::new(TailGone {
+                missing,
+                kept,
+                outcome,
+                listing,
+            })));
+        }
+    };
+    apply_chain(
+        store,
+        chain,
+        Some((done, last)),
+        target,
+        inside_file,
+        sink,
+        bytes_read,
+    )
+    .await
 }
 
 /// The plan for [target]: an instant asks for the created-at times it needs, counted
@@ -683,19 +882,53 @@ fn verify_end_state<K: DatabaseSink>(sink: &mut K, last: &Verified) -> Result<()
     }
 }
 
+/// Applies `chain` into `sink`, from its first file, or after the `kept` files already applied
+/// with the last of them. A file gone before any of it was read, after the first, ends the attempt
+/// with the files before it kept ([Abort::Kept]), planned on toward `rest`.
 async fn apply_chain<S: ObjectStore, K: DatabaseSink>(
     store: &S,
-    chain: &ContiguousChain,
+    chain: ContiguousChain,
+    kept: Option<(usize, Verified)>,
+    rest: KeyTarget,
+    inside_file: Option<FileKey>,
     sink: &mut K,
     bytes_read: &mut u64,
-) -> Result<Verified, Abort> {
-    let mut last = apply_file(store, chain.snapshot(), None, sink, bytes_read).await?;
-    for info in chain.files().iter().skip(1) {
-        last = apply_file(store, info, Some(&last), sink, bytes_read).await?;
+) -> Result<Applied, Abort> {
+    let (done, mut last) = match kept {
+        Some(kept) => kept,
+        None => (
+            1,
+            apply_file(store, chain.snapshot(), None, sink, bytes_read).await?,
+        ),
+    };
+    for (index, info) in chain.files().iter().enumerate().skip(done) {
+        let before = *bytes_read;
+        match apply_file(store, info, Some(&last), sink, bytes_read).await {
+            Ok(verified) => last = verified,
+            // Nothing of the missing file reached the sink, which holds exactly the files
+            // before it; a file gone part-way leaves pages no file vouches for.
+            Err(Abort::Vanished(missing)) if *bytes_read == before => {
+                let Some(applied) = chain.first(index) else {
+                    return Err(Abort::Vanished(missing));
+                };
+                return Err(Abort::Kept(Box::new(Resume {
+                    applied,
+                    last,
+                    missing,
+                    target: rest,
+                    inside_file,
+                })));
+            }
+            Err(abort) => return Err(abort),
+        }
     }
     let key = chain.files().last().map_or(chain.snapshot().key, |f| f.key);
     not_empty(key, &last)?;
-    Ok(last)
+    Ok(Applied {
+        chain,
+        last,
+        inside_file,
+    })
 }
 
 /// A chain whose last file, `key`, leaves no database is refused.
@@ -906,6 +1139,14 @@ fn once(abort: Abort) -> RestoreError {
         Abort::Vanished(missing) => RestoreError::Unstable {
             attempts: 1,
             missing,
+        },
+        Abort::NoTail(gone) => RestoreError::Unstable {
+            attempts: 1,
+            missing: gone.missing,
+        },
+        Abort::Kept(resume) => RestoreError::Unstable {
+            attempts: 1,
+            missing: resume.missing,
         },
         Abort::Gap(outcome) => RestoreError::NoPlan(NoPlan(outcome)),
     }
