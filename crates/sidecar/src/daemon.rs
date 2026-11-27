@@ -853,7 +853,7 @@ mod tests {
     }
 
     /// An S3 replica logs the most memory one buffered upload may hold, so a large part size
-    /// or concurrency is visible when the daemon starts (`docs/decisions/D307.md`).
+    /// or concurrency is visible when the daemon starts (`docs/decisions/D309.md`).
     #[test]
     fn an_s3_replica_logs_what_a_buffered_upload_may_hold() {
         let lines = Lines::default();

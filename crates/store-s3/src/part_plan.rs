@@ -17,7 +17,7 @@
 //!
 //! Memory: an upload that buffers its parts (one with no file behind it, `upload.rs`) holds
 //! the `concurrency` parts it has in flight and one more, as Go's uploader does: `part size x
-//! (concurrency + 1)`, with no further cap (`docs/decisions/D307.md`). The sidecar logs that
+//! (concurrency + 1)`, with no further cap (`docs/decisions/D309.md`). The sidecar logs that
 //! figure for each S3 replica at startup. The upload of a staged file holds no part.
 //!
 //! [`ObjectStore::begin_sized_upload`]: lsr_core::ObjectStore::begin_sized_upload

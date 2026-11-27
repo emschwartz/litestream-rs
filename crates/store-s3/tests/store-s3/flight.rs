@@ -493,7 +493,7 @@ fn an_upload_that_holds_its_parts_holds_those_in_flight_and_one_more() {
 }
 
 /// The setting is the count, whatever the part size: 100 MiB parts and a concurrency of 2 have
-/// two parts in flight, not one (`docs/decisions/D307.md`). The memory is the parts in flight
+/// two parts in flight, not one (`docs/decisions/D309.md`). The memory is the parts in flight
 /// and one more.
 #[test]
 fn large_parts_still_have_the_configured_number_in_flight() {

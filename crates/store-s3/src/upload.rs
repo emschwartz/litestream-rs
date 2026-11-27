@@ -26,7 +26,7 @@
 //! **Parts that hold their bytes.** A part written with [`Upload::write`] is a buffer, so
 //! the upload holds `concurrency` parts in flight and one more, filling or waiting: no byte goes
 //! into a new buffer while a whole part still waits, so `part size x (concurrency + 1)` is the
-//! most it holds, as in Go (`docs/decisions/D307.md`).
+//! most it holds, as in Go (`docs/decisions/D309.md`).
 //!
 //! **Parts written from a source.** An upload whose first write is [`Upload::write_from`]
 //! keeps no part buffer: of each part it keeps what was seen of every 256 KiB and a reader of

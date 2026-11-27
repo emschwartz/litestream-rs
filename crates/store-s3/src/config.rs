@@ -455,7 +455,7 @@ impl S3Config {
     /// Memory: an upload of a staged file holds no part, each is read from the
     /// file as it is sent. An upload with no file behind it holds the parts in
     /// flight and one more ([`Self::max_buffered`]), with no cap but the two
-    /// settings (`docs/decisions/D307.md`).
+    /// settings (`docs/decisions/D309.md`).
     #[must_use]
     pub fn with_concurrency(mut self, concurrency: NonZeroUsize) -> Self {
         self.concurrency = Some(concurrency);
