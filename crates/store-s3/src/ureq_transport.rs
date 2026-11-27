@@ -302,6 +302,14 @@ impl Transport for UreqTransport {
         self.exchange(self.capped(request, cap), false)
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a lane is a thread of its own and the pause is its wait between two tries of a part"
+    )]
+    fn pause(&self, wait: Duration) {
+        std::thread::sleep(wait);
+    }
+
     fn lanes(&self, most: NonZeroUsize) -> Arc<dyn Lanes> {
         Arc::new(Sender::new(most))
     }

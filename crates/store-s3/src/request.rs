@@ -15,6 +15,7 @@
 //! and, for temporary credentials, the session token.
 
 use std::fmt;
+use std::sync::Arc;
 
 use lsr_core::{FileKey, Level, PageLimit, PartNumber, ReadLen};
 use lsr_ltx::{Timestamp, TxidRange};
@@ -69,7 +70,8 @@ pub struct HttpRequest {
     method: Method,
     url: Url,
     headers: Vec<(&'static str, String)>,
-    body: Vec<u8>,
+    /// Shared so a part held for a second try is lent to its request and comes back (upload.rs).
+    body: Arc<Vec<u8>>,
 }
 
 impl HttpRequest {
@@ -84,7 +86,7 @@ impl HttpRequest {
             method,
             url,
             headers,
-            body,
+            body: Arc::new(body),
         }
     }
 
@@ -107,7 +109,7 @@ impl HttpRequest {
             method,
             url,
             headers,
-            body: Vec::new(),
+            body: Arc::default(),
         }
     }
 
@@ -153,8 +155,8 @@ impl HttpRequest {
 
     /// Gives a request built without its body the body read for it
     /// ([`StreamedRequest::into_buffered`](crate::StreamedRequest::into_buffered)).
-    pub(crate) fn set_body(&mut self, body: Vec<u8>) {
-        self.body = body;
+    pub(crate) fn set_body(&mut self, body: impl Into<Arc<Vec<u8>>>) {
+        self.body = body.into();
     }
 }
 
@@ -380,7 +382,7 @@ impl RequestBuilder {
             method,
             url,
             headers: all,
-            body,
+            body: body.into(),
         })
     }
 

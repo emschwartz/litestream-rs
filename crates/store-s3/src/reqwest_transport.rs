@@ -294,6 +294,14 @@ impl Transport for ReqwestTransport {
         self.driver.drive(exchange)
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a lane is a thread of its own and the pause is its wait between two tries of a part"
+    )]
+    fn pause(&self, wait: Duration) {
+        std::thread::sleep(wait);
+    }
+
     /// Each sender thread drives its own request with `block_on`, as the replicator thread
     /// does. A part's body is read whole before it is sent (the trait's default).
     fn lanes(&self, most: NonZeroUsize) -> Arc<dyn Lanes> {

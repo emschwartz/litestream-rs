@@ -111,6 +111,14 @@ fn reset() -> Fault {
     }
 }
 
+/// Pushes a reset for each of the eight tries a part gets, so the one request that meets them
+/// fails for good.
+fn keep_failing(wire: &FaultTransport<FakeS3>) {
+    for _ in 0..8 {
+        wire.push(reset());
+    }
+}
+
 fn was_reset() -> StoreError {
     StoreError::Transient {
         op: StoreOp::Upload,
@@ -226,7 +234,7 @@ fn a_part_that_fails_with_others_in_flight_ends_the_upload_and_the_rest_are_not_
     let bytes = body(4 * PART);
     let source = Source::of(&bytes);
     let mut upload = rig.started(&bytes, &source, 4);
-    rig.wire.push(reset());
+    keep_failing(&rig.wire);
     // The second part is the one whose request is reset.
     assert!(rig.lanes.land(1));
     assert_eq!(block_on(upload.flight(Rest::More)), Err(was_reset()));
@@ -240,7 +248,11 @@ fn a_part_that_fails_with_others_in_flight_ends_the_upload_and_the_rest_are_not_
     let reads = source.reads();
     block_on(upload.abort()).unwrap();
     assert_eq!(rig.lanes.started(), 0, "the abort waited for every part");
-    assert_eq!(rig.parts_sent(), 1, "the rest were not sent");
+    assert_eq!(
+        rig.parts_sent(),
+        8,
+        "the failed part's tries; the rest were not sent"
+    );
     assert_eq!(source.reads(), reads, "nor read");
     assert_eq!(count(&rig.wire, Shape::Abort), 0);
     assert_eq!(rig.store.pending_orphans(), 1);
@@ -256,10 +268,10 @@ fn a_commit_that_meets_a_failed_part_waits_for_the_rest_and_completes_nothing() 
     let bytes = body(3 * PART);
     let source = Source::of(&bytes);
     let upload = rig.started(&bytes, &source, 3);
-    rig.wire.push(reset());
+    keep_failing(&rig.wire);
     assert_eq!(block_on(upload.commit()), Err(was_reset()));
     assert_eq!(rig.lanes.started(), 0);
-    assert_eq!(rig.parts_sent(), 1);
+    assert_eq!(rig.parts_sent(), 8, "the failed part's tries, then nothing");
     assert_eq!(count(&rig.wire, Shape::Complete), 0);
     assert_eq!(rig.stored(), None);
     assert_eq!(rig.store.pending_orphans(), 1);
@@ -411,7 +423,7 @@ fn a_last_part_that_fails_is_the_answer_to_whether_all_landed() {
     block_on(upload.write_from(&bytes[PART..], &source)).unwrap();
     assert!(rig.lanes.land(0));
     assert_eq!(block_on(upload.flight(Rest::None)), Ok(Flight::Room));
-    rig.wire.push(reset());
+    keep_failing(&rig.wire);
     assert!(rig.lanes.land(0));
     assert_eq!(block_on(upload.flight(Rest::None)), Err(was_reset()));
     assert_eq!(rig.stored(), None);

@@ -3,7 +3,9 @@
 //! Every method is an `async` block around blocking sends and never yields, as
 //! `FsStore` does; the trait allows it. A request is built sans-IO by the
 //! `RequestBuilder`, sent, then judged by `classify`, so what a status or code
-//! means is decided in one place. The store never retries.
+//! means is decided in one place. The store never retries a request, except that the thread
+//! sending a part of a multipart upload sends it again on a failure worth repeating
+//! (`upload.rs`).
 //!
 //! Batches: a call that needs several independent requests (the levels of a listing, a
 //! set of created-at times) builds them all, hands them to [`Transport::send_many`] with the
@@ -534,6 +536,11 @@ impl<T: Transport> Inner<T> {
         self.transport
             .send(request)
             .map_err(|err| classify_transport(op, &err))
+    }
+
+    /// Waits `wait` before a part is sent again (`Transport::pause`).
+    pub(crate) fn pause(&self, wait: Duration) {
+        self.transport.pause(wait);
     }
 
     /// How many requests of `kind` go out at once: the one answer both the planner

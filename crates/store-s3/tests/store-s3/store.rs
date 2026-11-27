@@ -708,12 +708,14 @@ mod cases {
     #[test]
     fn a_failed_part_leaves_its_id_for_the_next_begin_to_abort() {
         let h = FakeHarness::new();
-        h.wire.push(Fault::Status {
-            on: Shape::UploadPart,
-            status: 500,
-            code: Some("InternalError"),
-            retry_after: None,
-        });
+        for _ in 0..8 {
+            h.wire.push(Fault::Status {
+                on: Shape::UploadPart,
+                status: 500,
+                code: Some("InternalError"),
+                retry_after: None,
+            });
+        }
         let err = write_all(&h.store, &key(0, 1, 1), &body(PART), PART).unwrap_err();
         assert!(matches!(err, StoreError::Transient { .. }), "{err:?}");
         assert_eq!(h.store.pending_orphans(), 1);
@@ -923,8 +925,10 @@ mod cases {
         assert_eq!(wire.inner().open_uploads(), 0);
     }
 
+    /// A buffered part is held until its request succeeds, so a request that fails once is sent
+    /// again with the same bytes: the upload completes with one extra UploadPart and no restart.
     #[test]
-    fn a_failed_part_fails_the_upload_and_orphans_its_id() {
+    fn a_buffered_part_that_fails_once_is_sent_again_and_the_upload_completes() {
         let (wire, store) = store_with(3);
         wire.push(Fault::Pass {
             on: Shape::UploadPart,
@@ -935,12 +939,42 @@ mod cases {
             code: Some("InternalError"),
             retry_after: None,
         });
+        let bytes = body(PART * 5);
+        write_all(&store, &key(0, 1, 1), &bytes, PART).unwrap();
+        assert_eq!(
+            count(&wire, Shape::UploadPart),
+            6,
+            "five parts and one again"
+        );
+        assert_eq!(count(&wire, Shape::CreateMultipart), 1, "no restart");
+        assert_eq!(count(&wire, Shape::Complete), 1);
+        assert_eq!(wire.pauses(), [Duration::from_millis(100)]);
+        let stored = wire
+            .inner()
+            .body_of(&object_key(config().prefix(), &key(0, 1, 1)));
+        assert_eq!(stored.as_deref(), Some(&bytes[..]));
+    }
+
+    #[test]
+    fn a_failed_part_fails_the_upload_and_orphans_its_id() {
+        let (wire, store) = store_with(3);
+        wire.push(Fault::Pass {
+            on: Shape::UploadPart,
+        });
+        for _ in 0..8 {
+            wire.push(Fault::Status {
+                on: Shape::UploadPart,
+                status: 500,
+                code: Some("InternalError"),
+                retry_after: None,
+            });
+        }
         let err = write_all(&store, &key(0, 1, 1), &body(PART * 5), PART).unwrap_err();
         assert!(matches!(err, StoreError::Transient { .. }), "{err:?}");
         assert_eq!(
             count(&wire, Shape::UploadPart),
-            2,
-            "the part that failed, then nothing"
+            9,
+            "the first part, then the second part's eight tries, then nothing"
         );
         assert_eq!(count(&wire, Shape::Complete), 0);
         assert_eq!(store.pending_orphans(), 1);
