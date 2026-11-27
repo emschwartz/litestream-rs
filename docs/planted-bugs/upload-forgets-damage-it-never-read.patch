@@ -1,12 +1,12 @@
 --- a/crates/sim/src/forcing.rs
 +++ b/crates/sim/src/forcing.rs
-@@ -389,8 +389,7 @@
-         // for its cause. Asked last, and only of an upload that would otherwise have caught
-         // up: it reads every staged file and its copy.
-         let caught_up = !left_behind
--            && took.is_some_and(|took| newest_staged.is_none_or(|newest| took >= newest))
+@@ -405,8 +405,7 @@
+             && newest_kept
+             && took
+                 .zip(newest_staged)
+-                .is_some_and(|(took, newest)| took >= newest)
 -            && !world.staged_differs_from_replica();
-+            && took.is_some_and(|took| newest_staged.is_none_or(|newest| took >= newest));
++                .is_some_and(|(took, newest)| took >= newest);
          let staged = self.take_staging(staging, world, reach)?;
          let grew = self.snapshots.take_counts(counts, &self.window, reach)?;
          let checkable = ended && !self.in_tick.contains(&Forcing::StagingFault);
