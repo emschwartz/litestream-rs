@@ -1,11 +1,11 @@
 diff --git a/crates/store-s3/src/ureq_transport.rs b/crates/store-s3/src/ureq_transport.rs
-index c60f0a1cc..0793b243b 100644
+index 2d544d9b8..95b76c51a 100644
 --- a/crates/store-s3/src/ureq_transport.rs
 +++ b/crates/store-s3/src/ureq_transport.rs
-@@ -197,7 +197,7 @@ fn read_body(
+@@ -204,7 +204,7 @@ fn read_body(
+     bounds: Bounds,
  ) -> Result<Vec<u8>, TransportError> {
-     let allowed = bounds.cap(expected);
-     let began = std::time::Instant::now();
+     let cap = BodyCap::start(bounds, expected);
 -    let mut body = Vec::with_capacity(usize::try_from(expected).unwrap_or(0));
 +    let mut body = Vec::new();
      let mut reader = response.body_mut().with_config().limit(MAX_BODY).reader();
