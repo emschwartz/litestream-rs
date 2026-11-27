@@ -40,6 +40,7 @@ native-tls = ["reqwest", "dep:native-tls", "reqwest/native-tls"]
 lsr-core.workspace = true
 lsr-ltx.workspace = true
 base64.workspace = true
+hmac.workspace = true
 jiff.workspace = true
 md-5 = { workspace = true, optional = true }
 # FakeS3 decodes listed keys.

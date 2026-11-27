@@ -5,10 +5,11 @@
 //! in flight with `XAmzContentSHA256Mismatch`. The steps are the ones AWS documents: a
 //! canonical request (method, path as sent, the sorted query, the signed headers, the payload
 //! hash), a string to sign over its SHA-256, and an HMAC chain from the secret through the
-//! day, region and service. HMAC-SHA-256 (RFC 2104) is written here over the `sha2` crate,
-//! which picks the CPU's SHA instructions at run time (SHA-NI on x86-64, the `sha2`
-//! extension on aarch64). The tests are AWS's own signature examples and RFC 4231's vectors.
+//! day, region and service. HMAC-SHA-256 is the `hmac` crate over `sha2`, which picks the
+//! CPU's SHA instructions at run time (SHA-NI on x86-64, the `sha2` extension on aarch64).
+//! The tests are AWS's own signature examples.
 
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use sha2::{Digest as _, Sha256};
 use url::Url;
 
@@ -46,26 +47,15 @@ impl PayloadHash {
     }
 }
 
-/// HMAC-SHA-256 (RFC 2104).
+/// HMAC-SHA-256.
+#[expect(
+    clippy::expect_used,
+    reason = "HMAC takes a key of any length (RFC 2104), so new_from_slice never fails"
+)]
 fn hmac(key: &[u8], data: &[u8]) -> [u8; 32] {
-    let mut block = [0_u8; 64];
-    let hashed: [u8; 32];
-    let key = if key.len() > block.len() {
-        hashed = Sha256::digest(key).into();
-        hashed.as_slice()
-    } else {
-        key
-    };
-    for (to, from) in block.iter_mut().zip(key) {
-        *to = *from;
-    }
-    let mut inner = Sha256::new();
-    inner.update(block.map(|byte| byte ^ 0x36));
-    inner.update(data);
-    let mut outer = Sha256::new();
-    outer.update(block.map(|byte| byte ^ 0x5c));
-    outer.update(inner.finalize());
-    outer.finalize().into()
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC takes any key length");
+    mac.update(data);
+    mac.finalize().into_bytes().into()
 }
 
 /// RFC 3986 percent-encoding of all but the unreserved characters, as SigV4 encodes a query.
@@ -254,47 +244,6 @@ mod tests {
         assert_eq!(
             canonical_query(&[("b", "x y/+~"), ("a", ""), ("a-b_c.d", "é")]),
             "a=&a-b_c.d=%C3%A9&b=x%20y%2F%2B~"
-        );
-    }
-
-    /// RFC 4231 test cases 1, 2, 4, 6 and 7: a short key, a key below the block size, a
-    /// block-sized key and two keys longer than a block (hashed first).
-    #[test]
-    fn hmac_matches_rfc_4231() {
-        let cases: [(Vec<u8>, &[u8], &str); 5] = [
-            (
-                vec![0x0b; 20],
-                b"Hi There",
-                "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
-            ),
-            (
-                b"Jefe".to_vec(),
-                b"what do ya want for nothing?",
-                "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
-            ),
-            (
-                (1..=25).collect(),
-                &[0xcd; 50],
-                "82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b",
-            ),
-            (
-                vec![0xaa; 131],
-                b"Test Using Larger Than Block-Size Key - Hash Key First",
-                "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54",
-            ),
-            (
-                vec![0xaa; 131],
-                b"This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm.",
-                "9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2",
-            ),
-        ];
-        for (key, data, want) in cases {
-            assert_eq!(hex(&hmac(&key, data)), want);
-        }
-        // A key of exactly one block is used as it is, not hashed.
-        assert_ne!(
-            hex(&hmac(&[0xaa; 64], b"x")),
-            hex(&hmac(&Sha256::digest([0xaa; 64]), b"x"))
         );
     }
 }
