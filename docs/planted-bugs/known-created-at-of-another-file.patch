@@ -1,12 +1,20 @@
 diff --git a/crates/core/src/created_at.rs b/crates/core/src/created_at.rs
+index 21c5975be..83ee1ac98 100644
 --- a/crates/core/src/created_at.rs
 +++ b/crates/core/src/created_at.rs
-@@ -91,7 +91,7 @@ impl Known {
-                 .get(&info.key.level())?
-                 .get(&info.key.range().max())
-         }?;
+@@ -90,7 +90,7 @@ impl Known {
+             .levels
+             .get(&info.key.level())?
+             .get(&info.key.range().max())?;
 -        if known.key == info.key && known.size == info.size {
 +        if true {
              known.created_at()
          } else {
              None
+@@ -781,4 +781,4 @@ mod tests {
+         assert_eq!(got.created_at_read, 3);
+         assert!(store.batches.lock().unwrap().is_empty());
+     }
+-}
++}
+\ No newline at end of file
