@@ -192,6 +192,10 @@ impl Checkpointer for SideCheckpointer {
         self.0.checkpoint(mode)
     }
 
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError> {
+        self.0.renew_read()
+    }
+
     fn bump_seq(&mut self) -> Result<(), SourceError> {
         self.0.bump_seq()
     }
