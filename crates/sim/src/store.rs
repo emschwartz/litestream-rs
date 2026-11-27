@@ -164,7 +164,7 @@ struct FaultState {
     // Objects a flipped byte reached on a read, once per such read.
     flipped: Vec<FileKey>,
     // Reads, listings and created-at times one batch may hold.
-    widths: [NonZeroUsize; 2],
+    widths: [NonZeroUsize; 3],
     // Batch calls that held more than one item.
     batched: u32,
     // Where a hung call's wait goes, and how long the client waits before it gives up.
@@ -469,7 +469,7 @@ impl<S> Faults<S> {
             deleting: Vec::new(),
             flipped: Vec::new(),
             rejected: Vec::new(),
-            widths: [NonZeroUsize::MIN; 2],
+            widths: [NonZeroUsize::MIN; 3],
             batched: 0,
             hang: None,
             hung: 0,
@@ -554,6 +554,7 @@ const fn width_slot(kind: BatchKind) -> usize {
     match kind {
         BatchKind::Lists => 0,
         BatchKind::ResolvedCreatedAt => 1,
+        BatchKind::Spans => 2,
     }
 }
 

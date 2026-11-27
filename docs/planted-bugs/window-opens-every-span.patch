@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/restore/window.rs b/crates/core/src/restore/window.rs
+--- a/crates/core/src/restore/window.rs
++++ b/crates/core/src/restore/window.rs
+@@ -79,7 +79,7 @@
+ 
+     /// Opens spans until `width` are open or the last one is.
+     fn fill(&mut self) {
+-        while self.open.len() < self.width && self.next < self.size {
++        while self.width > 0 && self.next < self.size {
+             let start = self.next;
+             let end = start.saturating_add(self.span);
+             if end >= self.size {

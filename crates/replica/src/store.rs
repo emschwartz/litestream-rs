@@ -48,6 +48,9 @@ pub trait DynStore: Send + Sync {
     /// [`ObjectStore::read_stream`].
     fn read_stream_dyn(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_>;
 
+    /// [`ObjectStore::read_span`].
+    fn read_span_dyn(&self, key: FileKey, start: u64, end: u64) -> Box<dyn ReadStream + '_>;
+
     /// [`ObjectStore::hold_stream`].
     fn hold_stream_boxed(
         &self,
@@ -125,6 +128,10 @@ where
 
     fn read_stream_dyn(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
         self.read_stream(key, offset)
+    }
+
+    fn read_span_dyn(&self, key: FileKey, start: u64, end: u64) -> Box<dyn ReadStream + '_> {
+        self.read_span(key, start, end)
     }
 
     fn hold_stream_boxed(
@@ -221,6 +228,10 @@ where
 
     fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
         self.0.read_stream_dyn(key, offset)
+    }
+
+    fn read_span(&self, key: FileKey, start: u64, end: u64) -> Box<dyn ReadStream + '_> {
+        self.0.read_span_dyn(key, start, end)
     }
 
     async fn hold_stream(
@@ -497,6 +508,16 @@ impl ObjectStore for Metered {
         self.meters.read.calls.fetch_add(1, Ordering::Relaxed);
         Box::new(MeteredStream {
             inner: self.store.read_stream_dyn(key, offset),
+            meters: Arc::clone(&self.meters),
+            clock: Arc::clone(&self.clock),
+        })
+    }
+
+    /// Counted as [`Self::read_stream`] is: one call, as for the one request a span is.
+    fn read_span(&self, key: FileKey, start: u64, end: u64) -> Box<dyn ReadStream + '_> {
+        self.meters.read.calls.fetch_add(1, Ordering::Relaxed);
+        Box::new(MeteredStream {
+            inner: self.store.read_span_dyn(key, start, end),
             meters: Arc::clone(&self.meters),
             clock: Arc::clone(&self.clock),
         })

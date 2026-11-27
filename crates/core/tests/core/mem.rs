@@ -35,10 +35,10 @@ use crate::heap::{Counting, Peak, peak_of};
 use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    AsOfPlanner, CreatedAt, DatabaseSink, FakeWal, FileInfo, FileKey, Inventory, KeyTarget, Level,
-    ListedTime, Listing, ObjectStore, PageChecksumTable, PageLimit, PageSource, PlanOutcome,
-    ReadLen, RestoreTarget, SourceError, Step, StepEnd, StoreError, SyncConfig, Synced, Upload,
-    build_listing, plan, restore, sync_step,
+    AsOfPlanner, BatchKind, CreatedAt, DatabaseSink, FakeWal, FileInfo, FileKey, Inventory,
+    KeyTarget, Level, ListedTime, Listing, ObjectStore, PageChecksumTable, PageLimit, PageSource,
+    PlanOutcome, ReadLen, ReadStream, RestoreTarget, SourceError, Step, StepEnd, StoreError,
+    SyncConfig, Synced, Upload, build_listing, plan, restore, sync_step,
 };
 use lsr_ltx::{
     DbChecksum, DbPages, Encoder, Header, HeaderFields, PageNo, PageRef, PageSize, Timestamp, Txid,
@@ -143,6 +143,10 @@ pub struct Spool {
     _dir: tempfile::TempDir,
     files: Vec<(FileInfo, File)>,
     pages: u64,
+    /// Spans of one file read at once ([`BatchKind::Spans`]), one unless set.
+    spans: usize,
+    /// Spans opened.
+    opened: AtomicU64,
 }
 
 impl Spool {
@@ -177,7 +181,15 @@ impl Spool {
             _dir: dir,
             files,
             pages: written,
+            spans: 1,
+            opened: AtomicU64::new(0),
         }
+    }
+
+    /// The same replica read up to `spans` spans of a file at once.
+    pub fn with_spans(mut self, spans: usize) -> Self {
+        self.spans = spans;
+        self
     }
 
     /// Pages in every file together: what a restore of the whole chain writes.
@@ -219,8 +231,47 @@ impl Upload for NoUpload {
     }
 }
 
+/// A span of a [`Spool`] file, one read a piece.
+struct SpoolSpan<'a> {
+    spool: &'a Spool,
+    key: FileKey,
+    at: u64,
+    end: u64,
+}
+
+impl ReadStream for SpoolSpan<'_> {
+    fn next(&mut self, len: ReadLen) -> lsr_core::BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move {
+            let left = u32::try_from(self.end.saturating_sub(self.at).min(len.get())).unwrap();
+            let Some(len) = ReadLen::new(left) else {
+                return Ok(Vec::new());
+            };
+            let bytes = self.spool.read(&self.key, self.at, len).await?;
+            self.at += u64::try_from(bytes.len()).unwrap();
+            Ok(bytes)
+        })
+    }
+}
+
 impl ObjectStore for Spool {
     type Upload = NoUpload;
+
+    fn batch_width(&self, kind: BatchKind) -> std::num::NonZeroUsize {
+        match kind {
+            BatchKind::Spans => std::num::NonZeroUsize::new(self.spans).unwrap(),
+            BatchKind::Lists | BatchKind::ResolvedCreatedAt => std::num::NonZeroUsize::MIN,
+        }
+    }
+
+    fn read_span(&self, key: FileKey, start: u64, end: u64) -> Box<dyn ReadStream + '_> {
+        self.opened.fetch_add(1, Ordering::Relaxed);
+        Box::new(SpoolSpan {
+            spool: self,
+            key,
+            at: start,
+            end,
+        })
+    }
 
     /// Leaves no scratch.
     async fn remove_scratch(&self) -> Result<u64, StoreError> {
@@ -394,6 +445,24 @@ fn restore_peak_heap_is_flat_in_chain_length() {
         long_peak.extra
     );
     assert!(long_peak.extra <= RESTORE_CAP);
+}
+
+/// A file read through a window of eight spans holds what one stream holds: the window takes one
+/// chunk at a time, in order, from a store that reads each piece when asked. (A store that reads
+/// spans ahead holds them too, as many as its width; S3 bounds each at 16 MiB.)
+#[test]
+fn restore_through_a_window_holds_one_chunk() {
+    let spool = Spool::build(16_384, 0, 16).with_spans(8);
+    let (peak, written) = restore_peak(&spool);
+    assert_eq!(written, spool.pages());
+    // A 64 MiB file and a little: eight 8 MiB spans, then the rest as one stream.
+    assert_eq!(spool.opened.load(Ordering::Relaxed), 8);
+    eprintln!("restore through a window: {} KiB", peak.extra >> 10);
+    assert!(
+        peak.extra <= RESTORE_CAP,
+        "{} bytes, over {RESTORE_CAP}",
+        peak.extra
+    );
 }
 
 /// A database past 1 GiB has no lock page, so the fixtures past it must leave it out:

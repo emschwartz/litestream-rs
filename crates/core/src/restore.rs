@@ -76,6 +76,7 @@ mod mem_sink;
     reason = "test fixtures do index and size arithmetic on small bounded values"
 )]
 mod tests;
+mod window;
 
 #[cfg(any(test, feature = "testing"))]
 pub use mem_sink::{Database, MemPublishError, MemSink};
@@ -981,7 +982,7 @@ async fn apply_whole<S: ObjectStore, K: DatabaseSink>(
     let mut pages = WholePages::default();
     let mut read = LtxRead::new(key, chunk_len());
     let applied = read
-        .read_verified(store, |event| match event {
+        .read_verified_from(&mut *window::stream(store, info), |event| match event {
             Event::Header(header) if header.txids() != key.range() => {
                 Err(Some(RestoreError::File {
                     key,
@@ -1073,7 +1074,9 @@ async fn apply_file<S: ObjectStore, K: DatabaseSink>(
     let key = info.key;
     let mut read = LtxRead::new(key, chunk_len());
     let applied = read
-        .read_verified(store, |event| on_event(key, previous, sink, event))
+        .read_verified_from(&mut *window::stream(store, info), |event| {
+            on_event(key, previous, sink, event)
+        })
         .await;
     *bytes_read = bytes_read.saturating_add(read.bytes_read());
     let verified = applied.map_err(|fault| read_abort(key, fault))?;

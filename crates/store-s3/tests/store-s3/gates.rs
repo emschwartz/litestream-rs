@@ -158,23 +158,28 @@ fn put(store: &impl ObjectStore, key: &FileKey, bytes: &[u8]) {
     });
 }
 
-// A restore reads each file through one GET, its body taken a chunk of RESTORE_CHUNK at a
-// time as the decoder needs it. Requests: one GET per file of the chain, however many chunks
-// it spans, nothing more (no empty read to find an end). Depth: the listing, then one round
-// trip per file; files are applied in order, so their round trips add. Reading a GET per chunk
-// costs the chunk count (15 GETs here).
-#[test]
-fn restore_reads_each_file_in_one_get() {
-    let link = Link::new(fake());
-    let store =
-        S3Store::with_transport(config(), credentials(), link.clone(), FakeClock::new(now()))
-            .unwrap();
-    // 2600 pages of 16 KiB: 11 chunks; the overlays 700 pages (3 chunks) and 40 (1).
-    let files = [
+// The files a restore gate reads: 2600 pages of 16 KiB (11 chunks, five 8 MiB spans and the
+// rest), and overlays of 700 pages (3 chunks) and 40 (1), each under two spans.
+fn restore_files() -> [(FileKey, Vec<u8>); 3] {
+    [
         (key(9, 1, 1), ltx_file(1, 2600, 2600, 1)),
         (key(0, 2, 2), ltx_file(2, 2600, 700, 3)),
         (key(0, 3, 3), ltx_file(3, 2600, 40, 7)),
-    ];
+    ]
+}
+
+// At a concurrency of one a restore reads each file through one GET, its body taken a chunk of
+// RESTORE_CHUNK at a time as the decoder needs it. Requests: one GET per file of the chain,
+// however many chunks it spans, nothing more (no empty read to find an end). Depth: the
+// listing, then one round trip per file; files are applied in order, so their round trips add.
+// Reading a GET per chunk costs the chunk count (15 GETs here).
+#[test]
+fn restore_reads_each_file_in_one_get() {
+    let link = Link::new(fake());
+    let config = config().with_concurrency(std::num::NonZeroUsize::MIN);
+    let store = S3Store::with_transport(config, credentials(), link.clone(), FakeClock::new(now()))
+        .unwrap();
+    let files = restore_files();
     for (key, bytes) in &files {
         put(&store, key, bytes);
     }
@@ -201,6 +206,30 @@ fn restore_reads_each_file_in_one_get() {
         tally.rounds,
         files.len()
     );
+}
+
+// At the default concurrency (five) a restore reads a file of two 8 MiB spans or more through a
+// window of ranged GETs: the snapshot is five spans and its last 600 KiB read to the end, six
+// GETs; the overlays, under two spans, one each. Depth is not gated here: each span is sent from
+// a thread of its own, outside the store's batches, so the link counts every GET as a lone round
+// trip and cannot see them overlap.
+#[test]
+fn restore_reads_a_large_file_through_a_window_of_spans() {
+    let link = Link::new(fake());
+    let store =
+        S3Store::with_transport(config(), credentials(), link.clone(), FakeClock::new(now()))
+            .unwrap();
+    let files = restore_files();
+    for (key, bytes) in &files {
+        put(&store, key, bytes);
+    }
+    let sink = MemSink::new();
+    let (restored, tally) =
+        link.measure(|| block_on(restore(&store, RestoreTarget::Latest, sink.clone())).unwrap());
+    assert_eq!(restored.files(), 3);
+    println!("restore in spans {tally:?}");
+    assert_eq!(tally.get, 6 + 1 + 1);
+    assert_eq!(tally.rounds, waves(LEVELS, READ_WIDTH) + tally.get);
 }
 
 // A multipart upload keeps up to `concurrency` parts in flight while it fills the next.

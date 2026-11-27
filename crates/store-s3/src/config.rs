@@ -448,9 +448,10 @@ impl S3Config {
     }
 
     /// Replaces how many parts of one multipart upload may be in flight at
-    /// once, Go's `concurrency`. It governs nothing else: reads, listings and
-    /// HEADs have their own fixed limits. One sends every part after the one
-    /// before it.
+    /// once, Go's `concurrency`, and how many spans of one large file a
+    /// restore reads at once (`docs/decisions/D309.md`). It governs nothing
+    /// else: other reads, listings and HEADs have their own fixed limits. One sends every part
+    /// after the one before it, and reads a restore's files as one stream each.
     ///
     /// Memory: an upload of a staged file holds no part, each is read from the
     /// file as it is sent. An upload with no file behind it holds the parts in

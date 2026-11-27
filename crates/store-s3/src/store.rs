@@ -10,7 +10,9 @@
 //! limit of their kind, and judges each response alone, exactly as a single request. HEADs are
 //! limited by `CREATION_TIME_CONCURRENCY`, listing pages by `READ_CONCURRENCY`. The parts of
 //! an upload are not a batch: they go through the lanes (`lanes.rs`), as many at once as the
-//! `concurrency` setting says (provider defaults in [`S3Config::concurrency`]).
+//! `concurrency` setting says (provider defaults in [`S3Config::concurrency`]). The same setting
+//! is how many spans of one object a restore reads at once ([`BatchKind::Spans`]): each span is
+//! one GET read ahead on a thread of its own (`store/stream.rs`).
 //!
 //! Deadlines: the transport bounds one request. A call that sends several (a
 //! listing, a large delete) also checks the `Clock` between them against four
@@ -48,7 +50,7 @@ use crate::ureq_transport::UreqTransport;
 
 mod stream;
 
-use stream::S3Stream;
+use stream::{Ahead, S3Stream};
 
 /// What the created-at times read so far found, for the event layer (this crate emits no
 /// events). A listing reads none; each [`ObjectStore::created_at`] and
@@ -340,6 +342,12 @@ impl<T: Transport> ObjectStore for S3Store<T> {
         self.inner.read(key, offset, len)
     }
 
+    /// One GET for the span, sent at once and read ahead of the caller on a thread of its own,
+    /// so the spans of one file download side by side.
+    fn read_span(&self, key: FileKey, start: u64, end: u64) -> Box<dyn ReadStream + '_> {
+        Box::new(Ahead::spawn(Arc::clone(&self.inner), key, start, end))
+    }
+
     /// One GET for the rest of the object, its body read as the pieces are asked for.
     fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
         Box::new(S3Stream::new(Arc::clone(&self.inner), key, offset))
@@ -395,7 +403,7 @@ impl<T: Transport> ObjectStore for S3Store<T> {
     }
 
     fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
-        Inner::<T>::width(kind)
+        self.inner.width(kind)
     }
 
     async fn list_many(
@@ -530,10 +538,11 @@ impl<T: Transport> Inner<T> {
 
     /// How many requests of `kind` go out at once: the one answer both the planner
     /// ([`ObjectStore::batch_width`]) and the batches themselves use.
-    pub(crate) const fn width(kind: BatchKind) -> NonZeroUsize {
+    pub(crate) const fn width(&self, kind: BatchKind) -> NonZeroUsize {
         match kind {
             BatchKind::Lists => READ_CONCURRENCY,
             BatchKind::ResolvedCreatedAt => CREATION_TIME_CONCURRENCY,
+            BatchKind::Spans => self.concurrency,
         }
     }
 
@@ -704,7 +713,7 @@ impl<T: Transport> Inner<T> {
         let op = StoreOp::Read;
         let results = self.batch(
             op,
-            Self::width(BatchKind::ResolvedCreatedAt),
+            self.width(BatchKind::ResolvedCreatedAt),
             files.iter(),
             |file| Ok((self.request(op, |b, now| b.head(now, &file.key))?, file)),
             |file, response| Self::judge_head(file, &response),

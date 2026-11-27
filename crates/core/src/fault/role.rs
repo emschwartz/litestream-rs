@@ -136,6 +136,10 @@ macro_rules! pass_through {
                 self.0.read_stream(key, offset)
             }
 
+            fn read_span(&self, key: FileKey, start: u64, end: u64) -> Box<dyn ReadStream + '_> {
+                self.0.read_span(key, start, end)
+            }
+
             async fn hold_stream(
                 &self,
                 key: FileKey,

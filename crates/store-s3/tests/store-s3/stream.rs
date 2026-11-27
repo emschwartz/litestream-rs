@@ -79,6 +79,97 @@ mod cases {
         (out, ranges)
     }
 
+    /// The pieces of three bytes a span from `from` to `end` hands out over `answers`.
+    fn span_pieces(
+        from: u64,
+        end: u64,
+        answers: Vec<HttpResponse>,
+    ) -> (Pieces, Vec<Option<String>>) {
+        let ranges = Arc::new(Mutex::new(Vec::new()));
+        let store = S3Store::with_transport(
+            config(),
+            credentials(),
+            Script {
+                answers: Mutex::new(answers.into()),
+                ranges: Arc::clone(&ranges),
+            },
+            FakeClock::new(now()),
+        )
+        .unwrap();
+        let len = ReadLen::new(3).unwrap();
+        let mut out = Vec::new();
+        {
+            let mut stream = store.read_span(key(0, 1, 1), from, end);
+            loop {
+                let piece = block_on(stream.next(len));
+                let last = piece.as_ref().map_or(true, |bytes| bytes.len() < 3);
+                out.push(piece);
+                if last {
+                    break;
+                }
+            }
+        }
+        let ranges = ranges
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        (out, ranges)
+    }
+
+    #[test]
+    fn a_span_asks_for_its_bytes_alone() {
+        let reply = answer(
+            206,
+            &[("content-length", "4"), ("content-range", "bytes 2-5/9")],
+            b"cdef",
+        );
+        let (got, ranges) = span_pieces(2, 6, vec![reply]);
+        assert_eq!(got, [Ok(b"cde".to_vec()), Ok(b"f".to_vec())]);
+        assert_eq!(ranges, [Some("bytes=2-5".to_owned())]);
+    }
+
+    /// A server that ignores the span's `Range` sends the whole object: the span is its bytes
+    /// from the start to the end, and nothing past it.
+    #[test]
+    fn a_whole_object_answered_to_a_span_is_cut_to_the_span() {
+        let reply = answer(200, &[("content-length", "9")], b"abcdefghi");
+        let (got, _) = span_pieces(2, 6, vec![reply]);
+        assert_eq!(got, [Ok(b"cde".to_vec()), Ok(b"f".to_vec())]);
+        let reply = answer(200, &[], b"abcdefghi");
+        let (got, _) = span_pieces(0, 4, vec![reply]);
+        assert_eq!(got, [Ok(b"abc".to_vec()), Ok(b"d".to_vec())]);
+    }
+
+    /// A span whose body ends early fails, as a stream's does. The span reads ahead a whole
+    /// piece at a time, so the bytes before the cut in that piece are not handed out; a caller
+    /// goes on from the bytes it was handed, as from any failed piece.
+    #[test]
+    fn a_span_cut_short_fails() {
+        let reply = answer(
+            206,
+            &[("content-length", "6"), ("content-range", "bytes 0-5/9")],
+            b"abcd",
+        );
+        let (got, _) = span_pieces(0, 6, vec![reply]);
+        assert_eq!(
+            got,
+            [Err(StoreError::Transient {
+                op: StoreOp::Read,
+                kind: io::ErrorKind::UnexpectedEof,
+            })]
+        );
+    }
+
+    /// No answer at all: the span's first piece is the failure.
+    #[test]
+    fn a_span_with_no_answer_fails() {
+        let (got, _) = span_pieces(0, 6, vec![]);
+        assert!(
+            matches!(got.as_slice(), [Err(StoreError::Transient { .. })]),
+            "{got:?}"
+        );
+    }
+
     #[test]
     fn a_stream_from_the_start_sends_no_range() {
         let (got, ranges) = pieces(0, vec![answer(200, &[("content-length", "4")], b"abcd")]);

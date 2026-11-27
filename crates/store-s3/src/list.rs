@@ -224,7 +224,7 @@ impl<T: Transport> Inner<T> {
                 Err(err) => failed.push((at, err)),
             }
         }
-        let answers = self.send_many(OP, Self::width(BatchKind::Lists), requests);
+        let answers = self.send_many(OP, self.width(BatchKind::Lists), requests);
         for (at, answer) in sent_for.into_iter().zip(answers) {
             let Some(slot) = runs.get_mut(at) else {
                 continue;

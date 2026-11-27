@@ -547,6 +547,28 @@ impl RequestBuilder {
         )
     }
 
+    /// A GET of bytes `offset` to `end` (exclusive): `bytes=offset-(end-1)`, the span one
+    /// stream of a restore reads (`ObjectStore::read_span`). An empty span asks for its first byte.
+    ///
+    /// # Errors
+    /// [`RequestError::ClockOutOfRange`].
+    pub fn get_span(
+        &self,
+        now: Timestamp,
+        key: &FileKey,
+        offset: u64,
+        end: u64,
+    ) -> Result<HttpRequest, RequestError> {
+        let object = self.object(key);
+        let last = end.saturating_sub(1).max(offset);
+        self.bare(
+            now,
+            (Method::Get, Some(&object)),
+            &[],
+            vec![("range", format!("bytes={offset}-{last}"))],
+        )
+    }
+
     /// A ranged GET of `len` bytes from `offset`.
     ///
     /// # Errors
