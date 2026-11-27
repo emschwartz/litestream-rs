@@ -11,4 +11,4 @@ tests = [
     "faults::store_returns_after_the_wal_was_regrown",
     "faults::store_returns_after_the_wal_lost_its_header",
 ]
-unaided = 300
+unaided = 196

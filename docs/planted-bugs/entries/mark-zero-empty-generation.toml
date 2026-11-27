@@ -8,4 +8,4 @@ package = "lsr-core"
 tests = [
     "recover::tests::rule_6_a_pinned_position_with_no_frames_follows_a_new_header_with_any_salts",
 ]
-unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."
+unaided = 300

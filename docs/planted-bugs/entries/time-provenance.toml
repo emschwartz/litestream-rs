@@ -5,4 +5,4 @@ tests = [
     "plan::tests::a_fallback_created_at_does_not_date_the_next_transaction",
     "lazy::a_fallback_created_at_does_not_date_the_next_transaction",
 ]
-unaided_miss = "The compaction, listing or retention state it breaks needs a backlog, a stale carried listing or a hole in a level that the swarm's short runs do not build; only core unit tests set that state directly."
+unaided = 300

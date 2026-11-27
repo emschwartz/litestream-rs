@@ -3,4 +3,4 @@ name = "maintenance-another-writer"
 fix = "bc34b37"
 package = "lsr-core"
 tests = ["actor::tests::maintenance_stops_on_a_file_past_its_position"]
-unaided = 50
+unaided_miss = "Failed at seed 4 at 4918e715e and in none of 300 at the final head after main's queued sim changes (D297); the swarm no longer draws another writer's file past the engine's position during maintenance, so only the named core test reaches it."

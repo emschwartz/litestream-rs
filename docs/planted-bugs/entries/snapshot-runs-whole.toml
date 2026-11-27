@@ -10,4 +10,4 @@ tests = [
     "actor::tests::sliced_snapshot::a_commit_made_during_a_long_snapshot_reaches_the_replica_before_it_ends",
     "actor::tests::sliced_snapshot::a_snapshot_goes_first_for_exactly_its_share_while_commits_wait",
 ]
-unaided_miss = "tbd"
+unaided = 148

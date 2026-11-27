@@ -7,3 +7,4 @@ tests = [
     "a_failed_read_back_ends_the_pass_and_deletes_nothing",
     "the_pass_reads_the_newest_files_back_once",
 ]
+unaided_miss = "Needs a drain whose newest files rotted on the replica before its final retention pass, which the swarm's damage draw does not line up with a drain; only the named core tests set it."
