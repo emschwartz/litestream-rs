@@ -499,7 +499,6 @@ impl Worker {
         let (mut wal, mut db) = (sqlite.clone(), sqlite.clone());
         let mut ck = Guarded::new(
             sqlite,
-            self.config.readers,
             Arc::clone(&self.shared.readers),
             self.shared.writes_held.clone(),
         );

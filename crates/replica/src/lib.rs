@@ -30,8 +30,8 @@
 //!   bundles; with default features off the application links its own, which must be one of the
 //!   builds `lsr-sqlite` lists as verified, or [`Replicator::start`] refuses it
 //!   ([`StartError::SqliteBuild`], `docs/decisions/D200.md`).
-//! - Each long read the application starts holds a [`ReaderGuard`] from [`Replicator::long_reader`];
-//!   under [`ReaderTracking::Tracked`] no TRUNCATE checkpoint runs while one lives.
+//! - Each long read the application starts may hold a [`ReaderGuard`] from
+//!   [`Replicator::long_reader`]; no TRUNCATE checkpoint runs while one lives.
 //! - [`Replicator::health`] can be read at any time: one lock, no I/O.
 //! - [`Replicator::stop`] runs at shutdown, after the application's connections close, and reports
 //!   whether everything committed reached the replica ([`StopOutcome`]). The replicator's own
@@ -141,7 +141,7 @@ pub mod stack;
 mod store;
 mod thread;
 
-pub use config::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
+pub use config::{Config, NonZeroDuration, SyncLimits};
 pub use error::{RestoreError, StartError, TrustLocalError};
 pub use events::{ChannelSink, Event, EventReceiver, EventSink, TrustRecordUnusable};
 #[doc(hidden)]

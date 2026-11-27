@@ -566,8 +566,7 @@ impl Replicator {
     }
 
     /// Held for the length of a long read; while any guard lives the replicator runs no
-    /// TRUNCATE checkpoint. It matters only under `ReaderTracking::Tracked`, where the application
-    /// promises to hold one for every long read.
+    /// TRUNCATE checkpoint.
     pub fn long_reader(&self) -> ReaderGuard {
         ReaderGuard::new(&self.shared.readers)
     }

@@ -58,7 +58,7 @@ use lsr_core::{
     CheckpointConfig, ConfigError as MaintenanceError, Interval, L0Retention, Maintenance,
     RetentionMode,
 };
-use lsr_replica::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
+use lsr_replica::{Config, NonZeroDuration, SyncLimits};
 use lsr_store_s3::{S3Config, S3Credentials};
 
 use crate::config::{DbConfig, DbSource, GoConfig};
@@ -445,7 +445,6 @@ fn settings(
         maintenance: maintenance?.clone(),
         sync_limits: sync_limits?,
         responses: config.rust().responses(),
-        readers: ReaderTracking::Untracked,
         shutdown_grace,
         app_autocheckpoint: config.rust().app_autocheckpoint(),
         verify_interval: config.validation_interval().and_then(positive),

@@ -22,9 +22,8 @@ use lsr_core::{CheckpointMode, Event as EngineEvent, Fault};
 use lsr_replica::StartOptions;
 use lsr_replica::{
     AppCheckpoint, AppCheckpoints, AppNotice, ChannelSink, CheckpointConfig, Config, DegradedCause,
-    Depth, DynStore, Event, EventSink, Gone, IfMissing, Phase, ReaderTracking, Readiness,
-    Replicator, Responses, SetupError, StartError, StopCause, StopOutcome, Task, Unfinished,
-    restore_if_missing, verify,
+    Depth, DynStore, Event, EventSink, Gone, IfMissing, Phase, Readiness, Replicator, Responses,
+    SetupError, StartError, StopCause, StopOutcome, Task, Unfinished, restore_if_missing, verify,
 };
 use rusqlite::Connection;
 
@@ -818,14 +817,13 @@ fn checkpoints(events: &[Event], mode: CheckpointMode) -> usize {
         .count()
 }
 
-/// Under tracked readers no TRUNCATE runs while a guard lives: it is reported busy and waits
+/// No TRUNCATE runs while a reader guard lives: it is reported busy and waits
 /// its backoff, poll after poll. Once the guard is gone, replication drains as usual.
 #[test]
 fn a_reader_guard_holds_off_truncate() {
     let site = Site::new();
     let (runtime, clock) = fake();
     let tracked = Config {
-        readers: ReaderTracking::Tracked,
         checkpoint: CheckpointConfig {
             interval: None,
             min_pages: None,
@@ -895,7 +893,7 @@ fn a_reader_guard_holds_off_truncate() {
     site.assert_restores(&*site.store());
 }
 
-/// The default configuration, which gives no word about readers, TRUNCATEs once the WAL passes
+/// The default configuration, with no reader guard held, TRUNCATEs once the WAL passes
 /// the threshold, as Go does: the WAL file shrinks. (The threshold is lowered so the test need
 /// not write 500 MB; the default's own value is pinned in `lsr_replica::config`.)
 #[test]
@@ -910,7 +908,6 @@ fn the_default_configuration_truncates_the_wal_past_the_threshold() {
         },
         ..config()
     };
-    assert_eq!(defaults.readers, ReaderTracking::Untracked);
     let replicator = Replicator::start(
         &site.db,
         site.store(),
