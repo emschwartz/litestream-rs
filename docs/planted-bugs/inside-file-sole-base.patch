@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/plan.rs b/crates/core/src/plan.rs
-index 6aa7ad8..fcad6ea 100644
+index fba03cdc9..96d8986d2 100644
 --- a/crates/core/src/plan.rs
 +++ b/crates/core/src/plan.rs
-@@ -396,7 +396,7 @@ fn plan_unchecked(listed: Listed<'_>, target: RestoreTarget) -> PlanOutcome {
+@@ -480,7 +480,7 @@ fn plan_unchecked(listed: Listed<'_>, target: RestoreTarget) -> PlanOutcome {
          .max_by_key(|info| base_order(info))
          .and_then(|info| ContiguousChain::start(*info));
-     let Some(mut chain) = base else {
+     let Some(chain) = base else {
 -        return inside_the_base(listed, target).unwrap_or_else(|| no_snapshot(listed));
 +        return no_snapshot(listed);
      };
-     extend(&mut chain, Sweep::new(listed, target));
-     if let RestoreTarget::AsOf(_) = target {
+     extend_to(listed, chain, target)
+ }

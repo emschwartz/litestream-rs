@@ -19,6 +19,8 @@ use crate::mem::wrapped::Wrapped;
 use crate::store::WriteMode;
 use crate::store::{StoreOp, Upload};
 
+mod tail;
+
 fn txid(n: u64) -> Txid {
     Txid::new(n).unwrap()
 }
@@ -584,7 +586,9 @@ fn a_file_deleted_between_plan_and_read_is_replanned_once() {
     let restored = result.unwrap();
     assert_eq!(restored.attempts(), 2);
     assert_eq!(restored.files(), 3);
-    assert_eq!(sink.calls(SinkOp::Reset), 1);
+    // The snapshot before it is kept: only the files after it are planned again.
+    assert_eq!(sink.calls(SinkOp::Reset), 0);
+    assert_eq!(store.reads_of(key(9, 1, 1)), 1);
     assert_eq!(seeds(&sink.published().unwrap()), [5, 9]);
 }
 
@@ -960,12 +964,10 @@ fn a_failed_publish_says_what_it_left_at_the_target() {
 
 #[test]
 fn a_sink_that_cannot_reset_ends_the_restore() {
-    let inner = four_file_replica();
-    put_spec(&inner, 1, &Spec::plain(512, 2, 2, 3, &[(1, 5), (2, 9)]));
-    let store = Wrapped::vanishing(inner, &[key(1, 2, 3)]);
+    let store = Wrapped::vanishing(three_snapshots(), &[key(9, 1, 3)]);
     let sink = MemSink::new();
     sink.fail_at(SinkOp::Reset, 0);
-    let result = block_on(restore(&store, RestoreTarget::Txid(txid(3)), sink.clone()));
+    let result = block_on(restore(&store, RestoreTarget::Latest, sink.clone()));
     assert!(matches!(
         result,
         Err(RestoreError::Sink {

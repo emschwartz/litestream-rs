@@ -32,9 +32,9 @@ use lsr_config::{
 };
 use lsr_core::{
     AsOfInside, AsOfPlanner, ContiguousChain, Depth, Inventory, InventoryError, KeyTarget,
-    MAX_ATTEMPTS, ObjectStore, PlanOutcome, Report, ResolveError, RestoreError, RestoreOptions,
-    RestoreTarget, Restored, Retrying, Severity, StoreError, VerifyError, plan, resolve,
-    restore_with, verify,
+    MAX_ATTEMPTS, ObjectStore, PlanOutcome, Replan, Report, ResolveError, RestoreError,
+    RestoreOptions, RestoreTarget, Restored, Retrying, Severity, StoreError, VerifyError, plan,
+    resolve, restore_noting, verify,
 };
 use lsr_replica::local::{
     ClearError, CreateError, Existing, FileSink, IntegrityCheck, IntegrityFailure, PublishError,
@@ -1077,7 +1077,7 @@ async fn restore_on<S: ObjectStore>(
             return Err(UsageError::GoTxidAndTimestamp.into());
         }
         let options = RestoreOptions { as_of_inside };
-        let restored = restore_with(store, target, options, sink).await?;
+        let restored = restore_noting(store, target, options, sink, note_replan).await?;
         if let Some(meta) = meta {
             lsr_replica::record_trust(&meta, restored.reached()).map_err(|err| {
                 CliError::Takeover {
@@ -1111,6 +1111,19 @@ async fn restore_on<S: ObjectStore>(
             cleared,
             source: Box::new(source),
         }),
+    }
+}
+
+/// Says on stderr, as it happens, why a restore reads again: one that starts over on a large
+/// database would otherwise look stalled for as long as its snapshot takes.
+fn note_replan(replan: &Replan) {
+    use std::io::Write as _;
+    if io::stderr()
+        .lock()
+        .write_all(crate::render::replan_line(replan).as_bytes())
+        .is_err()
+    {
+        // A note that cannot be written has nowhere else to go; the restore goes on.
     }
 }
 

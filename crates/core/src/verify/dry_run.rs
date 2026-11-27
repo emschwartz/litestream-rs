@@ -200,6 +200,7 @@ pub(super) async fn digest_restore<S: ObjectStore>(
         RestoreOptions::default(),
         DigestSink { pages, keep: None },
         MAX_ATTEMPTS,
+        &mut |_| {},
     )
     .await;
     (

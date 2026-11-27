@@ -14,6 +14,15 @@ use crate::store::{
 };
 use std::num::NonZeroUsize;
 
+/// A writer's compaction or retention that runs as a read of `trigger` at offset `from` or later
+/// begins: each file of `put` lands, then each key of `delete` goes.
+pub(crate) struct Compaction {
+    pub(crate) trigger: FileKey,
+    pub(crate) from: u64,
+    pub(crate) put: Vec<(FileKey, Vec<u8>)>,
+    pub(crate) delete: Vec<FileKey>,
+}
+
 /// A store whose files can vanish at the moment they are read, lie about
 /// their size, and whose reads are counted.
 pub(crate) struct Wrapped {
@@ -24,6 +33,10 @@ pub(crate) struct Wrapped {
     pub(crate) zero_sizes: bool,
     /// Reads begun, counted before any vanishing.
     pub(crate) reads: AtomicUsize,
+    /// Each read begun, by key and offset, in order.
+    pub(crate) read_log: Mutex<Vec<(FileKey, u64)>>,
+    /// Compactions waiting for their trigger; each runs once.
+    pub(crate) compactions: Mutex<Vec<Compaction>>,
     /// Files the next listing of their level leaves out, as a directory read that races
     /// a writer's rename can (POSIX leaves a file added during a `readdir` unspecified).
     pub(crate) hide_once: Mutex<BTreeSet<FileKey>>,
@@ -40,13 +53,42 @@ pub(crate) struct Wrapped {
 }
 
 impl Wrapped {
-    async fn before_read(&self, key: &FileKey) -> Result<(), StoreError> {
+    async fn before_read(&self, key: &FileKey, offset: u64) -> Result<(), StoreError> {
         self.reads.fetch_add(1, Ordering::Relaxed);
+        self.read_log.lock().unwrap().push((*key, offset));
         let doomed = self.vanish.lock().unwrap().remove(key);
         if doomed {
             self.inner.delete(&[*key]).await?;
         }
+        let due = {
+            let mut waiting = self.compactions.lock().unwrap();
+            let at = waiting
+                .iter()
+                .position(|c| c.trigger == *key && offset >= c.from);
+            at.map(|at| waiting.remove(at))
+        };
+        if let Some(compaction) = due {
+            for (put, bytes) in &compaction.put {
+                let mut upload = self
+                    .inner
+                    .begin_upload(put, Timestamp::from_unix_millis(0), WriteMode::Replace)
+                    .await?;
+                upload.write(bytes).await?;
+                upload.commit().await?;
+            }
+            self.inner.delete(&compaction.delete).await?;
+        }
         Ok(())
+    }
+
+    /// Reads begun of `key`, at any offset.
+    pub(crate) fn reads_of(&self, key: FileKey) -> usize {
+        self.read_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(read, _)| *read == key)
+            .count()
     }
 
     pub(crate) fn new(inner: MemStore) -> Self {
@@ -55,6 +97,8 @@ impl Wrapped {
             vanish: Mutex::new(BTreeSet::new()),
             zero_sizes: false,
             reads: AtomicUsize::new(0),
+            read_log: Mutex::new(Vec::new()),
+            compactions: Mutex::new(Vec::new()),
             hide_once: Mutex::new(BTreeSet::new()),
             put_after_list: Mutex::new(VecDeque::new()),
             put_after_miss: Mutex::new(None),
@@ -129,7 +173,7 @@ impl ObjectStore for Wrapped {
     }
 
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
-        self.before_read(key).await?;
+        self.before_read(key, offset).await?;
         let read = self.inner.read(key, offset, len).await;
         if matches!(read, Err(StoreError::NotFound { .. })) {
             let landing = {
@@ -161,7 +205,7 @@ impl ObjectStore for Wrapped {
         file: &FileInfo,
         len: ReadLen,
     ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
-        self.before_read(&file.key).await?;
+        self.before_read(&file.key, 0).await?;
         self.inner.read_with_created_at(file, len).await
     }
 
