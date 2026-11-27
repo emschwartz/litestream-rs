@@ -1327,3 +1327,155 @@ fn a_step_opens_at_most_sixteen_files() {
         assert_eq!(last.header().txids(), range(40, 40));
     });
 }
+
+/// A file of 64 KiB pages that do not compress: one random page, its first byte the page's seed.
+fn incompressible(
+    commit: u32,
+    min: u64,
+    max: u64,
+    pages: impl Iterator<Item = (u32, u8)>,
+) -> Vec<u8> {
+    let ps = size(65536);
+    let mut rng = 0x2545_f491_4f6c_dd1d_u64;
+    let noise: Vec<u8> = (0..ps.bytes()).map(|_| xorshift(&mut rng)).collect();
+    let header = Header::new(HeaderFields {
+        tracked: false,
+        page_size: ps,
+        commit,
+        txids: range(min, max),
+        timestamp: Timestamp::from_unix_millis(i64::try_from(max).unwrap() * 1000),
+        pre_apply: None,
+        wal: None,
+        node_id: 0,
+    })
+    .unwrap();
+    let mut encoder = Encoder::new(Vec::new(), header).unwrap();
+    for (pgno, seed) in pages {
+        let mut page = noise.clone();
+        page[0] = seed;
+        encoder
+            .write_page(PageNo::new(pgno, ps).unwrap(), &page)
+            .unwrap();
+    }
+    encoder.finish(None).unwrap().0
+}
+
+/// Pages of the floor's size: a base big enough to look for a whole copy after it.
+const BIG: u32 = 260;
+
+/// A level-9 snapshot, a one-page change, the level-0 file at 3 (`third`, pages of seed 3), and
+/// a one-page change after it; returns the store and the size of each file in order.
+fn whole_copy_replica(third: impl Iterator<Item = u32>) -> (MemStore, [u64; 4]) {
+    let store = MemStore::new();
+    let files = [
+        (9, 1, incompressible(BIG, 1, 1, (1..=BIG).map(|p| (p, 1)))),
+        (0, 2, incompressible(BIG, 2, 2, [(5, 2)].into_iter())),
+        (0, 3, incompressible(BIG, 3, 3, third.map(|p| (p, 3)))),
+        (0, 4, incompressible(BIG, 4, 4, [(9, 4)].into_iter())),
+    ];
+    let mut sizes = [0; 4];
+    for ((level, t, bytes), size) in files.iter().zip(&mut sizes) {
+        put(&store, *level, *t, *t, bytes);
+        *size = u64::try_from(bytes.len()).unwrap();
+    }
+    assert!(
+        sizes[0] >= crate::plan::WHOLE_BASE_MIN_BYTES,
+        "the base reaches the floor"
+    );
+    (store, sizes)
+}
+
+/// The seed of every page of the database the replica above restores to at 4.
+fn whole_copy_seeds(db: &Database) -> Vec<u8> {
+    let mut want = vec![3; usize::try_from(BIG).unwrap()];
+    want[8] = 4;
+    assert_eq!(seeds(db), want);
+    want
+}
+
+#[test]
+fn a_whole_database_copy_after_the_snapshot_is_the_start_and_nothing_before_it_is_read() {
+    let (store, sizes) = whole_copy_replica(1..=BIG);
+    let (result, sink) = run(&store, RestoreTarget::Txid(txid(4)));
+    let restored = result.unwrap();
+    whole_copy_seeds(&sink.published().unwrap());
+    assert_eq!(restored.bytes_read(), sizes[2] + sizes[3]);
+    assert_eq!(restored.files(), 2);
+    assert_eq!(restored.reached(), txid(4));
+}
+
+#[test]
+fn a_large_file_missing_a_page_is_not_a_start_and_costs_only_the_bytes_up_to_the_gap() {
+    let (store, sizes) = whole_copy_replica((1..=BIG).filter(|&p| p != 100));
+    let (result, sink) = run(&store, RestoreTarget::Txid(txid(4)));
+    let restored = result.unwrap();
+    let db = sink.published().unwrap();
+    let mut want = vec![3; usize::try_from(BIG).unwrap()];
+    want[99] = 1;
+    want[8] = 4;
+    assert_eq!(seeds(&db), want);
+    assert_eq!(restored.files(), 4);
+    let listed: u64 = sizes.iter().sum();
+    let wasted = restored.bytes_read() - listed;
+    assert!(
+        wasted > 0 && wasted < sizes[2] / 2,
+        "{wasted} of {}",
+        sizes[2]
+    );
+}
+
+#[test]
+fn a_large_file_missing_its_last_page_is_read_through_and_not_a_start() {
+    let (store, sizes) = whole_copy_replica(1..BIG);
+    let (result, sink) = run(&store, RestoreTarget::Txid(txid(4)));
+    let restored = result.unwrap();
+    let mut want = vec![3; usize::try_from(BIG).unwrap()];
+    want[usize::try_from(BIG - 1).unwrap()] = 1;
+    want[8] = 4;
+    assert_eq!(seeds(&sink.published().unwrap()), want);
+    assert_eq!(restored.bytes_read(), sizes.iter().sum::<u64>() + sizes[2]);
+}
+
+#[test]
+fn a_whole_copy_whose_header_disagrees_with_its_name_is_rejected() {
+    let (store, _) = whole_copy_replica(1..=BIG);
+    put(
+        &store,
+        0,
+        3,
+        3,
+        &incompressible(BIG, 2, 3, (1..=BIG).map(|p| (p, 3))),
+    );
+    let (result, sink) = run(&store, RestoreTarget::Txid(txid(4)));
+    let (at, fault) = file_fault(result);
+    assert_eq!(at, key(0, 3, 3));
+    assert!(
+        matches!(fault, FileFault::RangeMismatch { header } if header == range(2, 3)),
+        "{fault:?}"
+    );
+    assert!(sink.published().is_none());
+}
+
+#[test]
+fn whole_pages_run_from_one_with_none_missing_and_skip_the_lock_page() {
+    let ps = size(512);
+    let page = |n| PageNo::new(n, ps).unwrap();
+    let mut pages = WholePages::default();
+    assert!(pages.reach(DbPages::EMPTY, ps));
+    assert!(!pages.take(page(2), ps), "page 1 comes first");
+    assert!(pages.take(page(1), ps));
+    assert!(!pages.take(page(3), ps), "page 2 is missing");
+    assert!(pages.take(page(2), ps));
+    assert!(pages.reach(DbPages::new(2), ps));
+    assert!(!pages.reach(DbPages::new(3), ps));
+    let lock = lsr_ltx::lock_page(ps);
+    let mut pages = WholePages {
+        last: Some(page(lock - 1)),
+    };
+    assert!(
+        pages.reach(DbPages::new(lock), ps),
+        "the lock page is never held"
+    );
+    assert!(pages.take(page(lock + 1), ps));
+    assert!(pages.reach(DbPages::new(lock + 1), ps));
+}
