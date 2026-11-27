@@ -6,7 +6,7 @@
 //! built, which keeps "the history looks shorter than it is" out of every
 //! later decision.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use lsr_ltx::Txid;
 use thiserror::Error;
@@ -62,6 +62,41 @@ pub fn is_snapshot_start(info: &FileInfo) -> bool {
     info.key.range().min() == Txid::MIN
 }
 
+/// The levels 1 to 8 that the last listing of each found empty: no file and no unrecognized
+/// name. Only an earlier configuration or another process puts a file at a level above the
+/// configured top, so once a listing of every level (the boot's) has found one empty, a whole
+/// maintenance listing leaves it out ([`Self::whole`]) and pays its LIST once per boot, not
+/// on every whole listing (`docs/decisions/D294.md`).
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub(crate) struct EmptyLevels(BTreeSet<Level>);
+
+impl EmptyLevels {
+    /// Learns from `inventory`, a listing of `listed`, which of those levels are empty; the
+    /// levels it did not list stay as they were known.
+    pub(crate) fn learn(&mut self, inventory: &Inventory, listed: &[ListAt]) {
+        for at in listed
+            .iter()
+            .filter(|at| Level::COMPACTION.contains(&at.level))
+        {
+            if inventory.level(at.level).is_empty() && inventory.skipped(at.level) == 0 {
+                self.0.insert(at.level);
+            } else {
+                self.0.remove(&at.level);
+            }
+        }
+    }
+
+    /// What a whole maintenance listing reads: every level from its first page, but the ones
+    /// above `top` known empty. Levels 0 to `top` and the snapshots are always listed.
+    pub(crate) fn whole(&self, top: Level) -> Vec<ListAt> {
+        Level::ALL
+            .iter()
+            .filter(|level| **level <= top || !self.0.contains(level))
+            .map(|&level| ListAt::first(level))
+            .collect()
+    }
+}
+
 /// Every file of a replica, ascending by key, plus the count of unrecognized names
 /// each level held.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -79,11 +114,11 @@ impl Inventory {
     /// end, then level 1, as one loop would do it.
     ///
     /// Every level is listed, the ones the configuration does not compact into too (4 to 8
-    /// by default): one LIST each that Go's maintenance does not send. Go lists only its
-    /// configured levels, so its retention (`store.go:871-879`, `EnforceSnapshotRetention`)
-    /// never deletes a file an earlier configuration left at another level, which stays
-    /// billed and stays in the chain Go's restore builds. A restore and a plan here see the
-    /// whole replica.
+    /// by default): one LIST each that Go does not send. Go lists only its configured levels,
+    /// so its retention (`store.go:871-879`, `EnforceSnapshotRetention`) never deletes a file
+    /// an earlier configuration left at another level, which stays billed and stays in the
+    /// chain Go's restore builds. A restore and a boot here see the whole replica; maintenance
+    /// lists again only the levels above the top that held something ([`EmptyLevels`]).
     ///
     /// # Errors
     /// The first failed page in level order, or a cursor that does not
@@ -98,9 +133,9 @@ impl Inventory {
 
     /// Lists each of `starts` to the end and returns what was listed: an inventory of those
     /// listings only, which is **not** a picture of the replica unless `starts` holds every
-    /// level from its first page. Only the maintenance tail view
-    /// ([`crate::maintain`]'s `Tail`) builds one on purpose, and says what it may decide
-    /// from it.
+    /// level from its first page, or every level but ones known empty ([`EmptyLevels::whole`]).
+    /// Only the maintenance tail view ([`crate::maintain`]'s `Tail`) builds a narrower one on
+    /// purpose, and says what it may decide from it.
     ///
     /// # Errors
     /// As [`Self::load`].
@@ -561,6 +596,49 @@ mod tests {
         assert_eq!(keys(9), vec![key(9, 1, 3)]);
         assert!(keys(2).is_empty() && keys(5).is_empty());
         assert!(Inventory::default().level(Level::ZERO).is_empty());
+    }
+
+    /// The levels each whole listing reads, from a listing of every level of `store`.
+    fn whole_after(store: &MemStore, top: u8) -> Vec<u8> {
+        let all: Vec<ListAt> = Level::ALL.iter().map(|&l| ListAt::first(l)).collect();
+        let mut empty = EmptyLevels::default();
+        empty.learn(&block_on(Inventory::load(store)).unwrap(), &all);
+        let levels = empty.whole(Level::new(top).unwrap());
+        levels.iter().map(|at| at.level.get()).collect()
+    }
+
+    /// Nothing learned: every level is listed. Then the empty levels above the top drop out,
+    /// and a level above it that holds a file or only an unrecognized name stays.
+    #[test]
+    fn a_whole_listing_leaves_out_only_the_empty_levels_above_the_top() {
+        let none = EmptyLevels::default().whole(Level::new(3).unwrap());
+        assert_eq!(none.len(), 10);
+        let store = MemStore::new();
+        assert_eq!(whole_after(&store, 3), [0, 1, 2, 3, 9]);
+        block_on(put(&store, key(5, 1, 8)));
+        store.plant_unrecognized(Level::new(7).unwrap(), "junk.tmp");
+        assert_eq!(whole_after(&store, 3), [0, 1, 2, 3, 5, 7, 9]);
+        assert_eq!(whole_after(&store, 1), [0, 1, 5, 7, 9]);
+    }
+
+    /// A listing of some levels changes what is known of those alone: a level found empty
+    /// drops out, one found holding a file comes back, an unlisted one stays as it was.
+    #[test]
+    fn a_partial_listing_teaches_only_the_levels_it_read() {
+        let store = MemStore::new();
+        let all: Vec<ListAt> = Level::ALL.iter().map(|&l| ListAt::first(l)).collect();
+        let mut empty = EmptyLevels::default();
+        empty.learn(&block_on(Inventory::load(&store)).unwrap(), &all);
+        block_on(put(&store, key(5, 1, 8)));
+        block_on(put(&store, key(6, 1, 8)));
+        let five = [ListAt::first(Level::new(5).unwrap())];
+        empty.learn(
+            &block_on(Inventory::load_from(&store, &five)).unwrap(),
+            &five,
+        );
+        let top = Level::new(3).unwrap();
+        let read: Vec<u8> = empty.whole(top).iter().map(|at| at.level.get()).collect();
+        assert_eq!(read, [0, 1, 2, 3, 5, 9]);
     }
 
     #[test]

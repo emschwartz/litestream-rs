@@ -1,12 +1,12 @@
 diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
-index 01ddfa81f..f3d7c79f7 100644
+index 26a78aa42..ab966b9eb 100644
 --- a/crates/core/src/upload.rs
 +++ b/crates/core/src/upload.rs
-@@ -384,7 +384,7 @@ async fn list_step<L: Role, S: Role>(
+@@ -376,7 +376,7 @@ pub(crate) async fn list_step<L: Role, S: Role>(
                  }
                  TailVerdict::Replace => tail.prev().max(confirmed),
                  TailVerdict::Diverged => {
--                    return Ok(diverged(tail));
+-                    return Ok((diverged(tail), empty));
 +                    tail.prev().max(confirmed)
                  }
              }

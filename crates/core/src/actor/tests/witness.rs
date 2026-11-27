@@ -5,6 +5,7 @@
 use lsr_ltx::Encoder;
 
 use super::*;
+use crate::witness::Witnesses;
 
 /// Rewrites staged `n` as a whole, valid LTX file under the same key and
 /// header, with page 1 filled with `fill`: what a staging backup put back,

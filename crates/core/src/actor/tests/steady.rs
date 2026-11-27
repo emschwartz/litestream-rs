@@ -111,6 +111,32 @@ fn a_steady_writer_reads_no_level_zero_file_back() {
     assert_eq!(bill.get(&(Request::Get, 0)), None, "{bill:?}");
 }
 
+/// After the boot, which lists every level, a steady writer's whole listings never read the
+/// empty levels above the top (4 to 8): Go never lists them, and here they cost five LISTs
+/// per whole listing before.
+#[test]
+fn after_the_boot_a_steady_writer_never_lists_the_empty_levels_above_the_top() {
+    let mut rig = s3_like();
+    let mut actor = Actor::new(paced());
+    let start = 600_000_000;
+    rig.commit(1);
+    let booted = rig.tick(&mut actor, start);
+    assert!(
+        matches!(event(&booted), Some(Event::Booted { .. })),
+        "{booted:?}"
+    );
+    let mark = rig.remote.requests_made();
+    drive(&mut rig, &mut actor, start + 20, start + 480_000);
+    let bill = bill(&rig, mark);
+    assert!(
+        bill.get(&(Request::List, 9)).is_some_and(|n| *n >= 3),
+        "{bill:?}"
+    );
+    for level in 4..=8 {
+        assert_eq!(bill.get(&(Request::List, level)), None, "{bill:?}");
+    }
+}
+
 /// A token is held only while its staged file is: the prune that deletes the file lets the
 /// token go, so the set stays a compaction window's worth however long the engine runs.
 #[test]
