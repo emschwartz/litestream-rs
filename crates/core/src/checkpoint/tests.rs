@@ -1071,7 +1071,7 @@ fn a_checkpoint_returns_a_proof_only_after_a_step_through_the_end() {
     );
 }
 
-// A backlog larger than the barrier may copy (docs/decisions/D303.md).
+// A backlog larger than the barrier may copy (docs/decisions/D307.md).
 
 /// The checkpointer the protocol runs on, counting the frames copied while a barrier is held:
 /// the application's writers wait for every one of them.

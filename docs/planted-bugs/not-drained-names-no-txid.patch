@@ -1,11 +1,11 @@
 diff --git a/crates/sidecar/src/daemon.rs b/crates/sidecar/src/daemon.rs
-index 97a657bd2..6879a3016 100644
+index 23f43e8dc..7b9d50d1e 100644
 --- a/crates/sidecar/src/daemon.rs
 +++ b/crates/sidecar/src/daemon.rs
-@@ -602,7 +602,7 @@ impl Daemon {
+@@ -600,7 +600,7 @@ impl Daemon {
                  unsynced_wal_bytes,
                  staged_not_uploaded,
-             }) => {
+             })) => {
 -                let replicated = replicated.map_or_else(|| "none".to_owned(), |t| t.to_string());
 +                let replicated = replicated.map_or_else(|| "none".to_owned(), |_| "none".to_owned());
                  let fields = [

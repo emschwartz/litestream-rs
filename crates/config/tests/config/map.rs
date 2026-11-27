@@ -13,7 +13,7 @@ use lsr_config::{
 use lsr_core::{
     Interval, L0Retention, Maintenance, OtherWriter, Response, Responses, RetentionMode,
 };
-use lsr_replica::{IfReplicationStops, MaxUnreplicatedAge, NonZeroDuration, ReaderTracking};
+use lsr_replica::{IfReplicationStops, MaxUnreplicatedAge, NonZeroDuration};
 use lsr_store_s3::{Provider, UrlStyle};
 use tempfile::TempDir;
 
@@ -98,7 +98,6 @@ fn an_entry_with_no_settings_gets_go_s_defaults() {
     assert_eq!(config.checkpoint.interval, Some(Duration::from_secs(60)));
     assert_eq!(config.checkpoint.min_pages, NonZeroU32::new(1000));
     assert_eq!(config.checkpoint.truncate_pages, NonZeroU32::new(121_359));
-    assert_eq!(config.readers, ReaderTracking::Untracked);
     assert_eq!(config.maintenance, Maintenance::go_default());
     assert_eq!(
         config.sync_limits.wal_bytes_per_step,
@@ -180,10 +179,6 @@ fn truncate_page_n_acts_as_go() {
     assert_eq!(
         one(&db_with("")).config().checkpoint.truncate_pages,
         lsr_replica::Config::default().checkpoint.truncate_pages
-    );
-    assert_eq!(
-        one(&db_with("")).config().readers,
-        ReaderTracking::Untracked
     );
 }
 

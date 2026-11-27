@@ -33,7 +33,7 @@ fn every_checkpoint_lets_the_application_write_again_within_its_tick() {
 /// Another reader holds checkpoints back while 80 frames are committed and synced, as a level-9
 /// snapshot holds its read for its whole upload, then lets go: the checkpoint after copies that
 /// backlog with no barrier held, and no barrier copies more than its bound
-/// (`docs/decisions/D303.md`). Copied under the barrier, the backlog made a drill's writer wait
+/// (`docs/decisions/D307.md`). Copied under the barrier, the backlog made a drill's writer wait
 /// 5.9 s.
 #[test]
 fn a_backlog_a_reader_held_back_is_not_copied_under_the_barrier() {

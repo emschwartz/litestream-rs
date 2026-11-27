@@ -1,17 +1,14 @@
 diff --git a/crates/replica/src/config.rs b/crates/replica/src/config.rs
-index 01167aa8c..4f9a7ee78 100644
+index 13818eb58..37f4963ff 100644
 --- a/crates/replica/src/config.rs
 +++ b/crates/replica/src/config.rs
-@@ -178,13 +178,20 @@ impl Config {
+@@ -162,13 +162,17 @@ impl Config {
  
      /// The engine's configuration.
      pub(crate) fn actor(&self) -> ActorConfig {
-+        let checkpoint = match self.readers {
-+            ReaderTracking::Untracked => CheckpointConfig {
-+                truncate_pages: None,
-+                ..self.checkpoint
-+            },
-+            ReaderTracking::Tracked => self.checkpoint,
++        let checkpoint = CheckpointConfig {
++            truncate_pages: None,
++            ..self.checkpoint
 +        };
          ActorConfig {
              sync: SyncConfig {

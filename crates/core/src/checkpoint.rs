@@ -34,7 +34,7 @@
 //!   drill's writer waited 5.9 s on one). Here a barrier of its own seals and moves the read to
 //!   the committed end ([`Checkpointer::renew_read`]), the copy runs from the writer connection
 //!   with no barrier held ([`CheckpointMode::Backlog`]), and the ordinary PASSIVE follows over
-//!   what was committed meanwhile (docs/decisions/D303.md).
+//!   what was committed meanwhile (docs/decisions/D307.md).
 //!
 //! Protocol notes. A PASSIVE takes a write barrier, seals (syncs through the committed end),
 //! checkpoints, and releases the barrier on every path; a barrier that could not be released never
@@ -99,7 +99,7 @@ impl CheckpointConfig {
     /// An ordinary checkpoint copies about the
     /// threshold. A larger backlog built up while something held checkpoints back (a level-9
     /// snapshot does for its whole upload), and it is copied first with the barrier released
-    /// (`docs/decisions/D303.md`).
+    /// (`docs/decisions/D307.md`).
     #[must_use]
     pub fn barrier_frames(&self) -> u32 {
         self.min_pages

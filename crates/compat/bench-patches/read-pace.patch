@@ -1,7 +1,7 @@
 diff --git a/crates/replica/src/readers.rs b/crates/replica/src/readers.rs
 --- a/crates/replica/src/readers.rs
 +++ b/crates/replica/src/readers.rs
-@@ -20,12 +20,90 @@
+@@ -19,11 +19,90 @@
  //! only meet the gate's lock.
  
  use std::sync::Arc;
@@ -16,7 +16,6 @@ diff --git a/crates/replica/src/readers.rs b/crates/replica/src/readers.rs
 +use lsr_ltx::{DbPages, PageNo, Timestamp};
  use lsr_sqlite::{Sqlite, WritesHeld};
  
- use crate::config::ReaderTracking;
 +use crate::runtime::{Runtime, later};
 +
 +/// BENCH PROTOTYPE (crates/compat/bench-patches/read-pace.patch, never in the engine): a page
@@ -91,10 +90,11 @@ diff --git a/crates/replica/src/readers.rs b/crates/replica/src/readers.rs
 +        read
 +    }
 +}
- 
++
  /// Held for the length of one long read. While any guard lives, the replicator runs no
  /// TRUNCATE checkpoint. Counted, so overlapping readers are safe; dropping it ends the read.
-@@ -139,4 +217,4 @@ mod tests {
+ #[derive(Debug)]
+@@ -126,4 +205,4 @@ mod tests {
          drop(second);
          assert_eq!(count.load(Ordering::SeqCst), 0);
      }
@@ -118,4 +118,4 @@ diff --git a/crates/replica/src/thread.rs b/crates/replica/src/thread.rs
 +        );
          let mut ck = Guarded::new(
              sqlite,
-             self.config.readers,
+             Arc::clone(&self.shared.readers),

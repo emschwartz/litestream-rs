@@ -22,9 +22,8 @@ use lsr_core::{CheckpointMode, Event as EngineEvent, Fault};
 use lsr_replica::StartOptions;
 use lsr_replica::{
     AppCheckpoint, AppCheckpoints, AppNotice, ChannelSink, CheckpointConfig, Config, DegradedCause,
-    Depth, DynStore, Event, EventSink, Gone, IfMissing, Phase, ReaderTracking, Readiness,
-    Replicator, Responses, SetupError, StartError, StopCause, StopOutcome, Task,
-    restore_if_missing, verify,
+    Depth, DynStore, Event, EventSink, Gone, IfMissing, Phase, Readiness, Replicator, Responses,
+    SetupError, StartError, StopCause, StopOutcome, Task, Unfinished, restore_if_missing, verify,
 };
 use rusqlite::Connection;
 
@@ -95,7 +94,7 @@ fn a_stop_before_the_first_boot_drains_without_waiting_for_a_poll() {
         wait(&first, |h| h.synced.is_some() && h.counters.retries > 0);
         assert!(matches!(
             first.stop(Duration::ZERO).wait(),
-            StopOutcome::DeadlineReached { .. }
+            StopOutcome::DeadlineReached(_)
         ));
         drop(first);
         site.commit(2);
@@ -472,10 +471,10 @@ fn a_zero_deadline_reports_what_was_left_and_the_next_start_continues() {
     let uploads = replicator.health().counters.store.begin_upload.calls;
     site.commit(3);
     let cut_off = replicator.stop(Duration::ZERO).wait();
-    let StopOutcome::DeadlineReached {
+    let StopOutcome::DeadlineReached(Unfinished {
         unsynced_wal_bytes,
         staged_not_uploaded,
-    } = cut_off
+    }) = cut_off
     else {
         panic!("{cut_off:?}");
     };
@@ -508,7 +507,7 @@ fn a_zero_deadline_reports_what_was_left_and_the_next_start_continues() {
     wait(&panicked, |h| h.counters.panics > 0);
     let again = panicked.stop(Duration::ZERO).wait();
     assert!(
-        matches!(again, StopOutcome::DeadlineReached { staged_not_uploaded: n, .. } if n == staged_not_uploaded),
+        matches!(again, StopOutcome::DeadlineReached(Unfinished { staged_not_uploaded: n, .. }) if n == staged_not_uploaded),
         "{again:?}"
     );
     drop(panicked);
@@ -560,7 +559,7 @@ fn a_staged_file_damaged_before_the_first_upload_is_dropped_and_the_next_start_b
     });
     let cut_off = replicator.stop(Duration::ZERO).wait();
     assert!(
-        matches!(cut_off, StopOutcome::DeadlineReached { staged_not_uploaded, .. } if staged_not_uploaded > 0),
+        matches!(cut_off, StopOutcome::DeadlineReached(Unfinished { staged_not_uploaded, .. }) if staged_not_uploaded > 0),
         "{cut_off:?}"
     );
     drop(replicator);
@@ -638,7 +637,7 @@ fn a_second_stop_keeps_the_earlier_deadline() {
     wait(&replicator, |h| h.phase == Phase::Draining);
     let second = replicator.stop(Duration::ZERO).wait();
     assert!(
-        matches!(second, StopOutcome::DeadlineReached { .. }),
+        matches!(second, StopOutcome::DeadlineReached(_)),
         "{second:?}"
     );
     assert_eq!(first.wait(), second);
@@ -818,14 +817,13 @@ fn checkpoints(events: &[Event], mode: CheckpointMode) -> usize {
         .count()
 }
 
-/// Under tracked readers no TRUNCATE runs while a guard lives: it is reported busy and waits
+/// No TRUNCATE runs while a reader guard lives: it is reported busy and waits
 /// its backoff, poll after poll. Once the guard is gone, replication drains as usual.
 #[test]
 fn a_reader_guard_holds_off_truncate() {
     let site = Site::new();
     let (runtime, clock) = fake();
     let tracked = Config {
-        readers: ReaderTracking::Tracked,
         checkpoint: CheckpointConfig {
             interval: None,
             min_pages: None,
@@ -895,7 +893,7 @@ fn a_reader_guard_holds_off_truncate() {
     site.assert_restores(&*site.store());
 }
 
-/// The default configuration, which gives no word about readers, TRUNCATEs once the WAL passes
+/// The default configuration, with no reader guard held, TRUNCATEs once the WAL passes
 /// the threshold, as Go does: the WAL file shrinks. (The threshold is lowered so the test need
 /// not write 500 MB; the default's own value is pinned in `lsr_replica::config`.)
 #[test]
@@ -910,7 +908,6 @@ fn the_default_configuration_truncates_the_wal_past_the_threshold() {
         },
         ..config()
     };
-    assert_eq!(defaults.readers, ReaderTracking::Untracked);
     let replicator = Replicator::start(
         &site.db,
         site.store(),

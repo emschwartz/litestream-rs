@@ -226,7 +226,7 @@ pub enum CheckpointMode {
     /// Copy what no reader needs, from the writer connection, and keep the read transaction:
     /// the engine's own read holds the copy at or below its mark, so it copies only frames the
     /// engine has staged and never lets the WAL restart. It takes no write lock, so the
-    /// application writes on while it runs (`docs/decisions/D303.md`).
+    /// application writes on while it runs (`docs/decisions/D307.md`).
     Backlog,
 }
 
