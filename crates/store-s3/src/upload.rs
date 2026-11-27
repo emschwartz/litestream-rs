@@ -93,7 +93,7 @@ use crate::transport::{HttpResponse, StreamedRequest, Transport};
 /// A part's bytes: a buffer, or what is needed to read them again.
 pub(crate) enum Bytes {
     Held(Vec<u8>),
-    Again(Sealed),
+    Again(Box<Sealed>),
 }
 
 impl Bytes {
@@ -182,7 +182,7 @@ impl Filling {
     fn seal(&mut self) -> Option<Bytes> {
         match self {
             Self::Held(buf) => Some(Bytes::Held(std::mem::take(buf))),
-            Self::Again(run) => run.take().map(|run| Bytes::Again(run.seal())),
+            Self::Again(run) => run.take().map(|run| Bytes::Again(Box::new(run.seal()))),
         }
     }
 
