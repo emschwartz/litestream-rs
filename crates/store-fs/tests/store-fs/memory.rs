@@ -3,14 +3,16 @@
 //!
 //! A merge holds every input at once (it takes the next page from whichever input has the
 //! lowest one), so its memory is the inputs it merges times what each one holds: the read
-//! chunk the store hands back, plus one page. `MAX_INPUTS` files of a little over a
-//! mebibyte each are the busy case the engine meets: a second of writes per file. The
+//! chunk the store hands back, plus one page. Files of a little over a mebibyte each are the
+//! busy case the engine meets: a second of writes per file; a merge of as many inputs as one
+//! takes (`MAX_INPUTS`) is measured on smaller files, each still larger than its window. The
 //! files are written by the real encoder through the store before a measurement starts,
 //! and the output goes to a second directory, so only the compaction is counted.
 //!
 //! Both roles are measured: a replica's inputs are read a mebibyte at a time (the public
 //! `compact`, what a file replica's levels above 1 get), and the engine's level-1
-//! compaction reads the staged level-0 files in a 128 KiB window (`compact_staged`).
+//! compaction reads the staged level-0 files in their share of a 4 MiB budget, at most 128 KiB
+//! each (`compact_staged`).
 //!
 //! A compaction also holds one output buffer for the file, not one per flush: the count of
 //! 256 KiB-and-over allocations is pinned (`a_compaction_allocates_few_large_blocks`).
@@ -61,10 +63,15 @@ const MIB: usize = 1024 * KIB;
 /// Pages every input holds: a little over one mebibyte of incompressible 4 KiB pages.
 const PAGES: u32 = 300;
 
+/// Pages every input of a merge of 64 or more holds: 320 KiB, more than any window it gets.
+const FULL_PAGES: u32 = 80;
+
 /// What one read of a replica's input asks for, and of a staged one, restated so a change
 /// to either shows here.
-/// A replica's input gets its share of the 16 MiB budget: 512 KiB at `MAX_INPUTS`.
-const REPLICA_WINDOW: usize = 16 * MIB / MAX_INPUTS;
+/// A replica's input gets its share of the 16 MiB budget, a staged one its share of 4 MiB,
+/// at most 128 KiB.
+const REPLICA_BUDGET: usize = 16 * MIB;
+const STAGED_BUDGET: usize = 4 * MIB;
 const STAGED_WINDOW: usize = 128 * KIB;
 
 /// A page's size, and the encoder's output buffer that compaction flushes at.
@@ -87,13 +94,13 @@ fn fill(state: &Cell<u64>, buf: &mut [u8]) {
     }
 }
 
-/// One level-0 file of `PAGES` pages for transaction `n`, as the encoder writes it.
-fn level_zero_file(n: u64, rng: &Cell<u64>) -> Vec<u8> {
+/// One level-0 file of `pages` pages for transaction `n`, as the encoder writes it.
+fn level_zero_file(n: u64, pages: u32, rng: &Cell<u64>) -> Vec<u8> {
     let size = PageSize::new(4096).unwrap();
     let header = Header::new(HeaderFields {
         tracked: false,
         page_size: size,
-        commit: PAGES,
+        commit: pages,
         txids: TxidRange::new(txid(n), txid(n)).unwrap(),
         timestamp: Timestamp::from_unix_millis(1_700_000_000_000),
         pre_apply: None,
@@ -103,7 +110,7 @@ fn level_zero_file(n: u64, rng: &Cell<u64>) -> Vec<u8> {
     .unwrap();
     let mut encoder = Encoder::new(Vec::new(), header).unwrap();
     let mut page = vec![0_u8; size.bytes()];
-    for pgno in 1..=PAGES {
+    for pgno in 1..=pages {
         fill(rng, &mut page);
         encoder
             .write_page(PageNo::new(pgno, size).unwrap(), &page)
@@ -112,17 +119,17 @@ fn level_zero_file(n: u64, rng: &Cell<u64>) -> Vec<u8> {
     encoder.finish(None).unwrap().0
 }
 
-/// `MAX_INPUTS` level-0 files in a directory, and the inputs naming them.
-fn staged_inputs() -> (tempfile::TempDir, FsStore, CompactionInputs) {
+/// `n` level-0 files of `pages` pages in a directory, and the inputs naming them.
+fn staged_inputs(n: usize, pages: u32) -> (tempfile::TempDir, FsStore, CompactionInputs) {
     let from = tempfile::tempdir().unwrap();
     let source = FsStore::new(from.path());
     let rng = Cell::new(0x9E37_79B9_7F4A_7C15);
     let stamp = Timestamp::from_unix_millis(1_700_000_000_000);
-    for n in 1..=u64::try_from(MAX_INPUTS).unwrap() {
-        let key = FileKey::new(Level::ZERO, TxidRange::new(txid(n), txid(n)).unwrap());
-        let bytes = level_zero_file(n, &rng);
+    for t in 1..=u64::try_from(n).unwrap() {
+        let key = FileKey::new(Level::ZERO, TxidRange::new(txid(t), txid(t)).unwrap());
+        let bytes = level_zero_file(t, pages, &rng);
         assert!(
-            bytes.len() > MIB,
+            bytes.len() > STAGED_WINDOW.max(REPLICA_BUDGET / n).min(MIB),
             "an input holds more than one read window"
         );
         block_on(async {
@@ -137,55 +144,79 @@ fn staged_inputs() -> (tempfile::TempDir, FsStore, CompactionInputs) {
     let files = block_on(source.list(Level::ZERO, None, PageLimit::MAX))
         .unwrap()
         .files;
-    assert_eq!(files.len(), MAX_INPUTS);
+    assert_eq!(files.len(), n);
     (from, source, CompactionInputs::new(files).unwrap())
 }
 
-/// Asserts `held` is at most the output's flush buffer and slack plus `window` and a page
-/// for each of the `MAX_INPUTS` inputs.
-fn assert_holds_a_window_per_input(held: usize, window: usize) {
-    let bound = MAX_INPUTS * (window + PAGE) + FLUSH + MIB;
+/// Asserts `held` is at most the output's flush buffer and slack plus, for each of `n`
+/// inputs, `window` and three pages: the one waiting to be merged, and the decoder's page and
+/// frame.
+fn assert_holds_a_window_per_input(held: usize, n: usize, window: usize) {
+    let bound = n * (window + 3 * PAGE) + FLUSH + MIB;
+    eprintln!(
+        "{n} inputs in {} KiB windows: {} KiB (bound {} KiB)",
+        window >> 10,
+        held >> 10,
+        bound >> 10
+    );
     assert!(
         held <= bound,
-        "compaction held {held} bytes, over the bound of {bound} ({MAX_INPUTS} inputs x ({window} + {PAGE}) + {FLUSH} + 1 MiB)"
+        "compaction held {held} bytes, over the bound of {bound} ({n} inputs x ({window} + 3 x {PAGE}) + {FLUSH} + 1 MiB)"
+    );
+    assert!(
+        held >= n * window / 2,
+        "the gate saw {held} bytes: it cannot see the windows"
     );
 }
 
-/// A compaction reading its inputs as a replica's holds its share of the budget per input.
+/// Compacts `n` staged files of `pages` pages into level 1, read as `staged` says, and returns
+/// the peak live heap.
+fn compaction_peak(n: usize, pages: u32, staged: bool) -> usize {
+    let (_from, source, inputs) = staged_inputs(n, pages);
+    let to = tempfile::tempdir().unwrap();
+    let dest = FsStore::new(to.path());
+    let level = Level::new(1).unwrap();
+    let (done, peak) = peak_of(|| {
+        block_on(async {
+            if staged {
+                compact_staged(&source, &dest, &inputs, level).await
+            } else {
+                compact(&source, &dest, &inputs, level).await
+            }
+        })
+    });
+    assert_eq!(done.unwrap().pages(), pages);
+    peak.extra
+}
+
+/// A compaction reading its inputs as a replica's holds its share of the budget per input, at
+/// 64 inputs and at as many as one takes.
 #[test]
 fn a_compaction_holds_its_share_of_the_budget_per_replica_input() {
-    let (_from, source, inputs) = staged_inputs();
-    let to = tempfile::tempdir().unwrap();
-    let dest = FsStore::new(to.path());
-
-    let (done, peak) =
-        peak_of(|| block_on(compact(&source, &dest, &inputs, Level::new(1).unwrap())));
-
-    assert_eq!(done.unwrap().pages(), PAGES);
-    assert_holds_a_window_per_input(peak.extra, REPLICA_WINDOW);
+    for n in [64, MAX_INPUTS] {
+        let held = compaction_peak(n, FULL_PAGES, false);
+        assert_holds_a_window_per_input(held, n, REPLICA_BUDGET / n);
+    }
 }
 
-/// The engine's level-1 compaction reads the staged files in the staging window.
+/// The engine's level-1 compaction of a few staged files reads each in the staging window.
 #[test]
 fn a_level_one_compaction_holds_a_staging_window_per_input() {
-    let (_from, source, inputs) = staged_inputs();
-    let to = tempfile::tempdir().unwrap();
-    let dest = FsStore::new(to.path());
-
-    let (done, peak) = peak_of(|| {
-        block_on(compact_staged(
-            &source,
-            &dest,
-            &inputs,
-            Level::new(1).unwrap(),
-        ))
-    });
-
-    assert_eq!(done.unwrap().pages(), PAGES);
-    assert_holds_a_window_per_input(peak.extra, STAGED_WINDOW);
+    let held = compaction_peak(4, PAGES, true);
+    assert_holds_a_window_per_input(held, 4, STAGED_WINDOW);
 }
 
-/// Blocks of 256 KiB or more a level-1 compaction of `MAX_INPUTS` staged files may allocate: the
+/// A level-1 compaction of 64 staged files, and of as many as one takes, reads each in its
+/// share of the staging budget: 4 MiB of windows, as a merge of 32 holds.
+#[test]
+fn a_full_level_one_compaction_holds_the_staging_budget() {
+    for n in [64, MAX_INPUTS] {
+        let held = compaction_peak(n, FULL_PAGES, true);
+        assert_holds_a_window_per_input(held, n, STAGED_BUDGET / n);
+    }
+}
+
+/// Blocks of 256 KiB or more a level-1 compaction of 32 staged files may allocate: the
 /// output buffer, once (the output is the 300 pages every input holds, about five flushes).
 /// With a fresh buffer at every flush, each growing from empty by doubling, it is one block per
 /// flush.
@@ -193,7 +224,7 @@ const LARGE_BLOCKS: usize = 2;
 
 #[test]
 fn a_compaction_allocates_few_large_blocks() {
-    let (_from, source, inputs) = staged_inputs();
+    let (_from, source, inputs) = staged_inputs(32, PAGES);
     let to = tempfile::tempdir().unwrap();
     let dest = FsStore::new(to.path());
 

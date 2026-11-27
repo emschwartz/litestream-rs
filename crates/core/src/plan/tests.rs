@@ -227,6 +227,25 @@ fn a_timestamp_restore_that_would_stop_at_a_hole_is_a_gap() {
 }
 
 #[test]
+fn an_outcome_reaches_where_its_chain_ends_or_nowhere() {
+    let whole = [at(9, 1, 3), at(0, 4, 4)];
+    assert_eq!(
+        plan_reference(&inv(&whole), RestoreTarget::Latest).reaches(),
+        Some(txid(4))
+    );
+    // The instant falls inside the compacted file for 3 to 5: the chain ends at 2.
+    let inside = [at(9, 1, 2), at(1, 3, 5)];
+    let target = RestoreTarget::AsOf(Timestamp::from_unix_millis(350));
+    let outcome = plan_reference(&inv(&inside), target);
+    assert!(
+        matches!(outcome, PlanOutcome::AsOfInsideFile { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(outcome.reaches(), Some(txid(2)));
+    assert_eq!(gap(4, 6).reaches(), None);
+}
+
+#[test]
 fn a_higher_level_file_spanning_the_hole_heals_it() {
     let files = [at(9, 1, 3), at(0, 4, 4), at(0, 6, 6), at(1, 5, 7)];
     for target in targets_through(7) {

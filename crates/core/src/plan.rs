@@ -318,6 +318,21 @@ impl PlanOutcome {
         }
     }
 
+    /// Where the chain of a plan, or of an instant inside a file, ends; `None` for every
+    /// other outcome.
+    #[must_use]
+    pub const fn reaches(&self) -> Option<Txid> {
+        match self {
+            Self::Plan(chain) | Self::AsOfInsideFile { chain, .. } => Some(chain.reaches),
+            Self::EmptyReplica
+            | Self::NoSnapshot { .. }
+            | Self::BeyondNewest { .. }
+            | Self::Gap { .. }
+            | Self::InsideFile { .. }
+            | Self::MalformedSnapshot { .. } => None,
+        }
+    }
+
     /// The plan's chain, `None` for every other outcome.
     #[must_use]
     pub const fn chain(&self) -> Option<&ContiguousChain> {
@@ -335,7 +350,7 @@ impl PlanOutcome {
 }
 
 /// Whether a file starting at [`min`] can follow a chain that ends at [`reach`].
-fn touches(min: Txid, reach: Txid) -> bool {
+pub(crate) fn touches(min: Txid, reach: Txid) -> bool {
     reach.next().is_none_or(|one_past| min <= one_past)
 }
 

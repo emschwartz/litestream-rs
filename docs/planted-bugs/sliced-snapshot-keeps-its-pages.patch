@@ -1,0 +1,28 @@
+diff --git a/crates/core/src/snapshot.rs b/crates/core/src/snapshot.rs
+index 63b7c2774..02e148820 100644
+--- a/crates/core/src/snapshot.rs
++++ b/crates/core/src/snapshot.rs
+@@ -170,6 +170,7 @@ pub(crate) struct Snapshotting {
+     pinned: bool,
+     /// The last slice stopped for the upload's parts (`docs/decisions/D233.md`).
+     pub(crate) waits: bool,
++    kept: Vec<Vec<u8>>,
+ }
+ 
+ impl Snapshotting {
+@@ -226,6 +227,7 @@ impl Snapshotting {
+             sent: 0,
+             pinned,
+             waits: false,
++            kept: Vec::new(),
+         })
+     }
+ 
+@@ -280,6 +282,7 @@ impl Snapshotting {
+                 .len()
+                 .min(usize::try_from(room.get()).unwrap_or(usize::MAX));
+             let chunk = out.get(..n).ok_or_else(|| BugSite::Encode.hit())?;
++            self.kept.push(chunk.to_vec());
+             open.write(chunk).await.map_err(|err| S::fault(&err))?;
+             out.drain(..n);
+             let n = u64::try_from(n).unwrap_or(u64::MAX);

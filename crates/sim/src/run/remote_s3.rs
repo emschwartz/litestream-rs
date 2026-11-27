@@ -16,7 +16,8 @@ const fn expected(fault: HttpFault) -> Option<Denied> {
         | HttpFault::TruncateBody(_)
         | HttpFault::WrongEtag(_)
         | HttpFault::BodyMismatch(_)
-        | HttpFault::ConnectionReset(_) => None,
+        | HttpFault::ConnectionReset(_)
+        | HttpFault::Hang(_) => None,
     }
 }
 use lsr_store_s3::{Fault, Shape};

@@ -98,5 +98,59 @@ pub fn nightly_base(day: &str) -> Result<u64, ParseDayError> {
     number.checked_mul(SEEDS_PER_NIGHT).ok_or_else(bad)
 }
 
+/// The first seed of the nightly's large-profile set (`docs/decisions/D277.md`) for a UTC date:
+/// the upper half of the night's range, so it never meets the rotating set, which counts up from
+/// [`nightly_base`] and stays below this by far (a night runs thousands of seeds, not
+/// [`SEEDS_PER_NIGHT`] / 2).
+///
+/// # Errors
+/// [`ParseDayError`] as [`nightly_base`].
+pub fn long_base(day: &str) -> Result<u64, ParseDayError> {
+    let base = nightly_base(day)?;
+    base.checked_add(SEEDS_PER_NIGHT / 2)
+        .ok_or_else(|| ParseDayError(day.to_owned()))
+}
+
+/// Text that is not a shard, `INDEX/COUNT` with `INDEX < COUNT`.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+#[error("not a shard: expected INDEX/COUNT with INDEX < COUNT, got {0:?}")]
+pub struct ParseShardError(String);
+
+/// One of `count` parallel jobs that split a seed range between them: shard `index` runs the
+/// seeds at offsets `index`, `index + count`, `index + 2 * count` and so on from the base, so
+/// no two shards run a seed and together they run every one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shard {
+    index: u64,
+    count: u64,
+}
+
+impl Shard {
+    /// Parses `INDEX/COUNT`, as `LSR_SIM_SHARD` holds it.
+    ///
+    /// # Errors
+    /// [`ParseShardError`] unless both are numbers, the count is not 0 and the index is below it.
+    pub fn parse(text: &str) -> Result<Self, ParseShardError> {
+        let bad = || ParseShardError(text.to_owned());
+        let (index, count) = text.split_once('/').ok_or_else(bad)?;
+        let (index, count): (u64, u64) = (
+            index.parse().map_err(|_err| bad())?,
+            count.parse().map_err(|_err| bad())?,
+        );
+        if index >= count {
+            return Err(bad());
+        }
+        Ok(Self { index, count })
+    }
+
+    /// The seeds this shard runs from `base`, in order, without end.
+    pub fn seeds(self, base: u64) -> impl Iterator<Item = Seed> {
+        (0..)
+            .map_while(move |k: u64| k.checked_mul(self.count)?.checked_add(self.index))
+            .map_while(move |offset| base.checked_add(offset))
+            .map(Seed::new)
+    }
+}
+
 #[cfg(test)]
 mod tests;

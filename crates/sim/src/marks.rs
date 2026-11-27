@@ -241,6 +241,14 @@ classes! {
     HoldLyingDisk = "Hold.LyingDisk", Lasting;
     HoldStoreDownAll = "Hold.StoreDownAll", Lasting;
     HoldSecondWriter = "Hold.SecondWriter", Lasting;
+    // The gray weather (`docs/decisions/D276.md`): slowness, hangs and pauses.
+    StoreHang = "StoreFault.Hang", Once;
+    StoreHangAfterPublish = "StoreFault.HangAfterPublish", Once;
+    // Undrawn as a store fault: the shape of Hold.Hang, which is its drawn form.
+    StoreHangEvery = "StoreFault.HangEvery", Undrawn;
+    HoldHang = "Hold.Hang", Lasting;
+    HoldSlowStaging = "Hold.SlowStaging", Lasting;
+    Pause = "Pause", Once;
 }
 
 /// A count the gate would require that a class cannot earn, with the reason. Each is a known gap in what the soak
@@ -308,6 +316,7 @@ impl Class {
             Op::Crash(CrashKind::Process) => Self::CrashProcess,
             Op::Crash(CrashKind::Power) => Self::CrashPower,
             Op::ClockJump(_) => Self::ClockJump,
+            Op::Pause { .. } => Self::Pause,
             Op::SecondWriter { .. } => Self::SecondWriter,
             Op::StoreFault { shape, .. } => Self::of_shape(shape),
             Op::EnvFault(fault) => Self::of_env(*fault),
@@ -330,6 +339,9 @@ impl Class {
             FaultShape::ChecksumMismatch => Self::StoreChecksumMismatch,
             FaultShape::CorruptPublish => Self::StoreCorruptPublish,
             FaultShape::FlipByteOnRead { .. } => Self::StoreFlipByteOnRead,
+            FaultShape::Hang => Self::StoreHang,
+            FaultShape::HangAfterPublish => Self::StoreHangAfterPublish,
+            FaultShape::HangEvery => Self::StoreHangEvery,
             // A failing sweep lasts until a heal, as a rate does.
             FaultShape::Rate { .. } | FaultShape::Scratch(_) => Self::StoreRate,
         }
@@ -418,6 +430,8 @@ impl Class {
             Hold::LyingDisk => Self::HoldLyingDisk,
             Hold::StoreDownAll => Self::HoldStoreDownAll,
             Hold::SecondWriter => Self::HoldSecondWriter,
+            Hold::Hang(_) => Self::HoldHang,
+            Hold::SlowStaging(_) => Self::HoldSlowStaging,
         }
     }
 

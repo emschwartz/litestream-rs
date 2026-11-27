@@ -10,8 +10,8 @@
 //! inputs are merged in ascending page order and the newest input holding a
 //! page wins. A page above the output's commit is dropped, and the lock page
 //! never appears because [PageNo] cannot hold it. Memory is one read window
-//! ([`Role::COMPACT_WINDOW`]: 128 KiB from staging, at most 1 MiB from the replica, within the
-//! role's [`Role::COMPACT_BUDGET`]) and one
+//! ([`Role::COMPACT_WINDOW`]: at most 128 KiB from staging and 1 MiB from the replica, the
+//! role's [`Role::COMPACT_BUDGET`] shared out) and one
 //! page per input plus the encoder's output buffer, whatever the database size: the output page index (at most 30 bytes a page) is the only thing that
 //! grows with it. Go's fan-in is unbounded (upstream #1467); a level with more
 //! files than [MAX_INPUTS] is compacted into several files by the caller.
@@ -63,7 +63,7 @@ use lsr_ltx::{
 };
 use thiserror::Error;
 
-use crate::fault::role::{Replica, Role, STAGING_WINDOW};
+use crate::fault::role::{Replica, Role, SMALLEST_WINDOW};
 use crate::fault::{BugSite, Fault};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, Next, ReadFault, check_link};
@@ -77,8 +77,12 @@ use crate::store::{Flight, ObjectStore, ReadLen, ReadStream, Rest, StoreError, U
 )]
 mod tests;
 
-/// Most input files one compaction takes.
-pub const MAX_INPUTS: usize = 32;
+/// Most input files one compaction takes: the staging directory's 4 MiB budget, the smaller
+/// role's, in windows of the smallest size a read takes (32 KiB), so a merge of any allowed
+/// fan-in reads within its role's budget. A 60 second level-1 window of one file a second
+/// merges as one file, as Go merges every file the level below holds; Go's fan-in has no
+/// bound at all (upstream #1467), this one is the memory (`docs/decisions/D295.md`).
+pub const MAX_INPUTS: usize = 128;
 
 /// The most bytes asked of a replica per read of an input ([`Role::COMPACT_WINDOW`] says what
 /// a staged one gets; [`Role::COMPACT_BUDGET`] shares the total out).
@@ -355,7 +359,7 @@ impl Budget {
         let share = S::COMPACT_BUDGET
             .checked_div(u64::try_from(inputs).unwrap_or(u64::MAX))
             .unwrap_or(most);
-        let window = share.clamp(STAGING_WINDOW.get().min(most), most);
+        let window = share.clamp(SMALLEST_WINDOW.get().min(most), most);
         Self {
             chunk: u32::try_from(window)
                 .ok()

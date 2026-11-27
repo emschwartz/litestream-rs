@@ -127,7 +127,7 @@ pub const CLEAR_TICKS: u32 = 4;
 /// What one tick showed the judge.
 #[derive(Clone, Copy, Debug)]
 pub struct TickSeen {
-    /// When it began, on the engine's clock.
+    /// When its reads ended, on the engine's clock: its start, and what it stalled inside.
     pub at: Timestamp,
     /// The same instant with every clock step taken out.
     pub true_at: i64,
@@ -462,7 +462,12 @@ pub fn fired(handle: &crate::store::FaultHandle) -> Fired {
                 | crate::store::FaultShape::Rate { err, .. } => {
                     (matches!(err, lsr_core::StoreError::Denied { .. }), false)
                 }
+                // A timeout says nothing of whether the request landed.
+                crate::store::FaultShape::Hang | crate::store::FaultShape::HangEvery => {
+                    (false, false)
+                }
                 crate::store::FaultShape::ErrorAfterPublish(_)
+                | crate::store::FaultShape::HangAfterPublish
                 | crate::store::FaultShape::SizeMismatch
                 | crate::store::FaultShape::ChecksumMismatch
                 | crate::store::FaultShape::CorruptPublish => (false, true),

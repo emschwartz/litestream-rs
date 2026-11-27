@@ -29,7 +29,12 @@ fn newest_upper(rig: &Rig) -> Vec<FileInfo> {
 /// time. The read-back reads the header and the tail only, so a body the store took wrong is
 /// the store's to refuse (signed uploads, `docs/decisions/D272.md`); a bad tail it catches.
 pub(super) fn rot(rig: &Rig, info: &FileInfo) {
-    rewrite(rig, info, |bytes| {
+    rot_at(rig, info, ts(T0));
+}
+
+/// [`rot`], the object keeping the created-at time `at` it was written with.
+pub(super) fn rot_at(rig: &Rig, info: &FileInfo, at: Timestamp) {
+    rewrite(rig, info, at, |bytes| {
         let at = bytes.len().saturating_sub(8);
         bytes[at..].fill(0);
     });
@@ -37,19 +42,19 @@ pub(super) fn rot(rig: &Rig, info: &FileInfo) {
 
 /// Rewrites the replica's object cut short by a third, as a torn upload leaves it.
 fn cut(rig: &Rig, info: &FileInfo) {
-    rewrite(rig, info, |bytes| {
+    rewrite(rig, info, ts(T0), |bytes| {
         bytes.truncate(bytes.len().saturating_sub(bytes.len() / 3))
     });
 }
 
-fn rewrite(rig: &Rig, info: &FileInfo, change: impl FnOnce(&mut Vec<u8>)) {
+fn rewrite(rig: &Rig, info: &FileInfo, at: Timestamp, change: impl FnOnce(&mut Vec<u8>)) {
     let store = &rig.remote.inner;
     let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
     let mut bad = block_on(store.read(&info.key, 0, all)).unwrap();
     change(&mut bad);
     block_on(async {
         let mut up = store
-            .begin_upload(&info.key, ts(T0), WriteMode::Replace)
+            .begin_upload(&info.key, at, WriteMode::Replace)
             .await
             .unwrap();
         up.write(&bad).await.unwrap();

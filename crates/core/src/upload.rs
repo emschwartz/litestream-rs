@@ -101,7 +101,7 @@ use lsr_ltx::{Decoder, Txid, TxidRange, Verified};
 
 use crate::fault::role::{Replica, Role, Staging};
 use crate::fault::{BugSite, Fault};
-use crate::inventory::{Inventory, InventoryError};
+use crate::inventory::{EmptyLevels, Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::{verified, verifies};
 use crate::publish::{self, Open, Unpublished, Writer};
@@ -308,7 +308,7 @@ pub(crate) async fn upload_step<L: Role, S: Role>(
         })),
         (UploadPlan::List, _) => list_step(state, staging, remote, newest_staged)
             .await
-            .map(Some),
+            .map(|(listed, _)| Some(listed)),
         (UploadPlan::Upload(_), Some(sending)) => {
             let stores = (staging, remote);
             put_step(state, stores, sending, newest_staged, (in_flight, budget)).await
@@ -332,15 +332,23 @@ pub(crate) fn inventory_fault<R: Role>(err: &InventoryError) -> Fault {
     }
 }
 
-async fn list_step<L: Role, S: Role>(
+/// The uploader's listing of every level, and what it showed of which levels 1 to 8 are
+/// empty (the boot keeps that for maintenance, `EmptyLevels`).
+pub(crate) async fn list_step<L: Role, S: Role>(
     state: UploadState,
     staging: &L,
     remote: &S,
     newest_staged: Option<Txid>,
-) -> Result<Uploaded, UploadFailed> {
-    let inventory = Inventory::load(remote)
+) -> Result<(Uploaded, EmptyLevels), UploadFailed> {
+    let starts: Vec<ListAt> = Level::ALL
+        .iter()
+        .map(|&level| ListAt::first(level))
+        .collect();
+    let inventory = Inventory::load_from(remote, &starts)
         .await
         .map_err(|err| fail(state, inventory_fault::<S>(&err)))?;
+    let mut empty = EmptyLevels::default();
+    empty.learn(&inventory, &starts);
     let confirmed = state.confirmed();
     let newest = inventory.newest();
     if newest > newest_staged {
@@ -368,16 +376,19 @@ async fn list_step<L: Role, S: Role>(
                 }
                 TailVerdict::Replace => tail.prev().max(confirmed),
                 TailVerdict::Diverged => {
-                    return Ok(diverged(tail));
+                    return Ok((diverged(tail), empty));
                 }
             }
         }
         _ => newest,
     };
-    Ok(Uploaded {
-        state: UploadState::At(known),
-        did: Did::Listed { newest: known },
-    })
+    Ok((
+        Uploaded {
+            state: UploadState::At(known),
+            did: Did::Listed { newest: known },
+        },
+        empty,
+    ))
 }
 
 /// Whether a level 1 to 9 file in `inventory` holds `txid`: it covers it, so the transaction's
@@ -863,7 +874,7 @@ async fn taken<L: Role, S: Role>(
     // The relist judges the refused key from a fresh listing and a byte compare.
     list_step(list_first(state), staging, remote, newest_staged)
         .await
-        .map(Some)
+        .map(|(listed, _)| Some(listed))
 }
 
 /// Why a second read of a staged file gave an upload no bytes.

@@ -53,6 +53,7 @@ struct State {
     /// Logical milliseconds, advanced by one at each commit.
     clock: i64,
     created_at_calls: u64,
+    list_calls: u64,
     /// Scratch files a killed writer left, as `remove_scratch` counts them: planted, or one
     /// for each upload dropped with neither a commit nor an abort.
     scratch: u64,
@@ -170,6 +171,12 @@ impl MemStore {
         self.lock().created_at_calls
     }
 
+    /// How many pages were listed, one per level asked, whatever the batch they went in.
+    #[must_use]
+    pub fn list_calls(&self) -> u64 {
+        self.lock().list_calls
+    }
+
     /// Puts a name that is not an LTX key into a level, as a stray file would
     /// be in a directory.
     pub fn plant_unrecognized(&self, level: Level, name: &str) {
@@ -206,6 +213,7 @@ impl MemStore {
         limit: PageLimit,
     ) -> Result<Listing, StoreError> {
         let mut state = self.lock();
+        state.list_calls = state.list_calls.saturating_add(1);
         state.take_fault(StoreOp::List)?;
         let lazy = state.lazy;
         let files = state

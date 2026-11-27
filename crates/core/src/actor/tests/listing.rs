@@ -1,7 +1,7 @@
 //! How often maintenance lists the replica under a steady writer.
 //!
-//! A listing is one LIST call per level (ten), and maintenance plans every
-//! job from one. An upload must not make the next listing due at once: a
+//! A whole listing is one LIST call per level it reads (five: levels 0 to 3 and the
+//! snapshots), and maintenance plans every job from one. An upload must not make the next listing due at once: a
 //! database that commits every second would list ten times a second. Go lists
 //! on each compaction level's window and on its level-0 retention check
 //! interval (`store.go:591-680`), and so does the actor.
@@ -14,6 +14,10 @@
 use super::*;
 use crate::L0Retention;
 use crate::maintain::FULL_LISTING_INTERVAL;
+
+/// The LIST calls of a whole listing on an empty-enough replica: levels 0 to 3 and the snapshots.
+/// The levels above the top are listed by the boot alone while they hold nothing.
+const WHOLE: u32 = 5;
 
 /// What one tick did, as the store saw it.
 struct Seen {
@@ -98,7 +102,7 @@ const CHECK: i64 = 15;
 /// about one a second: 600 here, 9450 calls in all on the old code.
 fn listing_bound() -> u32 {
     let passes = 2 * (SECONDS / CHECK) + 2 * (SECONDS / WINDOW) + 8;
-    u32::try_from(passes).unwrap() * u32::try_from(Level::ALL.len()).unwrap()
+    u32::try_from(passes).unwrap() * WHOLE
 }
 
 /// The defect: every upload made maintenance list the whole replica on the
@@ -426,7 +430,7 @@ struct Second {
 
 fn one_second(rig: &mut Rig, actor: &mut Actor, at: i64) -> Second {
     let seen = write_every_second(rig, actor, at, 1);
-    let all = u32::try_from(Level::ALL.len()).unwrap();
+    let all = WHOLE;
     Second {
         whole: seen.iter().any(|s| s.lists >= all),
         short: seen.iter().any(|s| s.lists > 0 && s.lists < all),
@@ -548,7 +552,7 @@ fn a_fault_drops_the_remembered_files_and_the_next_pass_lists_the_whole_replica(
         .refuse_uploads
         .store(false, std::sync::atomic::Ordering::SeqCst);
     // The first maintenance listing after it covers the whole replica.
-    let all = u32::try_from(Level::ALL.len()).unwrap();
+    let all = WHOLE;
     for _ in 0..200 {
         let seen = write_every_second(&mut rig, &mut actor, at, 1);
         at += 1000;

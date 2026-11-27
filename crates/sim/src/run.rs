@@ -5,8 +5,8 @@
 //! every drain and once at the end. The actor is driven the way an application would
 //! drive it: each tick's future goes through [`World::run_tick`], the clock
 //! follows the `Next` it returns, and a crash drops the actor and builds a new
-//! one. A failure names the seed and the step; [`shrink`] finds the shortest
-//! prefix that still fails.
+//! one. A failure names the seed and the step; [`crate::shrink`] cuts it down to the
+//! operations that matter.
 
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
@@ -269,6 +269,9 @@ pub struct Opts {
     pub judges: Judges,
     /// Which SQLite the engine runs against: the rule model by default.
     pub sqlite: crate::side::SideMaker,
+    /// Each replica request's latency is drawn from a heavy tail and the run is charged for its
+    /// I/O ([`Weights::latency_tail`]). [`run_with`] sets it.
+    pub latency_tail: bool,
     /// The replicator holds the application's writes under this fail-stop setting
     /// (`run/write_gate.rs`); `None`, the default, runs no write gate.
     pub write_gate: Option<lsr_core::IfReplicationStops>,
@@ -371,6 +374,12 @@ struct Runner {
     cost: Option<crate::cost::Profile>,
     // What this boot may still spend past a tick's bound (`crate::cost::Spare`).
     spare: crate::cost::Spare,
+    // Each replica request's latency factor is drawn from this stream, when the run has a
+    // latency tail ([`Opts::latency_tail`]): its own, so the runner's other draws stay.
+    latency: Option<SeededEntropy>,
+    // How many times slower than its price the staging disk is, while a
+    // [`crate::Hold::SlowStaging`] holds.
+    slow_staging: Option<u16>,
     // What the write barrier was held across (`crate::barrier`).
     barrier: crate::barrier::BarrierWatch,
     // The healthy tail is running (`run::tail`): every tick is charged.
@@ -544,6 +553,9 @@ impl Runner {
         runner.truncate_pages = opts.truncate_pages;
         runner.slice_bytes = opts.slice_bytes;
         runner.cost = opts.cost;
+        runner.latency = opts
+            .latency_tail
+            .then(|| SeededEntropy::new(seed.stream(43)));
         runner.part_bytes = opts
             .remote_parts
             .filter(|_| opts.remote_s3)
@@ -580,6 +592,8 @@ impl Runner {
             slice_bytes: None,
             cost: None,
             spare: crate::cost::Spare::default(),
+            latency: None,
+            slow_staging: None,
             barrier: crate::barrier::BarrierWatch::default(),
             tail: false,
             part_bytes: None,
@@ -956,6 +970,7 @@ impl Runner {
         let total0 = self.tally.total();
         let began = self.now();
         let hits0 = self.fault_hits();
+        let hung0 = self.w.remote_faults.hung();
         let booting = !self.actor.booted();
         if booting {
             // What this boot attempt finds staged now, files a store outage left in a local
@@ -977,7 +992,11 @@ impl Runner {
         let taken0 = self.w.sqlite.taken_injections().len();
         self.denials_baseline();
         let ended = self.run_one(plan);
+        // Where the tick's own reads ended: past its start by what it stalled (a hung call, a
+        // pause) and, under the each-read law, by its steps.
+        let settled = self.now();
         self.charge(remote0, staging0);
+        self.note_gray(hung0, began);
         self.judge_barrier(matches!(ended, TickEnd::Done(_)))?;
         if matches!(ended, TickEnd::Done(_)) {
             self.keep_takeover();
@@ -995,7 +1014,7 @@ impl Runner {
             self.keep_writes();
         }
         self.note_snapshots(newest_commit, in_tick, at);
-        self.judge_fail_stop(began, fired0, &ended)?;
+        self.judge_fail_stop((began, settled), fired0, &ended)?;
         self.judge_denials(&ended)?;
         self.note_tick(began, remote0);
         if self.trace {
@@ -1279,8 +1298,8 @@ impl Runner {
             self.forcings.note_in_tick(Forcing::PositionUnproven);
         }
         // A boot that continues short of the committed end (a commit it never staged) holds a
-        // position no read transaction pinned, so a restart before its first sync is a change
-        // it cannot follow.
+        // position no read transaction pinned, so a restart before a sync reaches the committed
+        // end is a change it cannot follow.
         if matches!(event, Event::Booted { cause: None }) && self.w.staging_behind_newest_commit() {
             self.forcings.note_in_tick(Forcing::PositionUnproven);
         }
@@ -1579,9 +1598,13 @@ impl Runner {
                 // runs until it is idle, and the drain is asked again. Draining at once would
                 // send the same backlog from its start each time and, once a backlog takes
                 // longer than the grace to send, never end (seen once I/O cost time).
+                // An app that holds the write lock (a spilled transaction) keeps the engine's
+                // checkpoint deferred, which is as idle as the engine gets until it lets go.
                 Step::Stopped(StopCause::Shutdown) => {
                     self.reboot();
-                    self.settle(|event| matches!(event, Event::Idle))?;
+                    self.settle(|event| {
+                        matches!(event, Event::Idle | Event::CheckpointDeferred { .. })
+                    })?;
                     self.actor
                         .begin_shutdown(self.actor.shutdown_deadline(self.now()));
                 }
@@ -2259,6 +2282,41 @@ impl Runner {
         self.w.history.note_time(to);
     }
 
+    /// Counts the gray weather the tick met: replica calls that hung, and the time the tick
+    /// took past its start (its stalls and its charged I/O).
+    fn note_gray(&mut self, hung0: u32, began: Timestamp) {
+        let hung = self.w.remote_faults.hung().saturating_sub(hung0);
+        if hung > 0 {
+            self.report.reach.add("gray.hang.calls", u64::from(hung));
+        }
+        if self.slow_staging.is_some() {
+            self.report.reach.bump("gray.slow_staging.ticks");
+        }
+        let took = self.now().unix_millis().saturating_sub(began.unix_millis());
+        if took >= 60_000 {
+            self.report.reach.bump("gray.tick.over_a_minute");
+        }
+    }
+
+    /// The process stops for `millis` before the next tick's `read`th clock read, and that
+    /// tick runs ([`Op::Pause`]): time the engine sees pass inside one of its ticks, between
+    /// two reads, as a suspended process does. A tick with fewer reads ran unpaused: a drawn
+    /// step with nothing to act on.
+    fn pause(&mut self, read: u8, millis: u64) -> Result<(), Violation> {
+        let paused = self.w.sim_clock.paused();
+        self.w.sim_clock.pause_at(read, millis);
+        self.tick()?;
+        let fired = self.w.sim_clock.paused() > paused;
+        if fired {
+            self.report.reach.bump("gray.pause.fired");
+            if millis >= crate::generate::MAX_PAUSE_MS / 2 {
+                // Past the snapshot interval and the retention window, a day each.
+                self.report.reach.bump("gray.pause.past_a_day");
+            }
+        }
+        self.scenario_bool("Pause", fired)
+    }
+
     /// Applies `op`, checks the model still follows SQLite's recovery, then judges the replica
     /// by content at random (see [`crate::history`]).
     fn apply_judged(&mut self, op: &Op) -> Result<(), Violation> {
@@ -2635,6 +2693,7 @@ impl Runner {
             } => self.store_fault(*target, *op, *ahead, shape.clone()),
             Op::EnvFault(fault) => self.env_fault(*fault)?,
             Op::ClockJump(millis) => self.clock_jump(*millis),
+            Op::Pause { read, millis } => self.pause(*read, *millis)?,
             Op::Tick => self.tick()?,
             Op::Settle => self.settle(|event| matches!(event, Event::Idle))?,
             Op::UntilPublished => {
@@ -2720,7 +2779,9 @@ impl Runner {
         let mut settled = false;
         // A tick that sent a slice made progress a file's size bounds: a level-9 snapshot
         // written after the boot goes a slice a tick, so its slices do not count against the
-        // settle budget; the drain's tick cap bounds them.
+        // settle budget; the drain's tick cap bounds them. A tick that found its upload waiting
+        // for a part is part of the same sending (the store wakes a real driver when the part
+        // lands), so it counts as a slice too (docs/decisions/D284.md).
         let (mut ticks, mut slices) = (0_u32, 0_u32);
         while ticks < SETTLE_TICKS && slices < DRAIN_TICKS {
             let spins = self.report.spins;
@@ -2728,7 +2789,8 @@ impl Runner {
             if self.ends_idle(&step)? {
                 return Ok(());
             }
-            if matches!(stats.event, Some(Event::Sending { .. })) {
+            let part_wait = matches!(stats.event, Some(Event::Idle)) && self.actor.awaits_parts();
+            if part_wait || matches!(stats.event, Some(Event::Sending { .. })) {
                 slices = slices.saturating_add(1);
             } else {
                 ticks = ticks.saturating_add(1);
@@ -3042,7 +3104,18 @@ pub fn run_with(
     weights: &Weights,
     opts: &Opts,
 ) -> Result<RunReport, Failure> {
-    let opts = Opts {
+    run_ops(
+        seed,
+        &history(seed, steps, weights),
+        &drawn_opts(weights, opts),
+    )
+}
+
+/// `opts` with what drawn histories run under: the options a mix's weights carry, which
+/// [`run_with`] sets and a shrunk history must keep to fail again.
+#[must_use]
+pub fn drawn_opts(weights: &Weights, opts: &Opts) -> Opts {
+    Opts {
         drawn: true,
         block_crash_law: weights.block_crash_law,
         lying_wal_sync: weights.lying_wal_sync,
@@ -3057,9 +3130,9 @@ pub fn run_with(
         remote_s3: weights.remote_s3,
         remote_parts: weights.remote_parts,
         no_create_only: weights.no_create_only,
+        latency_tail: weights.latency_tail,
         ..opts.clone()
-    };
-    run_ops(seed, &history(seed, steps, weights), &opts)
+    }
 }
 
 /// Runs the given operations, then the final drain and judgment.
@@ -3134,26 +3207,6 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
             .extend(runner.w.remote_recorder.rejected());
     }
     Ok(runner.report)
-}
-
-/// The fewest operations of `seed`'s history that still fail, found by
-/// halving: a failure at step `k` reproduces in the first `k + 1` operations,
-/// and a shorter prefix either passes or fails earlier. `None` when the run
-/// passes.
-#[must_use]
-pub fn shrink(seed: Seed, steps: u32, weights: &Weights, opts: &Opts) -> Option<u32> {
-    let failed = run_with(seed, steps, weights, opts).err()?;
-    let mut high = failed.step.saturating_add(1).min(steps.max(1));
-    let mut low = 0_u32;
-    while low.saturating_add(1) < high {
-        let mid = low.saturating_add(high.saturating_sub(low) / 2);
-        if run_with(seed, mid, weights, opts).is_err() {
-            high = mid;
-        } else {
-            low = mid;
-        }
-    }
-    Some(high)
 }
 
 mod after_restart;
@@ -3271,6 +3324,10 @@ pub(crate) const fn shape_error(shape: &crate::FaultShape) -> Option<&lsr_core::
         crate::FaultShape::Error(err)
         | crate::FaultShape::ErrorAfterPublish(err)
         | crate::FaultShape::Rate { err, .. } => Some(err),
+        // A timeout retries: no stop follows it.
+        crate::FaultShape::Hang
+        | crate::FaultShape::HangAfterPublish
+        | crate::FaultShape::HangEvery => None,
         // The sweep is best effort: no stop follows, whatever its error.
         crate::FaultShape::Scratch(_)
         | crate::FaultShape::SizeMismatch

@@ -123,6 +123,7 @@ pub fn op(op: &Op) -> Result<String, Unprintable> {
         ),
         Op::EnvFault(fault) => format!("Op::EnvFault({})", env(*fault)?),
         Op::ClockJump(millis) => format!("Op::ClockJump({millis})"),
+        Op::Pause { read, millis } => format!("Op::Pause {{ read: {read}, millis: {millis} }}"),
         Op::Tick => "Op::Tick".to_owned(),
         Op::Settle => "Op::Settle".to_owned(),
         Op::UntilPublished => "Op::UntilPublished".to_owned(),
@@ -235,6 +236,9 @@ fn shape(shape: &FaultShape) -> Result<String, Unprintable> {
         FaultShape::SizeMismatch => "FaultShape::SizeMismatch".to_owned(),
         FaultShape::ChecksumMismatch => "FaultShape::ChecksumMismatch".to_owned(),
         FaultShape::CorruptPublish => "FaultShape::CorruptPublish".to_owned(),
+        FaultShape::Hang => "FaultShape::Hang".to_owned(),
+        FaultShape::HangAfterPublish => "FaultShape::HangAfterPublish".to_owned(),
+        FaultShape::HangEvery => "FaultShape::HangEvery".to_owned(),
         FaultShape::FlipByteOnRead { at } => format!("FaultShape::FlipByteOnRead {{ at: {at} }}"),
         FaultShape::Rate { per_mille, err } => format!(
             "FaultShape::Rate {{ per_mille: {per_mille}, err: {} }}",
@@ -324,6 +328,7 @@ fn http_fault(fault: HttpFault) -> String {
         HttpFault::WrongEtag(shape) => ("WrongEtag", shape),
         HttpFault::BodyMismatch(shape) => ("BodyMismatch", shape),
         HttpFault::ConnectionReset(shape) => ("ConnectionReset", shape),
+        HttpFault::Hang(shape) => ("Hang", shape),
         HttpFault::Denied(shape, code) => {
             return format!("HttpFault::Denied(HttpShape::{shape:?}, DenialCode::{code:?})");
         }
@@ -441,6 +446,8 @@ fn hold(hold: Hold) -> String {
         Hold::LyingDisk => "Hold::LyingDisk".to_owned(),
         Hold::StoreDownAll => "Hold::StoreDownAll".to_owned(),
         Hold::SecondWriter => "Hold::SecondWriter".to_owned(),
+        Hold::Hang(op) => format!("Hold::Hang({})", store_op(op)),
+        Hold::SlowStaging(factor) => format!("Hold::SlowStaging({factor})"),
     }
 }
 

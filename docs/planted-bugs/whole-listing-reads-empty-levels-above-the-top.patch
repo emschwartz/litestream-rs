@@ -1,0 +1,17 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 52b44fd02..e09773f95 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2585,11 +2585,7 @@ impl Actor {
+                 Err(tick) => *tick,
+             });
+         }
+-        let levels = self
+-            .engine
+-            .maintain
+-            .empty
+-            .whole(self.kept.cfg.maintenance.top());
++        let levels = EmptyLevels::default().whole(self.kept.cfg.maintenance.top());
+         let loaded = match self.engine.maintain.remembered.first_start() {
+             Some(own) => Ok(own),
+             None => Inventory::load_from(env.remote, &levels).await,

@@ -135,7 +135,7 @@ use crate::identity::{self, Check, Identity};
 
 /// Where the boot's identity check stands between ticks, and the bytes a tick may read.
 type Checks<'a> = (&'a mut Option<Check>, u64);
-use crate::inventory::Inventory;
+use crate::inventory::{EmptyLevels, Inventory};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::maintain::{
     Due, Job, MAX_DELETE, MaintainError, Maintenance, Merging, Outcome, ReadBack, RetentionHold,
@@ -156,10 +156,10 @@ use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step, wal_barrier};
 use crate::takeover::TakeoverRecord;
 use crate::upload::{
     Did, InFlight, Unsent, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded,
-    drop_staged_from, inventory_fault, plan_upload, upload_next, upload_step,
+    drop_staged_from, inventory_fault, plan_upload, upload_step,
 };
 use crate::verify::LivePages;
-use crate::witness::{Bad, Base, Scan, Witnessed, Witnesses, scan, still_holds};
+use crate::witness::{Bad, Base, Scan, Witnessed, scan, still_holds};
 
 /// What one tick may touch, lent for that tick only.
 pub struct Env<'a, W, P, C, L, R> {
@@ -1441,7 +1441,7 @@ impl Actor {
         self.end_sliced().await;
         let mut in_flight = std::mem::take(&mut self.engine.in_flight);
         let unsent = in_flight.stop().await;
-        let listed = match self.boot_listed(env, takeover, &unsent).await {
+        let mut listed = match self.boot_listed(env, takeover, &unsent).await {
             Ok(listed) => listed,
             Err(step) => {
                 let tick = self.boot_step(step, took(), now);
@@ -1450,6 +1450,7 @@ impl Actor {
         };
         // After the listing: it may have ended a local course, whose attempts wait elsewhere.
         let task = self.boot_task();
+        let empty = std::mem::take(&mut listed.empty);
         let suspect = &mut self.kept.suspect_staged;
         let checks = (
             &mut self.engine.identity,
@@ -1512,8 +1513,17 @@ impl Actor {
             upload,
             checkpoint: CheckpointState::boot(now),
             witnesses: tokens.into_iter().collect(),
+            maintain: state::Maintain {
+                empty,
+                ..state::Maintain::default()
+            },
             ..Engine::fresh()
         };
+        // The boot listing found nothing to confirm: maintenance plans its first job from what
+        // this engine puts, not from listing again what the boot just listed.
+        if self.engine.upload.confirmed().is_none() {
+            self.engine.maintain.remembered.begin_first_start();
+        }
         self.kept.tasks.get_mut(task).succeed();
         self.ran(Event::Booted { cause }, now)
     }
@@ -2307,6 +2317,12 @@ impl Actor {
                         return Some(self.diverged(env, uploaded.state, confirmed, now).await);
                     }
                     // Before the confirmed position lets the token go.
+                    match &uploaded.did {
+                        Did::Put(info) => self.engine.maintain.remembered.note_put(*info),
+                        // A key this engine did not see itself put: a listing says what it holds.
+                        Did::AlreadyPut(_) => self.engine.maintain.remembered.end_first_start(),
+                        Did::Nothing | Did::Listed { .. } | Did::Diverged { .. } => {}
+                    }
                     if let Did::Put(info) = &uploaded.did {
                         self.engine.known.put(*info);
                         if let Some(token) = self.engine.witnesses.get(&info.key) {
@@ -2569,11 +2585,20 @@ impl Actor {
                 Err(tick) => *tick,
             });
         }
-        let loaded = Inventory::load(env.remote).await;
+        let levels = self
+            .engine
+            .maintain
+            .empty
+            .whole(self.kept.cfg.maintenance.top());
+        let loaded = match self.engine.maintain.remembered.first_start() {
+            Some(own) => Ok(own),
+            None => Inventory::load_from(env.remote, &levels).await,
+        };
         let inventory = match loaded.map_err(|err| inventory_fault::<R>(&err)) {
             Ok(inventory) => inventory,
             Err(fault) => return Some(self.fault(Task::Maintenance, fault, now)),
         };
+        self.engine.maintain.empty.learn(&inventory, &levels);
         if let Some(tick) = self.listing_untrusted(inventory.newest(), now) {
             return Some(tick);
         }
@@ -3386,20 +3411,23 @@ async fn boot_listing<L: Role, R: Role>(
     // At boot a replica ahead of the local newest staged file is `recover`'s to judge (a
     // snapshot after it), not the uploader's (a stop), so the listing names no newest staged file.
     let start = UploadState::ListFirst { confirmed: None };
-    let none = Witnesses::new();
-    let listed = upload_next(start, staging, remote, Some(Txid::MAX), &none).await;
-    let (upload, diverged) = match listed {
-        Ok(Uploaded {
-            state,
-            did: Did::Diverged { confirmed: from },
-        }) => (state, Some(from)),
-        Ok(listed) => (listed.state, None),
+    let listed = crate::upload::list_step(start, staging, remote, Some(Txid::MAX)).await;
+    let (upload, diverged, empty) = match listed {
+        Ok((
+            Uploaded {
+                state,
+                did: Did::Diverged { confirmed: from },
+            },
+            empty,
+        )) => (state, Some(from), empty),
+        Ok((listed, empty)) => (listed.state, None, empty),
         Err(failed) => return Err(failed.fault.into()),
     };
     Ok(Listed {
         upload,
         diverged,
         gate: BootGate { takeover, local },
+        empty,
     })
 }
 
@@ -3412,6 +3440,8 @@ struct Listed {
     diverged: Option<Txid>,
     /// What replica files above the local position need.
     gate: BootGate,
+    /// The levels 1 to 8 the listing found empty, which maintenance need not list again.
+    empty: EmptyLevels,
 }
 
 /// What a boot makes of the staged files once the replica is listed.
@@ -3463,6 +3493,7 @@ async fn boot_staged<L: Role, R: Role, W: std::io::Read + std::io::Seek>(
         mut upload,
         diverged,
         gate,
+        empty: _,
     } = listed;
     let tip = upload.confirmed();
     // The staged files from `from` on cannot continue the replica: unless

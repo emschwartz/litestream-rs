@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/inventory.rs b/crates/core/src/inventory.rs
+index 9a00baf44..6aa0248c1 100644
+--- a/crates/core/src/inventory.rs
++++ b/crates/core/src/inventory.rs
+@@ -335,7 +335,7 @@ impl Listing {
+                     .filter(|info| info.key.level() == at.level)
+                     .map(|info| info.key.range().min())
+                     .max();
+-                last.is_none_or(|min| touches(min, reach))
++                last.is_none_or(|min| touches(min, reach) || true)
+             }
+         }
+     }

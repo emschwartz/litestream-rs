@@ -75,3 +75,60 @@ fn text_that_is_not_a_date_is_no_base() {
         );
     }
 }
+
+#[test]
+fn shards_are_disjoint_and_cover_the_range() {
+    for count in [1_u64, 2, 4, 7] {
+        let base = 1_000;
+        let shards: Vec<Vec<u64>> = (0..count)
+            .map(|index| {
+                let shard = Shard::parse(&format!("{index}/{count}")).unwrap();
+                shard.seeds(base).take(25).map(Seed::get).collect()
+            })
+            .collect();
+        let mut seen = std::collections::BTreeSet::new();
+        for seeds in &shards {
+            assert_eq!(seeds.len(), 25);
+            for seed in seeds {
+                assert!(seen.insert(*seed), "{seed} runs in two shards of {count}");
+            }
+        }
+        // Every seed below the shortest shard's last is somebody's.
+        let covered_to = base + 25 * count;
+        assert!(
+            (base..covered_to).all(|seed| seen.contains(&seed)),
+            "{count}"
+        );
+        assert_eq!(u64::try_from(seen.len()).unwrap(), 25 * count);
+    }
+}
+
+#[test]
+fn text_that_is_no_shard_is_refused() {
+    for text in [
+        "", "1", "1/", "/4", "4/4", "5/4", "0/0", "-1/4", "a/b", "1/4/2", " 1/4",
+    ] {
+        assert_eq!(
+            Shard::parse(text),
+            Err(ParseShardError(text.to_owned())),
+            "{text:?}"
+        );
+    }
+    Shard::parse("3/4").unwrap();
+}
+
+#[test]
+fn the_long_range_is_the_upper_half_of_the_night() {
+    let rotating = nightly_base("20261125").unwrap();
+    let long = long_base("20261125").unwrap();
+    let next = nightly_base("20261126").unwrap();
+    assert_eq!(long - rotating, SEEDS_PER_NIGHT / 2);
+    assert!(long < next);
+    // A shard's seeds stay inside the night: the first thousand of the busiest shard layout.
+    let last = Shard::parse("0/4").unwrap().seeds(long).nth(1_000).unwrap();
+    assert!(last.get() > long && last.get() < next);
+    assert_eq!(
+        long_base("2026-11-25"),
+        Err(ParseDayError("2026-11-25".to_owned()))
+    );
+}
