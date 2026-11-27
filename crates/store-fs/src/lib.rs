@@ -269,17 +269,23 @@ impl<F: Fs> FsStore<F> {
         self.level_dir(key.level()).join(key.file_name())
     }
 
+    /// What a level's directory holds, which is nothing before it exists.
+    fn read_level(&self, level: Level) -> io::Result<Vec<DirEntryInfo>> {
+        match self.fs.read_dir(&self.level_dir(level)) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            read => read,
+        }
+    }
+
     fn list_now(
         &self,
         level: Level,
         after: Option<TxidRange>,
         limit: PageLimit,
     ) -> Result<Listing, StoreError> {
-        let entries = match self.fs.read_dir(&self.level_dir(level)) {
-            Ok(entries) => entries,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Listing::empty()),
-            Err(err) => return Err(StoreError::from_io(StoreOp::List, None, &err)),
-        };
+        let entries = self
+            .read_level(level)
+            .map_err(|err| StoreError::from_io(StoreOp::List, None, &err))?;
         let mut files = Vec::new();
         let mut unrecognized = Vec::new();
         let dir = self.level_dir(level);
@@ -418,11 +424,7 @@ impl<F: Fs> FsStore<F> {
         let mut removed = 0;
         for level in Level::ALL {
             let dir = self.level_dir(level);
-            let entries = match self.fs.read_dir(&dir) {
-                Ok(entries) => entries,
-                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-                Err(err) => return Err(fail(&err)),
-            };
+            let entries = self.read_level(level).map_err(|err| fail(&err))?;
             for entry in entries {
                 if removed >= MAX_SCRATCH_REMOVED {
                     return Ok(removed);
@@ -782,11 +784,7 @@ impl<T: FsFile> Sink<T> {
     /// Has every byte given so far written or failed, and the file back in hand.
     fn settle(&mut self) -> io::Result<()> {
         if let Self::Behind(behind) = self {
-            let (file, result) = behind.finish();
-            if let Some(file) = file {
-                *self = Self::Here(file);
-            }
-            return result;
+            *self = Self::Here(behind.finish()?);
         }
         Ok(())
     }
@@ -842,12 +840,12 @@ impl<T: FsFile> Behind<T> {
             return Ok(());
         }
         // The thread stopped: a write failed. Its error is the answer.
-        let (_file, result) = self.finish();
-        result.and(Err(io::Error::other("the write-behind thread ended")))
+        self.finish()
+            .and(Err(io::Error::other("the write-behind thread ended")))
     }
 
-    /// Sends what is gathered, waits for the thread and returns its file and its first error.
-    fn finish(&mut self) -> (Option<T>, io::Result<()>) {
+    /// Sends what is gathered, waits for the thread and returns its file, or its first error.
+    fn finish(&mut self) -> io::Result<T> {
         if let Some(tx) = self.tx.take()
             && !self.pending.is_empty()
         {
@@ -855,15 +853,9 @@ impl<T: FsFile> Behind<T> {
             let _sent = tx.send(std::mem::take(&mut self.pending));
         }
         match self.thread.take().map(JoinHandle::join) {
-            Some(Ok((file, result))) => (Some(file), result),
-            Some(Err(_)) => (
-                None,
-                Err(io::Error::other("the write-behind thread panicked")),
-            ),
-            None => (
-                None,
-                Err(io::Error::other("the write-behind thread is gone")),
-            ),
+            Some(Ok((file, result))) => result.map(|()| file),
+            Some(Err(_)) => Err(io::Error::other("the write-behind thread panicked")),
+            None => Err(io::Error::other("the write-behind thread is gone")),
         }
     }
 }
