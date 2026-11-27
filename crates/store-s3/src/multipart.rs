@@ -93,8 +93,9 @@ impl<T: Transport> Inner<T> {
         created_at: Timestamp,
     ) -> Result<UploadId, StoreError> {
         let op = StoreOp::Upload;
-        let request = self.request(op, |b, now| b.create_multipart(now, key, created_at))?;
-        let response = self.exec(op, Some(key), request)?;
+        let response = self.exec(op, Some(key), |b, now| {
+            b.create_multipart(now, key, created_at)
+        })?;
         parse_create(&response).map_err(|err| err.into_store(op, Some(*key)))
     }
 
@@ -110,10 +111,10 @@ impl<T: Transport> Inner<T> {
     ) -> Result<String, StoreError> {
         let op = StoreOp::Upload;
         let precondition = self.precondition(mode);
-        let response = self.send_complete(key, id, etags, precondition)?;
-        if precondition == Precondition::KeyIsFree && is_not_implemented(&response) {
-            return Err(StoreError::CreateOnlyUnsupported { op, key: *key });
-        }
+        let response = self.call(op, |b, now| {
+            b.complete_multipart_if(now, key, id, etags, precondition)
+        })?;
+        self.refuse_unsupported_or_tally(precondition, key, &response)?;
         if S3Code::from_body(response.body()) == Some(S3Code::NoSuchUpload) {
             return self.settle_spent_upload(key, sent);
         }
@@ -124,22 +125,26 @@ impl<T: Transport> Inner<T> {
         parse_complete(&response).map_err(|err| err.into_store(op, Some(*key)))
     }
 
-    fn send_complete(
+    /// What a write's answer says about its precondition: a store that does not implement
+    /// create-only publishes nothing and checks nothing, and the caller decides whether to
+    /// replace (D79; the store never drops the condition itself); a 412 is a taken key,
+    /// counted. A response is one or the other, never both.
+    pub(crate) fn refuse_unsupported_or_tally(
         &self,
-        key: &FileKey,
-        id: &UploadId,
-        etags: &[String],
         precondition: Precondition,
-    ) -> Result<crate::transport::HttpResponse, StoreError> {
-        let op = StoreOp::Upload;
-        let request = self.request(op, |b, now| {
-            b.complete_multipart_if(now, key, id, etags, precondition)
-        })?;
-        let response = self.send(op, request)?;
+        key: &FileKey,
+        response: &HttpResponse,
+    ) -> Result<(), StoreError> {
+        if precondition == Precondition::KeyIsFree && is_not_implemented(response) {
+            return Err(StoreError::CreateOnlyUnsupported {
+                op: StoreOp::Upload,
+                key: *key,
+            });
+        }
         if response.status() == 412 {
             self.tally_taken();
         }
-        Ok(response)
+        Ok(())
     }
 
     /// The upload id is spent: the object a HEAD finds is this upload's when
@@ -148,8 +153,7 @@ impl<T: Transport> Inner<T> {
     fn settle_spent_upload(&self, key: &FileKey, sent: Sent) -> Result<String, StoreError> {
         let op = StoreOp::Upload;
         let ambiguous = invalid_data(op);
-        let request = self.request(op, |b, now| b.head(now, key))?;
-        let response = self.send(op, request)?;
+        let response = self.call(op, |b, now| b.head(now, key))?;
         if !(200..300).contains(&response.status()) {
             return Err(ambiguous);
         }

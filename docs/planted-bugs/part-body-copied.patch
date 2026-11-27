@@ -1,20 +1,15 @@
 diff --git a/crates/store-s3/src/ureq_transport.rs b/crates/store-s3/src/ureq_transport.rs
-index 064e09b57..74f842edb 100644
+index 2d544d9b8..b9015e304 100644
 --- a/crates/store-s3/src/ureq_transport.rs
 +++ b/crates/store-s3/src/ureq_transport.rs
-@@ -71,7 +71,7 @@ impl UreqTransport {
+@@ -140,10 +140,10 @@ impl UreqTransport {
  
      /// The request as ureq takes it. The body is borrowed from `request`, not copied: a
      /// multipart part is megabytes, and an upload sends a batch of them at once.
 -    fn build(request: &HttpRequest) -> Result<http::Request<&[u8]>, TransportError> {
 +    fn build(request: &HttpRequest) -> Result<http::Request<Vec<u8>>, TransportError> {
-         let mut builder = http::Request::builder()
-             .method(method_name(request.method()))
-             .uri(request.url().as_str());
-@@ -82,7 +82,7 @@ impl UreqTransport {
-             }
-         }
-         builder
+         // ureq frames the body from its length, which is the value that was signed.
+         head(request, false)
 -            .body(request.body())
 +            .body(request.body().to_vec())
              .map_err(|_malformed| TransportError::Io(io::ErrorKind::InvalidInput))

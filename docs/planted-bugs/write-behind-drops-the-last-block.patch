@@ -1,8 +1,8 @@
 diff --git a/crates/store-fs/src/lib.rs b/crates/store-fs/src/lib.rs
-index a3015148e..5eb1362d2 100644
+index a59172bf3..15e9033ef 100644
 --- a/crates/store-fs/src/lib.rs
 +++ b/crates/store-fs/src/lib.rs
-@@ -802,7 +802,8 @@ impl<T: FsFile> Behind<T> {
+@@ -850,7 +850,8 @@ impl<T: FsFile> Behind<T> {
              && !self.pending.is_empty()
          {
              // A thread that stopped has said why in its result.
@@ -11,4 +11,4 @@ index a3015148e..5eb1362d2 100644
 +            drop(tx);
          }
          match self.thread.take().map(JoinHandle::join) {
-             Some(Ok((file, result))) => (Some(file), result),
+             Some(Ok((file, result))) => result.map(|()| file),

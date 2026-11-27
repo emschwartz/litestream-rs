@@ -1,13 +1,13 @@
 diff --git a/crates/store-s3/src/again.rs b/crates/store-s3/src/again.rs
-index 216ebe477..9ead49efc 100644
+index c888d3dc8..92de99223 100644
 --- a/crates/store-s3/src/again.rs
 +++ b/crates/store-s3/src/again.rs
-@@ -193,7 +193,7 @@ impl Sealed {
+@@ -182,7 +182,7 @@ impl Sealed {
          Body {
-             reader: &mut *self.reader,
-             cells: if kept { [].iter() } else { self.cells.iter() },
--            offset: self.offset,
+             reader: &mut *run.reader,
+             cells: if kept { [].iter() } else { run.cells.iter() },
+-            offset: run.offset,
 +            offset: 0,
              stop,
-             cell: Cow::Borrowed(if kept { &self.kept } else { &[] }),
+             cell: Cow::Borrowed(if kept { &run.kept } else { &[] }),
              given: 0,
