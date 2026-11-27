@@ -5,8 +5,9 @@
 //! is deleted at once, and remembered as distrusted when that delete fails
 //! (`state`). Neither survives the process: a crash between the publish and
 //! the delete leaves an object the listing shows as cover, that no restore can
-//! decode. Level 0 has its own read-back in the uploader (`judge_tail`); this
-//! is the same check for every level above it.
+//! decode. Level 0 has its own read-back in the uploader (`judge_tail`, which decodes the whole
+//! file where this reads only the head and the tail); this is the same check for every level
+//! above it.
 //!
 //! The actor owes it again after a store refused an output or a snapshot against
 //! its checksum (`docs/decisions/D280.md`): that refusal deletes nothing, since the
@@ -42,17 +43,15 @@
 //! one, and reading every newest file whole cost about 16 GB of egress a restart at full size
 //! (the owner's decision, `docs/decisions/D272.md`, amending D6's reasoning).
 
-use lsr_ltx::{HEADER_LEN, Header, TRAILER_LEN, Trailer};
+use lsr_ltx::{TRAILER_LEN, Trailer};
 
 use crate::fault::Fault;
 use crate::fault::role::Role;
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::plan::{KeyTarget, plan_without};
+use crate::recover::{HEADER_READ, read_header};
 use crate::store::ReadLen;
-
-/// The bytes read of a file's start: its header.
-const HEAD: ReadLen = ReadLen::or_chunk(100);
 
 /// The bytes read of a file's end: the page index's zero terminator, the index size field and
 /// the trailer.
@@ -120,13 +119,8 @@ pub(crate) async fn read_back<R: Role>(
 /// # Errors
 /// The replica's fault when a read fails.
 async fn ends_sound<R: Role>(remote: &R, info: &FileInfo) -> Result<bool, Fault> {
-    let head = remote
-        .read(&info.key, 0, HEAD)
-        .await
-        .map_err(|err| R::fault(&err))?;
-    let Some(header) = <&[u8; HEADER_LEN]>::try_from(head.as_slice())
-        .ok()
-        .and_then(|head| Header::decode(head).ok())
+    let Some(header) = read_header(remote, &info.key, R::fault)
+        .await?
         .filter(|header| header.txids() == info.key.range())
     else {
         return Ok(false);
@@ -134,7 +128,7 @@ async fn ends_sound<R: Role>(remote: &R, info: &FileInfo) -> Result<bool, Fault>
     let Some(at) = info
         .size
         .checked_sub(TAIL.get())
-        .filter(|at| *at >= HEAD.get())
+        .filter(|at| *at >= HEADER_READ.get())
     else {
         return Ok(false);
     };
@@ -154,7 +148,7 @@ async fn ends_sound<R: Role>(remote: &R, info: &FileInfo) -> Result<bool, Fault>
     // The index ends at its terminator and starts after the header.
     let index = u64::from_be_bytes(*size);
     let fits = index
-        .checked_add(HEAD.get())
+        .checked_add(HEADER_READ.get())
         .is_some_and(|end| end <= at.saturating_add(1));
     Ok(*terminator == 0 && index > 0 && fits && Trailer::decode(trailer, &header).is_ok())
 }

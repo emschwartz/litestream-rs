@@ -59,7 +59,7 @@ use crate::witness::MAX_WITNESSED;
 const NEWEST_STAGED_READ: ReadLen = ReadLen::CHUNK;
 
 /// A read of exactly one LTX header ([`HEADER_LEN`], pinned by a test).
-const HEADER_READ: ReadLen = ReadLen::or_chunk(100);
+pub(crate) const HEADER_READ: ReadLen = ReadLen::or_chunk(100);
 
 /// Why a frame could not be had at a resume point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
