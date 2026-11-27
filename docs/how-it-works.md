@@ -56,7 +56,7 @@ Deletes are a separate job. By default a level-0 file goes 5 minutes after a lev
 
 ## Restore
 
-A restore lists the replica and plans a chain: the newest snapshot at or below the target, then the files that continue from it without a hole, up to the target. The target is the newest state, a transaction id, or an instant.
+A restore lists the replica and plans a chain: the newest snapshot at or below the target, then the files that continue from it without a hole, up to the target. The target is the newest state, a transaction id, or an instant. When a file later in the chain holds every page of the database (the copy taken when the WAL no longer continues the replica, or a merge of it), the restore starts from that file and skips the files before it.
 
 It checks every file's checksum before the result is put in place. It builds the database in a scratch file beside the target, syncs it, and only then puts it in place, so the target is absent, as it was, or complete (one open exception with `-force` is in [limitations.md](limitations.md)). If the chain has a hole the restore fails with `Gap`. It never returns a shorter history.
 

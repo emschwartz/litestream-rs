@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/restore.rs b/crates/core/src/restore.rs
+index daeea70..bccfa80 100644
+--- a/crates/core/src/restore.rs
++++ b/crates/core/src/restore.rs
+@@ -954,7 +954,7 @@ async fn start<S: ObjectStore, K: DatabaseSink>(
+     let candidate = chain
+         .whole_candidate()
+         .and_then(|index| Some((index, chain.files().get(index)?)));
+-    if let Some((index, info)) = candidate {
++    if let Some((index, info)) = candidate.filter(|_| false) {
+         if let Some(verified) = apply_whole(store, info, sink, bytes_read).await? {
+             return Ok((index.saturating_add(1), index, verified));
+         }

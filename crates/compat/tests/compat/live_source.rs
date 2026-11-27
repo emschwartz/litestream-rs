@@ -366,10 +366,7 @@ fn read_lock_on_zero_proven_restart_continues_in_the_new_generation() {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    hex::encode(Sha256::digest(bytes))
 }
 
 /// A copy of the database as of now: the main file and WAL copied together, checkpointed away
