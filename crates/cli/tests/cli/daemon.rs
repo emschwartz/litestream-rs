@@ -578,3 +578,33 @@ fn a_missing_config_is_reported_before_a_flag_combination() {
     assert!(stderr.contains("config file not found"), "{stderr}");
     assert!(!stderr.contains("-force-snapshot"), "{stderr}");
 }
+
+/// `lsr config check` reads its file from `-config` and `--config` as well as positionally,
+/// and refuses both at once with a usage error.
+#[test]
+fn config_check_accepts_config_flag_forms() {
+    let dir = TempDir::new().unwrap();
+    let cfg = config(
+        dir.path(),
+        "dbs:\n  - path: /a.db\n    replica:\n      path: /r\n",
+    );
+    for flag in ["-config", "--config"] {
+        let out = lsr()
+            .args(["config", "check", flag])
+            .arg(&cfg)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0), "{flag}");
+        assert!(
+            String::from_utf8(out.stdout).unwrap().starts_with("ok: "),
+            "{flag}"
+        );
+    }
+    let out = lsr()
+        .args(["config", "check", "--config"])
+        .arg(&cfg)
+        .arg(&cfg)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(64));
+}

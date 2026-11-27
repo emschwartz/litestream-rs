@@ -1095,3 +1095,37 @@ fn an_s3_flag_beside_a_bare_url_or_database_is_refused_and_the_query_form_is_kep
         UsageError::ConfigFlagWithReplica { flag: "-config" }
     );
 }
+
+/// `config check` takes its file as every other command takes a config, `-config` or
+/// `--config` (with `=` too), and still positionally; both together are refused.
+#[test]
+fn config_check_takes_the_file_positionally_or_as_config() {
+    let check = Ok(Command::ConfigCheck("c.yml".into()));
+    for line in [
+        "config check c.yml",
+        "config check -config c.yml",
+        "config check --config c.yml",
+        "config check -config=c.yml",
+        "config check --config=c.yml",
+    ] {
+        assert_eq!(parsed(line), check, "{line}");
+    }
+    assert_eq!(
+        usage("config check -config c.yml c.yml"),
+        UsageError::ConfigCheckBoth
+    );
+    for (line, found) in [
+        ("config check", 0),
+        ("config check a b", 2),
+        ("config check -config", 1),
+        ("config check -config=", 1),
+    ] {
+        let wanted = UsageError::ConfigCheckArguments { found };
+        let got = parsed(line).unwrap_err();
+        // A flag with no value is Go's own refusal; the others are this command's.
+        assert!(
+            got == wanted || matches!(got, UsageError::GoFlag(_)),
+            "{line}: {got:?}"
+        );
+    }
+}
