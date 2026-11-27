@@ -1,6 +1,6 @@
 # A ranged read hands back a copy of the response body, so it holds the body twice.
 name = "ranged-body-copied"
-fix = "ba4c4951d"
+fix = "20eb65cc6"
 package = "lsr-store-s3"
 tests = [
     "memory::a_ranged_read_through_the_real_client_holds_its_body_once",

@@ -1,5 +1,5 @@
 name = "failstop-carries-to-the-newest-file"
-fix = "87cd10d"
+fix = "143c17132"
 package = "lsr-core"
 tests = [
     "failstop::tests::staged_frames_never_date_a_newer_file",

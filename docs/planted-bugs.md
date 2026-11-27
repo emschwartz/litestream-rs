@@ -25,7 +25,7 @@ that caught it must fail.
   process it left exits; a new run never applies its patches under an old run's cargo or tests.
   Each build and test command runs in a session of its own, emptied when it ends or times out, so
   a test's child that a planted bug never stopped does not outlive it (Linux, through `/proc`).
-- `just planted-bugs-names` (part of `just check`) fails when an entry names a test no `fn` defines, the renamed-test case that left an entry unable to run until the nightly. `just planted-bugs-diff BASE [K/N]` runs only the entries a pull request can have affected (its diff touches the entry, the patch, a file the patch edits or a file that defines a named test, or the patch no longer applies); CI runs it on pull requests in up to four shards of 12 entries, about 5 minutes for 12 entries and about 30 minutes a shard for the whole ledger.
+- `just planted-bugs-names` (part of `just check`) fails when an entry names a test no `fn` defines, the renamed-test case that left an entry unable to run until the nightly, or a `fix` written as a commit that `origin/main` does not hold (a branch's commit vanishes in the squash merge). `just planted-bugs-diff BASE [K/N]` runs only the entries a pull request can have affected (its diff touches the entry, the patch, a file the patch edits or a file that defines a named test, or the patch no longer applies); CI runs it on pull requests in up to four shards of 12 entries, about 5 minutes for 12 entries and about 30 minutes a shard for the whole ledger.
 - `just planted-bugs --shard K/N` runs every N-th entry from the K-th, plus the canaries; the nightly runs eight shards.
 - `just planted-bugs-unaided [seeds] [--shard K/N]` asks a different question and judges it
   (docs/decisions/D299.md): with no named test run, does the swarm still fail on each plant within
@@ -54,7 +54,10 @@ An entry file's name is its `name` with `.toml` appended; the runner refuses one
 ```
   name     short unique name; the patch is docs/planted-bugs/<name>.patch
   fix      the commit that fixed it (provenance; the patch is its production change re-expressed
-           against the current tree, because later renames stop the commit's own diff applying)
+           against the current tree, because later renames stop the commit's own diff applying).
+           A commit must be an ancestor of origin/main, which `--names` checks: use the squash
+           commit once the pull request lands, and `claude/<branch>` until then, never a commit
+           of the branch itself. Any other text (`plant`, `none`, a note) is not looked up.
   package  the cargo package whose tests are run
   tests    nextest name substrings (`test(~x)`); each must fail when planted, one run apiece
   test_bin optional: restrict the run to one integration-test binary (cargo `--test`)

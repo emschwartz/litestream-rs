@@ -1,7 +1,7 @@
 # After a refused upload the relist reads the refused key and judges it from two reads; the
 # defect is a torn staged read confirming the replica's object as this engine's own.
 name = "refusal-judged-from-one-read"
-fix = "af8ea2f"
+fix = "27936dd33"
 package = "lsr-core"
 tests = ["upload::tests::one_torn_read_after_a_refusal_confirms_no_other_object"]
 unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."
