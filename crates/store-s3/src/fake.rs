@@ -543,29 +543,10 @@ fn whole_seconds(at: Timestamp) -> Timestamp {
 
 /// A HEAD's `Last-Modified` is an HTTP-date (`Fri, 20 Nov 2026 13:49:45 GMT`).
 fn http_date(at: Timestamp) -> String {
-    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let iso = whole_seconds(at).to_string();
-    let field = |from: usize, to: usize| iso.get(from..to).unwrap_or("00");
-    // 1970-01-01 was a Thursday.
-    let days = at.unix_millis().div_euclid(86_400_000);
-    let weekday = usize::try_from(days.saturating_add(4).rem_euclid(7))
-        .ok()
-        .and_then(|day| DAYS.get(day));
-    let month = field(5, 7)
-        .parse::<usize>()
-        .ok()
-        .and_then(|month| MONTHS.get(month.saturating_sub(1)));
-    format!(
-        "{}, {} {} {} {} GMT",
-        weekday.unwrap_or(&"Thu"),
-        field(8, 10),
-        month.unwrap_or(&"Jan"),
-        field(0, 4),
-        field(11, 19),
-    )
+    jiff::Timestamp::from_millisecond(at.unix_millis())
+        .unwrap_or(jiff::Timestamp::UNIX_EPOCH)
+        .strftime("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string()
 }
 
 fn object_headers(object: &Object, length: usize) -> Vec<(&str, String)> {
@@ -839,5 +820,16 @@ fn entity_text(entity: &str) -> String {
         ("quot", None) => "\"".to_owned(),
         ("apos", None) => "'".to_owned(),
         (other, None) => format!("&{other};"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn last_modified_is_an_http_date_to_the_second() {
+        let at = Timestamp::parse_rfc3339("2026-11-20T13:49:45.678Z").unwrap();
+        assert_eq!(http_date(at), "Fri, 20 Nov 2026 13:49:45 GMT");
     }
 }
