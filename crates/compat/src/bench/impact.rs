@@ -162,7 +162,6 @@ impl Ctx<'_> {
         }
     }
 
-    /// The paced arms' rate in whole MiB a second: the calibrated rate over the divisor, at least 1.
     fn pace_for(&self, arm: &ArmDef) -> Option<String> {
         Some(pace_mib_s(self.frame.base_rate_mib_s, arm.pace_divisor?))
     }
@@ -457,7 +456,6 @@ fn idle_window(ctx: &Ctx<'_>) -> Window {
     }
 }
 
-/// Nanoseconds of the samples due in [`[from, to)`], ascending.
 fn latencies_in(samples: &[Sample], from: u64, to: u64) -> Vec<u64> {
     let mut found: Vec<u64> = samples
         .iter()

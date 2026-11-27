@@ -72,7 +72,6 @@ pub enum PageEncoding {
     Block,
 }
 
-/// The last release tag on the frame encoding.
 const LAST_FRAMES_PATCH: u32 = 15;
 
 /// The first release tag that writes a `litestream-timestamp` metadata value on upload; earlier
@@ -252,7 +251,6 @@ pub fn is_live_test(path: &str) -> bool {
 /// since they need a MinIO server, so `just compat-live` leaves them out on purpose.
 pub const S3_MODULE: &str = "s3";
 
-/// Whether a test path names `module` among the modules it sits in.
 fn in_module(path: &str, module: &str) -> bool {
     let modules = path
         .rsplit_once("::")

@@ -20,7 +20,6 @@ use crate::size::SizeError;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct KeyPath(Vec<Segment>);
 
-/// One step of a [`KeyPath`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Segment {
     Key(String),

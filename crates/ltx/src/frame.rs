@@ -72,7 +72,6 @@ const XXH32_LEN: usize = 4;
 /// Magic, FLG, BD, content size, header checksum.
 const DESCRIPTOR_MAX: usize = 4 + 1 + 1 + 8 + 1;
 
-/// The largest LZ4 block one page can compress to.
 fn block_bound(page_size: PageSize) -> usize {
     get_maximum_output_size(page_size.bytes())
 }

@@ -19,14 +19,13 @@
 //! The policy matches [`UreqTransport`](crate::UreqTransport): a non-2xx status
 //! is a response, nothing is retried, and a body over `MAX_BODY` is an error. The deadline
 //! bounds a connect and each chunk of an answer; a request is capped in all at the deadline plus
-//! the time its body, and its answer's declared length, need at 16 KiB a second (D235). reqwest cannot bound a
-//! stalled write or the wait for a response head by progress, so those are bounded by that cap,
-//! not by the deadline alone as under [`UreqTransport`](crate::UreqTransport). The own
-//! client follows no redirects. An application client keeps its own redirect policy;
-//! reqwest's default follows up to ten, and a presigned URL redirected to
-//! another host fails its signature there, so the store sees a 403 instead of
-//! the redirect. Build the client with `redirect(Policy::none())` to see the
-//! redirect itself.
+//! the time its body, and its answer's declared length, need at 16 KiB a second (D235). reqwest
+//! cannot bound a stalled write or the wait for a response head by progress, so those are bounded
+//! by that cap, not by the deadline alone as under [`UreqTransport`](crate::UreqTransport). The
+//! own client follows no redirects. An application client keeps its own redirect policy;
+//! reqwest's default follows up to ten, and a presigned URL redirected to another host fails its
+//! signature there, so the store sees a 403 instead of the redirect. Build the client with
+//! `redirect(Policy::none())` to see the redirect itself.
 //!
 //! TLS on the own client is rustls on the provider the application or the crate features
 //! choose (see [`UreqTransport::new`](crate::UreqTransport::new)), set up by the store and
@@ -72,11 +71,8 @@ pub enum ReqwestSetupError {
     Runtime(io::ErrorKind),
 }
 
-/// Where requests are driven.
 enum Driver {
-    /// A single-threaded runtime the transport owns.
     Own(Runtime),
-    /// The application's runtime.
     App(Handle),
 }
 
@@ -410,7 +406,6 @@ async fn exchange(
     Ok(HttpResponse::new(status, headers, body, complete))
 }
 
-/// A response's headers as received.
 fn head_of(response: &reqwest::Response) -> Vec<(String, String)> {
     response
         .headers()
@@ -465,7 +460,6 @@ fn is_tls(err: &reqwest::Error) -> bool {
     false
 }
 
-/// One link of the chain is a TLS library's own error.
 fn is_tls_library_error(err: &(dyn std::error::Error + 'static)) -> bool {
     #[cfg(feature = "native-tls")]
     if err.downcast_ref::<native_tls::Error>().is_some() {
@@ -474,7 +468,6 @@ fn is_tls_library_error(err: &(dyn std::error::Error + 'static)) -> bool {
     err.downcast_ref::<rustls::Error>().is_some()
 }
 
-/// The kind of the innermost `io::Error` in the chain.
 fn io_kind(err: &reqwest::Error) -> Option<io::ErrorKind> {
     let mut kind = None;
     let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
@@ -497,7 +490,6 @@ mod tests {
 
     use super::*;
 
-    /// Serves one connection: reads the request head, writes `reply`, closes.
     fn serve_once(reply: &'static [u8]) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
@@ -510,7 +502,6 @@ mod tests {
         format!("http://{addr}/key")
     }
 
-    /// Accepts one connection and holds it open without answering.
     fn serve_silence() -> (String, std::sync::mpsc::Sender<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");

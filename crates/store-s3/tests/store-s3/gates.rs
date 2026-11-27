@@ -4,8 +4,8 @@
 //! Every slow path the store has won back came from the same mistake in
 //! reverse: independent requests sent one after another (parts of a multipart
 //! upload, the levels of a listing, the HEADs that read created-at times), or one
-//! request cut into many (a restore's file read a chunk per GET). Wall time is round trips times latency, so a
-//! serial path sends the same requests and costs many more round trips. A
+//! request cut into many (a restore's file read a chunk per GET). Wall time is round trips
+//! times latency, so a serial path sends the same requests and costs many more round trips. A
 //! count alone cannot see it. These tests run each representative operation
 //! through a [`Link`] (a virtual clock, nothing sleeps) and hold the requests
 //! per kind and the waves to a bound derived from the design, stated beside

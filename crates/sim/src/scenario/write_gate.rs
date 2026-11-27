@@ -12,7 +12,6 @@ use crate::generate::{Op, RemoteOp};
 use crate::run::RunReport;
 use crate::sqlite::OtherProcessMode;
 
-/// The reach key of a commit the gate refused.
 const REFUSED: &str = "writes.commit_refused";
 
 fn gated(mut scenario: Scenario, mode: IfReplicationStops) -> Scenario {

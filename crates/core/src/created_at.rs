@@ -6,12 +6,12 @@
 //! exact created-at time it needs next ([`Need`]), optionally followed by the files it
 //! expects to need after it. [`resolve`] reads the needed created-at time, plus as many
 //! of those expected ones as the store runs at once
-//! ([`ObjectStore::batch_width`] of [`BatchKind::ResolvedCreatedAt`]) in one [`ObjectStore::created_at_many`], and drops
-//! the collected [`ResolvedCreatedAt`] with the decision: nothing is kept across
-//! listings, attempts or ticks, so this is a ledger and not a cache. At width
-//! one only the needed created-at time is read, one call per request, as before. A read
-//! ahead that fails is dropped: if the step does need that file, it asks, and
-//! the single read reports the failure then.
+//! ([`ObjectStore::batch_width`] of [`BatchKind::ResolvedCreatedAt`]) in one
+//! [`ObjectStore::created_at_many`], and drops the collected [`ResolvedCreatedAt`]
+//! with the decision: nothing is kept across listings, attempts or ticks, so this
+//! is a ledger and not a cache. At width one only the needed created-at time is
+//! read. A read ahead that fails is dropped: if the step does need that file, it
+//! asks, and the single read reports the failure then.
 //!
 //! A step that asks for the same file twice is a bug in the step, and
 //! the resolving loop (`drive`, under every `resolve*` entry point) fails closed with
@@ -258,7 +258,7 @@ pub enum ResolveError {
 }
 
 /// Drives `step` to completion, answering each request with the needed created-at time
-/// and up to the created-at times width minus one of the ones it names ahead (see the module docs).
+/// and up to the store's batch width minus one of those it names ahead (see the module docs).
 ///
 /// # Errors
 /// The store's error from the first failed read of a needed created-at time, or
@@ -633,7 +633,6 @@ mod tests {
     impl ObjectStore for Wide {
         type Upload = <MemStore as ObjectStore>::Upload;
 
-        /// Forwards to the store it wraps.
         async fn remove_scratch(&self) -> Result<u64, StoreError> {
             self.inner.remove_scratch().await
         }

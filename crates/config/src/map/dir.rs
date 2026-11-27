@@ -60,7 +60,6 @@ const GO_PATH_ESCAPES: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'=')
     .remove(b'@');
 
-/// The header every SQLite database file starts with.
 const HEADER: &[u8; 16] = b"SQLite format 3\0";
 
 /// Why a `dir` entry gives no databases.

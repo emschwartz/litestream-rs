@@ -105,7 +105,6 @@ use rusqlite::Connection;
 /// Killed turns; each is followed by a start of the other program, so this many switches.
 const KILLED_TURNS: u32 = 21;
 const UP: Duration = Duration::from_secs(30);
-/// How long a turn waits for its kill point before it kills anyway.
 const REACH: Duration = Duration::from_secs(10);
 /// A compacting turn waits for the next level-1 window, Rust's being 30 s.
 const REACH_COMPACTION: Duration = Duration::from_secs(45);
@@ -118,7 +117,6 @@ const BOOT_LINE: Duration = Duration::from_secs(5);
 const ROWS: u32 = 200;
 /// Churn commits a checkpoint turn writes first: about 1,200 WAL pages.
 const CHURN_TO_CHECKPOINT: u32 = 12;
-/// The config's `truncate-page-n`.
 const TRUNCATE_PAGES: u64 = 1500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -194,7 +192,6 @@ dbs:
     std::fs::write(path, text).expect("write the config");
 }
 
-/// What one turn did, for the run's summary.
 #[derive(Debug)]
 struct TurnReport {
     kind: Kind,
@@ -466,7 +463,6 @@ fn compaction_view(fixture: &AppFixture) -> Result<(Vec<String>, bool), CompatEr
     Ok((higher, scratch))
 }
 
-/// Whether an upload is in flight in the replica's level 0.
 fn uploading(fixture: &AppFixture) -> Result<bool, CompatError> {
     Ok(list(&fixture.replica)?
         .unrecognized
@@ -483,7 +479,6 @@ fn reached(waited: Result<(), CompatError>, at: &str) -> bool {
     }
 }
 
-/// Polls `cond` over the fixture while the process keeps running.
 fn wait_on(
     fixture: &AppFixture,
     process: &mut Replicator,
@@ -531,7 +526,6 @@ fn pause(process: &Replicator) {
     rustix::process::kill_process(pid, rustix::process::Signal::STOP).expect("SIGSTOP");
 }
 
-/// Whether the newest staged file is in the WAL generation with these salts.
 fn newest_staged_in(fixture: &AppFixture, salts: Option<(u32, u32)>) -> bool {
     let origin = newest_staged_origin(fixture).and_then(|(_, origin)| origin);
     origin.map(lsr_ltx::WalOrigin::salts) == salts
@@ -581,7 +575,6 @@ impl Run {
         Some(self.expected_cause(process.kind(), cause, &at))
     }
 
-    /// The first turn: the replica gets its first snapshot and everything staged.
     fn first_boot(&mut self, process: &mut Replicator, at: &str) {
         wait_until("the first snapshot", UP, || {
             process.ensure_running()?;
@@ -624,7 +617,6 @@ impl Run {
         }
     }
 
-    /// The Rust daemon's boot line.
     fn rust_boot_line(&self, process: &mut Replicator, at: &str) -> String {
         // The daemon's log sink is in place before its replicator's thread runs,
         // so every boot logs this line.

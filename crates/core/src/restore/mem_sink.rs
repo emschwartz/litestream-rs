@@ -64,7 +64,6 @@ struct State {
 }
 
 impl State {
-    /// Counts the call and fails it when a fault is armed for this index.
     fn enter(&mut self, op: SinkOp) -> io::Result<()> {
         let nth = self.calls.entry(op).or_default();
         let this = *nth;

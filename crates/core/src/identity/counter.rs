@@ -28,26 +28,21 @@ mod tests;
 /// The most pages the schema walk reads before it gives up.
 const MAX_SCHEMA_PAGES: usize = 4096;
 
-/// The counter table's name in the schema.
 const TABLE_NAME: &[u8] = b"_litestream_seq";
 
-/// A b-tree leaf page of a table.
 const LEAF_TABLE: u8 = 0x0d;
 
-/// An interior page of a table's b-tree.
 const INTERIOR_TABLE: u8 = 0x05;
 
 /// Where page 1's b-tree header starts: after the 100-byte database header.
 const PAGE_ONE_HEADER: usize = 100;
 
-/// The big-endian 16-bit number at `at`.
 fn be16(page: &[u8], at: usize) -> Option<usize> {
     let bytes = page.get(at..at.checked_add(2)?)?;
     let (hi, lo) = (*bytes.first()?, *bytes.get(1)?);
     Some((usize::from(hi) << 8) | usize::from(lo))
 }
 
-/// The big-endian 32-bit number at `at`.
 fn be32(page: &[u8], at: usize) -> Option<u32> {
     let bytes: [u8; 4] = page.get(at..at.checked_add(4)?)?.try_into().ok()?;
     Some(u32::from_be_bytes(bytes))

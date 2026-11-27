@@ -14,8 +14,7 @@ use lsr_core::{
 use lsr_ltx::{Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp, Txid, TxidRange};
 
 /// A store that counts the requests a bucket would bill: a lone read is one, and a stream is
-/// one however many pieces are taken from it. It answers from memory, so the run is
-/// deterministic and nothing sleeps.
+/// one however many pieces are taken from it.
 pub struct Waves {
     inner: MemStore,
     /// Requests: lone reads and streams opened.
@@ -37,7 +36,6 @@ impl Waves {
     }
 }
 
-/// A stream of [`Waves`]: one request, its pieces read from memory in order.
 struct Stream<'a> {
     store: &'a Waves,
     key: FileKey,
@@ -61,7 +59,6 @@ impl ReadStream for Stream<'_> {
 impl ObjectStore for Waves {
     type Upload = <MemStore as ObjectStore>::Upload;
 
-    /// Forwards to the store it wraps.
     async fn remove_scratch(&self) -> Result<u64, StoreError> {
         self.inner.remove_scratch().await
     }

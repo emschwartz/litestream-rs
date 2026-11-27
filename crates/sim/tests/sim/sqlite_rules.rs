@@ -30,7 +30,6 @@ mod rules {
 
     const PAGE_SIZE: u32 = 512;
 
-    /// A checkpoint's busy flag, log frames and checkpointed frames.
     type Numbers = (bool, u32, u32);
     const TABLES: u32 = 4;
     const OTHER_PROCESSES: usize = 3;
@@ -47,7 +46,6 @@ mod rules {
         BumpSeq,
     }
 
-    /// How a salt moved since the side's previous header.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Moved {
         Same,
@@ -69,7 +67,6 @@ mod rules {
         numbers: Option<(bool, u32, u32)>,
     }
 
-    /// One side's previous header, to say how the salts moved.
     #[derive(Default)]
     struct Last(Option<(u32, u32)>);
 
@@ -156,7 +153,6 @@ mod rules {
             .collect()
     }
 
-    /// The two sides of one history.
     struct Pair {
         _dir: TempDir,
         wal_path: PathBuf,
@@ -230,7 +226,6 @@ mod rules {
             real
         }
 
-        /// Runs `op` on both sides; returns SQLite's view after it.
         fn apply(&mut self, op: Op) -> View {
             let (real, sim) = match op {
                 Op::Commit(mask) => {
@@ -304,7 +299,6 @@ mod rules {
         }
 
         fn our_checkpoint(&mut self, mode: CheckpointMode) -> (Option<Numbers>, Option<Numbers>) {
-            // A TRUNCATE runs on the writer connection and leaves our read as it is.
             if mode == CheckpointMode::Truncate {
                 let real = pragma(&self.writer, mode.into());
                 let run = self.sim.checkpointer().checkpoint(mode).unwrap();
@@ -398,7 +392,6 @@ mod rules {
         assert!(sim.rewrite_page_size(bigger));
     }
 
-    /// Each committed transaction in `wal`: its frames' page numbers and its database size.
     fn transactions(wal: &[u8]) -> Vec<(Vec<u32>, u32)> {
         let mut reader = WalReader::open(Cursor::new(wal)).unwrap();
         let mut cursor = reader.cursor_at_start();
@@ -416,7 +409,6 @@ mod rules {
         out
     }
 
-    /// Whether `pages` holds every page from `old + 1` to `new`.
     fn writes_added(pages: &[u32], old: u32, new: u32) -> bool {
         (old.saturating_add(1)..=new).all(|pgno| pages.contains(&pgno))
     }

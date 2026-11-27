@@ -56,7 +56,6 @@ pub(super) fn lock(real: &Mutex<Real>) -> MutexGuard<'_, Real> {
     real.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Upserts one row per page on `conn`.
 fn upsert_on(
     conn: &Connection,
     pages: &[(PageNo, Vec<u8>)],
@@ -82,7 +81,6 @@ fn blob(bytes: &[u8], size: PageSize, copies: usize) -> Vec<u8> {
 }
 
 impl Real {
-    /// A connection through the backend's VFS to the existing database.
     pub(super) fn connect(&self) -> Option<Connection> {
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let conn = Connection::open_with_flags_and_vfs(&self.db, flags, self.vfs.name()).ok()?;
@@ -234,7 +232,6 @@ impl Real {
         spilled
     }
 
-    /// The application rolls its open transaction back; false when it holds none.
     pub(super) fn rollback(&mut self) -> bool {
         let held = self.app_tx;
         if held {
@@ -257,7 +254,6 @@ impl Real {
         (deleted > 0).then(|| self.mark())
     }
 
-    /// Another process's connection begins a read transaction and holds it.
     pub(super) fn reader_begin(&mut self) -> ReaderId {
         let id = ReaderId::new(self.next_reader);
         self.next_reader = self.next_reader.saturating_add(1);
@@ -269,12 +265,10 @@ impl Real {
         id
     }
 
-    /// That process's read transaction ends, and its connection closes.
     pub(super) fn reader_end(&mut self, id: ReaderId) -> bool {
         self.readers.remove(&id).is_some()
     }
 
-    /// `PRAGMA wal_checkpoint(mode)` on `conn`.
     pub(super) fn checkpoint_on(
         conn: &Connection,
         mode: OtherProcessMode,
@@ -295,12 +289,10 @@ impl Real {
         })
     }
 
-    /// Another process opens a connection, checkpoints and closes it.
     pub(super) fn other_checkpoint(&self, mode: OtherProcessMode) -> Option<CheckpointNumbers> {
         Self::checkpoint_on(&self.connect()?, mode)
     }
 
-    /// The WAL path.
     pub(super) fn wal_path(&self) -> PathBuf {
         let mut name = self.db.clone().into_os_string();
         name.push("-wal");

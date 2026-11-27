@@ -145,7 +145,6 @@ async fn ends_sound<R: Role>(remote: &R, info: &FileInfo) -> Result<bool, Fault>
     let Ok(trailer) = <&[u8; TRAILER_LEN]>::try_from(trailer) else {
         return Ok(false);
     };
-    // The index ends at its terminator and starts after the header.
     let index = u64::from_be_bytes(*size);
     let fits = index
         .checked_add(HEADER_READ.get())

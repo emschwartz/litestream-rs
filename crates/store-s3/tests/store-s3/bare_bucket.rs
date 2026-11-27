@@ -4,7 +4,6 @@
 use crate::common;
 use crate::rig;
 
-// The helpers are test code only by cfg, which is what clippy.toml's allow-*-in-tests reads.
 #[cfg(test)]
 mod cases {
     use super::common::*;

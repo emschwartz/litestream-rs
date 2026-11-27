@@ -70,7 +70,7 @@ impl Actor {
         }
     }
 
-    /// Where the snapshot a drain ends with stands.
+    /// Where the snapshot stands.
     #[must_use]
     pub const fn final_snapshot(&self) -> FinalSnapshot {
         self.kept.final_snapshot

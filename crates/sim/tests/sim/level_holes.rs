@@ -76,7 +76,6 @@ fn level_one_files_that_share_a_window_all_reach_level_two() {
             RecorderEvent::Put { .. } | RecorderEvent::Delete { .. } => None,
         })
         .collect();
-    // The scenario is the one described. The first files of both levels (they start above the
     // first snapshot, at 2), those of the boundary after the idle five minutes, and the level-1
     // file of second 375; then, at second 400, one level-1 file of every file behind it (73,
     // fewer than one compaction takes, `MAX_INPUTS`) and one more, a level-1 file written after

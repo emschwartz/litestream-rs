@@ -430,7 +430,6 @@ fn health_compares_the_local_and_replica_positions() {
     assert_eq!(health.db_bytes, std::fs::metadata(&site.db).unwrap().len());
     assert_eq!(health.wal_bytes, std::fs::metadata(&wal).unwrap().len());
     assert!(full.wal_bytes > 0 && full.db_bytes > 0, "{full:?}");
-    // New writes: seen at the next poll, then replicated.
     site.commit(3);
     clock.advance(POLL);
     let after = moved_until(&replicator, &clock, (POLL, 240), |h| {
@@ -1391,7 +1390,6 @@ fn start_refuses_a_missing_database_and_an_unusable_meta_dir() {
         ),
         Err(StartError::MetaDir { .. })
     ));
-    // Nothing was left registered: a good start goes through.
     let replicator = Replicator::start(
         &site.db,
         site.store(),

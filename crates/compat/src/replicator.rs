@@ -84,7 +84,6 @@ pub struct Replicator {
     kind: Kind,
 }
 
-/// Where cargo puts the `lsr` binary of a debug build.
 fn lsr_path() -> PathBuf {
     let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
         || workspace_root().join("target"),

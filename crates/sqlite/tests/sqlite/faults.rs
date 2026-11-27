@@ -52,7 +52,6 @@ fn rig<B: Backend>(dir: &TempDir, placement: Placement) -> Rig<B> {
     Rig::new(dir.path(), RigConfig::placed(placement)).unwrap()
 }
 
-/// Runs `case` with the application in each placement.
 fn both(case: impl Fn(Placement)) {
     for placement in Placement::ALL {
         case(placement);
@@ -84,7 +83,6 @@ struct Outcome {
     degraded: Vec<DegradedCause>,
 }
 
-/// What a cycle needed beyond ticking to settle.
 #[derive(Debug, Default)]
 struct Needed {
     write: bool,
@@ -164,7 +162,6 @@ fn each_step<B: Backend>(
     outcomes
 }
 
-/// [`each_step`] in both placements, the outcomes of both in turn.
 fn each_step_both<B: Backend>(kind: FileKind, op: Op, effect: Effect) -> Vec<Outcome> {
     Placement::ALL
         .into_iter()

@@ -239,12 +239,9 @@ fn a_checksum_chain_break_is_reported_and_publishes_nothing() {
     assert_eq!(sink.published(), None);
 }
 
-/// Review: an overlapping file's pre-apply checksum cannot be compared, so only
-/// the database's own checksum after the last file can catch a tracked chain
-/// whose pages do not add up. Go's restore checks it (the merged snapshot's
-/// post-apply, ltx decoder.go Close) and PLAN.md says the rolling checksum is
-/// verified before the rename; here the restore publishes a database whose
-/// checksum is not the one Restored::post_apply reports.
+/// An overlapping file's pre-apply checksum cannot be compared, so only the database's own
+/// checksum after the last file can catch a chain whose pages do not add up. Go checks it (ltx
+/// decoder.go Close) and PLAN.md says it is verified before the rename.
 #[test]
 fn an_overlapping_file_whose_pages_miss_its_post_apply_is_rejected() {
     let ps = size(512);
@@ -550,8 +547,8 @@ fn a_store_error_other_than_not_found_ends_the_restore_without_retry() {
 
 /// A listing that misses a file a writer was putting in place (a directory read racing a
 /// rename on a file replica) shows a gap the replica does not have. Seen on the LazyFS rig:
-/// "gap: the history reaches 0bf8 and resumes at 0bfa" while 0bf9 was being uploaded; the
-/// same restore run again a moment later succeeded. A gap plans again on a fresh listing.
+/// "gap: the history reaches 0bf8 and resumes at 0bfa" while 0bf9 was uploading. A gap plans
+/// again on a fresh listing.
 #[test]
 fn a_gap_from_a_listing_that_raced_a_writer_is_listed_again() {
     let store = Wrapped::new(four_file_replica());
@@ -979,10 +976,9 @@ fn a_sink_that_cannot_reset_ends_the_restore() {
     assert_eq!(sink.published(), None);
 }
 
-/// The one slow test (seconds): a snapshot must hold every page, so crossing
-/// the lock page means encoding and decoding a gigabyte of 512-byte pages.
-/// Page size 512 puts the lock page at 2,097,153: a database of 2,097,154
-/// pages crosses it, and the snapshot holds every page but that one.
+/// The one slow test (seconds): a snapshot holds every page, so crossing the lock page means
+/// a gigabyte of 512-byte pages. At that size the lock page is 2,097,153, and a database of
+/// 2,097,154 pages crosses it; the snapshot holds every page but that one.
 #[test]
 fn the_lock_page_is_never_written_and_reads_as_zeros() {
     let ps = size(512);

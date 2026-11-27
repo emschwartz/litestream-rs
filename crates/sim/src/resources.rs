@@ -33,8 +33,7 @@ pub const WRITE_CHUNK_LIMIT: u64 = (1 << 20) + (1 << 16);
 /// Listing calls one tick may make: ten levels (`Level::ALL`) listed once each, three times
 /// over, so 30. A boot into a brand-new meta directory makes the three: its own listing, the page
 /// size's prefix, and the identity check's restore, which makes one attempt and lists once
-/// (`docs/decisions/D176.md`). Every other boot makes two (the first two). A restore that listed
-/// again on each retry made up to five.
+/// (`docs/decisions/D176.md`). Every other boot makes two (the first two).
 pub const LIST_CALLS_PER_TICK: u64 = 30;
 
 /// What the checkpointer was asked, by mode.

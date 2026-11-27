@@ -35,10 +35,9 @@ pub struct SqliteConfig {
     pub vfs: Option<String>,
     /// `PRAGMA journal_size_limit` on the writer connection, in bytes: the size SQLite cuts the
     /// WAL file back to when that connection's write restarts the log. After the replicator's
-    /// own checkpoint that write is its sequence bump on this connection, and SQLite cuts the
-    /// file only on the connection that restarts it, so without a limit the WAL file keeps its
-    /// largest size for good. `None` is SQLite's own default, no limit. Default
-    /// [`DEFAULT_JOURNAL_SIZE_LIMIT`].
+    /// checkpoint that write is its sequence bump, and SQLite cuts the file only on the
+    /// restarting connection, so without a limit the WAL keeps its largest size for good.
+    /// `None` is no limit. Default [`DEFAULT_JOURNAL_SIZE_LIMIT`].
     pub journal_size_limit: Option<NonZeroU64>,
 }
 
@@ -97,14 +96,13 @@ pub(crate) struct Inner {
     /// was deleted under the read lock; `None` when it could not be told.
     wal_id: Option<DatabaseFile>,
     page_size: PageSize,
-    /// The current hold of the read transaction: a holder of this open's own, and how many
-    /// times it has been taken.
+    /// The current hold of the read transaction: this open's own holder and how many times it
+    /// has been taken.
     pub(crate) epoch: ReadLockHold,
     /// The id of the last barrier or write lock handed out, and of the last one handed back:
-    /// a lock is outstanding while they differ. Whether the reader is pinned and whether the
-    /// writer is in its transaction are not stored: they are whether SQLite has the
-    /// connection in a transaction (`is_autocommit`), so a ROLLBACK that failed, or a
-    /// transaction SQLite ended itself on an error, cannot leave a flag saying otherwise.
+    /// a lock is outstanding while they differ. Whether the reader is pinned or the writer is in
+    /// its transaction is not stored but read from SQLite (`is_autocommit`), so a failed
+    /// ROLLBACK, or a transaction SQLite ended itself on an error, cannot leave a stale flag.
     issued: u64,
     returned: u64,
 }
@@ -142,7 +140,6 @@ pub(crate) fn connect(path: &Path, config: &SqliteConfig) -> Result<Connection, 
     Ok(conn)
 }
 
-/// `PRAGMA journal_size_limit` set to `limit` (see [`journal_size_limit`]).
 fn set_journal_size_limit(conn: Handle<'_>, limit: Option<NonZeroU64>) -> Result<(), SqliteError> {
     conn.exec(&format!(
         "PRAGMA journal_size_limit = {}",
@@ -150,7 +147,6 @@ fn set_journal_size_limit(conn: Handle<'_>, limit: Option<NonZeroU64>) -> Result
     ))
 }
 
-/// The size SQLite reported, as the type pages are counted in.
 pub(crate) fn page_size(bytes: u32) -> Result<PageSize, OpenError> {
     PageSize::new(bytes).ok_or(OpenError::PageSize { bytes })
 }
@@ -177,13 +173,13 @@ impl Sqlite {
 
     /// Opens the database at `path`, which must already exist, puts it in WAL mode with
     /// autocheckpoint off and `SQLITE_FCNTL_PERSIST_WAL` on for both connections (so the
-    /// replicator closing after the application keeps the WAL), creates `_litestream_seq` and `_litestream_lock`
-    /// (`db.go:1174`, `1180`, so Go and Rust leave the same schema), takes the first read
-    /// transaction (the first epoch of a holder no earlier open had) and maps the wal-index. It
-    /// returns once the read transaction is held, so nothing can checkpoint past it.
+    /// replicator closing after the application keeps the WAL), creates `_litestream_seq` and
+    /// `_litestream_lock` (`db.go:1174`, `1180`, so Go and Rust leave the same schema), takes the
+    /// first read transaction (the first epoch of a holder no earlier open had) and maps the
+    /// wal-index. It returns once the read transaction is held, so nothing can checkpoint past it.
     ///
-    /// It first checks that the SQLite answering is one of the builds this crate's layout reads
-    /// are verified against (the `version` module), and refuses any other.
+    /// It first refuses any SQLite build this crate's layout reads are not verified against (the
+    /// `version` module).
     ///
     /// # Errors
     /// [`OpenError`]; nothing stays open or pinned.
@@ -256,8 +252,7 @@ impl Sqlite {
     }
 
     /// The database file both connections hold open, from SQLite's own descriptors rather than
-    /// the path, which may name another file by now: a caller that checked the path before the
-    /// open compares this, not a second stat, so a file swapped in after the open, or between
+    /// the path, which may name another file by now: a file swapped in after the open, or between
     /// the reader's open and the writer's, cannot pass. `Ok(None)` when it cannot be told (a VFS
     /// other than SQLite's unix ones, or not Unix); the caller falls back to the path.
     ///
@@ -291,11 +286,11 @@ impl Sqlite {
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        // The writer closes last of the two (field order). When it is the database's last
-        // connection, SQLite checkpoints on close and, with a size limit set, truncates the WAL
-        // to zero bytes, so the next start would find no WAL to continue and snapshot. With the
-        // limit off the close keeps the WAL, as `PERSIST_WAL` intends. A failure only leaves
-        // that truncation possible, and a drop has no one to report it to.
+        // The writer closes last of the two (field order). As the database's last connection,
+        // SQLite checkpoints on close and, with a size limit set, truncates the WAL to zero
+        // bytes, so the next start would find no WAL to continue and snapshot. With the limit
+        // off the close keeps the WAL, as `PERSIST_WAL` intends. A drop has no one to report a
+        // failure to.
         drop(set_journal_size_limit(self.writer.handle(), None));
     }
 }
@@ -339,17 +334,15 @@ impl Inner {
         !self.reader.handle().is_autocommit()
     }
 
-    /// Whether the writer holds a barrier or write lock now.
     fn held(&self) -> bool {
         !self.writer.handle().is_autocommit()
     }
 
-    /// The database's wal-index file.
     pub(crate) fn shm_path(&self) -> PathBuf {
         suffixed(&self.db_path, "-shm")
     }
 
-    /// Takes the read transaction again (a new epoch).
+    /// Takes the read transaction again, in a new epoch.
     pub(crate) fn begin_read(&mut self) -> Result<(), SqliteError> {
         begin_read(self.reader.handle())?;
         self.epoch = self.epoch.next();
@@ -751,11 +744,10 @@ mod tests {
         }
     }
 
-    /// A ROLLBACK that fails leaves the writer inside its transaction. When that was tracked
-    /// by hand, the lock counted as released and every later `begin_writer` failed on `BEGIN`
-    /// inside the open transaction. The fault VFS cannot fail a ROLLBACK (its unlocks never
-    /// fail, and rolling back an unspilled WAL transaction does no other file I/O), so the
-    /// test opens the transaction directly: the state such a failure leaves.
+    /// A ROLLBACK that fails leaves the writer inside its transaction, and every later
+    /// `begin_writer` must not fail on `BEGIN` inside it. The fault VFS cannot fail a ROLLBACK
+    /// (its unlocks never fail, and rolling back an unspilled WAL transaction does no other file
+    /// I/O), so the test opens the transaction directly: the state such a failure leaves.
     #[test]
     fn a_writer_left_in_a_transaction_does_not_wedge_later_locks() {
         let dir = tempfile::TempDir::new().unwrap();

@@ -11,9 +11,8 @@ publish.workspace = true
 workspace = true
 
 [features]
-# `testing::encode_commit_zero`, for tests in other crates that need a file the
-# strict encoder refuses; and `PageIndex` and `decode_frame`, which read one page
-# out of order with no checksum over it, for the fuzz targets and the tests.
+# Test and fuzz access: an encoder for files the strict one refuses, and unchecked
+# out-of-order page reads (`PageIndex`, `decode_frame`).
 testing = []
 
 [dependencies]
@@ -23,9 +22,8 @@ lz4_flex.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-# The integration tests read pages out of order.
 lsr-ltx = { workspace = true, features = ["testing"] }
-# The second, independent CRC-64 the SIMD one is tested against (tests/ltx/common.rs and checksum.rs).
+# An independent CRC-64 to test the SIMD one against.
 crc.workspace = true
 proptest.workspace = true
 sha2.workspace = true

@@ -1,5 +1,5 @@
-//! Listing a level: LIST pages only, never a HEAD (a HEAD per file made a listing cost one request per file). Several levels
-//! can be listed at once ([`Inner::list_many`]): each round sends the next
+//! Listing a level: LIST pages only, never a HEAD (a HEAD per file would cost one request per
+//! file). Several levels can be listed at once ([`Inner::list_many`]): each round sends the next
 //! page of every listing still going as one batch.
 //!
 //! The cursor is sent as `start-after`, later pages as `continuation-token`.
@@ -84,8 +84,7 @@ impl<'a, T: Transport> Run<'a, T> {
         }
     }
 
-    /// Whether another page is needed: fewer than `want` files and the one
-    /// after them are in hand, and the listing goes on.
+    /// Whether the listing goes on and fewer than `want` files plus one are in hand.
     fn needs_page(&self) -> bool {
         !matches!(self.paging, Paging::Done) && self.pending.len() <= self.want
     }
@@ -133,7 +132,6 @@ impl<'a, T: Transport> Run<'a, T> {
         Ok(())
     }
 
-    /// The page: `want` files, plus one after them when the listing goes on.
     fn finish(self, after: Option<TxidRange>, limit: PageLimit) -> Listing {
         let files: Vec<FileInfo> = self
             .pending
@@ -180,9 +178,8 @@ impl<T: Transport> Inner<T> {
         Ok(run.finish(after, limit))
     }
 
-    /// Several listings at once: each round sends the next page of every
-    /// listing that needs one as one batch, and each page is judged exactly
-    /// as [`Self::list`] judges it. A failed listing stops; the rest go on.
+    /// Several listings at once, each page judged exactly as [`Self::list`] judges it. A
+    /// failed listing stops; the rest go on.
     pub(crate) fn list_many(
         &self,
         pages: &[ListAt],
@@ -200,8 +197,7 @@ impl<T: Transport> Inner<T> {
             .collect()
     }
 
-    /// Sends the next page of every listing that needs one as one batch and
-    /// files each answer; returns whether any page was asked for.
+    /// One batch round; returns whether any page was asked for.
     fn list_round(&self, runs: &mut [Result<Run<'_, T>, StoreError>], start: Timestamp) -> bool {
         let active: Vec<usize> = (0..runs.len())
             .filter(|&at| matches!(runs.get(at), Some(Ok(run)) if run.needs_page()))

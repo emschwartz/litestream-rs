@@ -26,8 +26,6 @@ fn snapshots() -> Vec<Op> {
     ops
 }
 
-/// The run's report, or its violation as text, with retention switched on just before step
-/// `on`.
 fn run(ops: &[Op], on: u32) -> Result<RunReport, String> {
     let opts = Opts {
         retention: RetentionMode::Off,

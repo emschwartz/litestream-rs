@@ -34,7 +34,6 @@ fn clear(path: &Path) {
     }
 }
 
-/// Runs the chain writer for `commits` commits at `page_size` and drains it.
 fn write_chain(commits: u32, page_size: u32, seed: u64) -> Written {
     let fixture = AppFixture::create(page_size, seed).expect("fixture");
     let mut chain =

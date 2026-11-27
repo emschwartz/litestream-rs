@@ -35,7 +35,6 @@ pub(super) const HOT: &str = "hot-app";
 const ROWS_PER_PAGE: u64 = 4;
 /// Rows a page of the hot set stands for: the gap between two hot row ids.
 const MIN_STRIDE: u64 = ROWS_PER_PAGE;
-/// Reads a thread makes between two looks for the stop file.
 const STOP_CHECK_EVERY: u64 = 256;
 /// The bytes of one sample on disk: due time (unix nanoseconds) and latency (nanoseconds).
 pub(super) const SAMPLE_BYTES: usize = 16;
@@ -76,7 +75,6 @@ impl HotSet {
         Self { stride, pages }
     }
 
-    /// The id of the hot row number [`k`] (below [`pages`]).
     fn id(self, k: u64) -> i64 {
         i64::try_from(k.saturating_mul(self.stride).saturating_add(1)).unwrap_or(i64::MAX)
     }
@@ -188,7 +186,6 @@ pub(super) fn marker(db: &Path) -> Result<(u64, u32), CompatError> {
     Ok((value, page))
 }
 
-/// Reads the hot rows [`from..to`] once.
 fn touch(conn: &Connection, hot: HotSet, from: u64, to: u64) -> Result<(), CompatError> {
     let mut stmt = conn.prepare("SELECT length(data) FROM items WHERE id = ?1")?;
     for k in from..to {

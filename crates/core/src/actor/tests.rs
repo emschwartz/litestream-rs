@@ -178,7 +178,6 @@ impl Counting {
         self.calls.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// Counts a call and notes the request it stands for.
     fn request(&self, request: Request, level: Level) {
         self.count();
         self.requests.lock().unwrap().push((request, level));
@@ -194,7 +193,6 @@ impl Counting {
         tally
     }
 
-    /// How many requests were made so far.
     fn requests_made(&self) -> usize {
         self.requests.lock().unwrap().len()
     }
@@ -203,7 +201,6 @@ impl Counting {
         self.lists.load(Ordering::SeqCst)
     }
 
-    /// File entries all listings returned so far.
     fn listed(&self) -> u64 {
         self.listed.load(Ordering::SeqCst)
     }
@@ -214,7 +211,6 @@ impl Counting {
         reads.iter().filter(|read| *read == key).count()
     }
 
-    /// Bytes all reads returned so far.
     fn read_bytes(&self) -> u64 {
         self.read_bytes.load(Ordering::SeqCst)
     }
@@ -229,7 +225,6 @@ impl Counting {
         *self.other_bytes_on_read.lock().unwrap() = Some((key, nth, bytes));
     }
 
-    /// Every key a delete was asked for, in order.
     fn deleted(&self) -> Vec<FileKey> {
         self.deletes.lock().unwrap().clone()
     }
@@ -565,7 +560,6 @@ impl Rig {
 fn cfg() -> ActorConfig {
     ActorConfig {
         sync: SyncConfig::default(),
-        // The tests tick when they have something to stage (`steady` sets an interval).
         sync_interval: Duration::ZERO,
         checkpoint: CheckpointConfig {
             interval: None,
@@ -576,7 +570,6 @@ fn cfg() -> ActorConfig {
         maintenance: Maintenance::go_default(),
         retry_interval: Duration::from_secs(1),
         shutdown_grace: Duration::from_secs(10),
-        // The tests written before the configurable responses expect a stop.
         responses: Responses::STRICT,
         max_unreplicated_age: crate::failstop::MaxUnreplicatedAge::DEFAULT,
     }
@@ -771,8 +764,8 @@ fn boot_on_backlog(rig: &mut Rig, now: i64) -> (Actor, Vec<Tick>) {
 }
 
 /// A boot with a backlog of staged files, as a process killed every few seconds leaves: its
-/// uploads never go idle within its life, and maintenance must still get its share. Before,
-/// it waited for every upload, so a crash loop never compacted, pruned or deleted.
+/// uploads never go idle within its life, and maintenance must still get its share: a crash
+/// loop must still compact, prune and delete.
 #[test]
 fn maintenance_gets_its_share_while_a_backlog_uploads() {
     let mut rig = backlog(30, T0 + 2);
@@ -1218,10 +1211,10 @@ fn a_failed_drop_after_a_divergence_takes_no_snapshot_at_the_diverged_id() {
 
 /// BOOT-21 and BOOT-22 (D9 in `docs/BEHAVIOR.md`). A running engine whose ambiguous commit makes
 /// it list the replica finds another writer's file above its own newest staged file and stops on
-/// `OtherWriter`, the one stop the default responses make. The restart used to forget the stop:
-/// the new boot took the other writer's file as history it is behind (`behind_remote`),
-/// snapshotted after it and uploaded, interleaving two databases in one history. The new boot now
-/// refuses replica files nothing vouches for (`crate::takeover`), so the restart stops again.
+/// `OtherWriter`, the one stop the default responses make. A restart must not forget the stop:
+/// a boot that took the other writer's file as history it is behind (`behind_remote`)
+/// would snapshot after it and interleave two databases in one history. The boot refuses replica
+/// files nothing vouches for (`crate::takeover`), so the restart stops again.
 #[test]
 fn a_restart_after_an_other_writer_stop_stops_again() {
     let (mut other, mut writer) = caught_up();
@@ -1748,12 +1741,12 @@ fn checkpoint_call_is_recorded() {
     );
 }
 
-/// The last transaction of every staged level-0 file, oldest first.
 /// The newest transaction in staging.
 fn newest_staged(rig: &Rig) -> Option<Txid> {
     staged(rig).last().and_then(|n| Txid::new(*n))
 }
 
+/// The last transaction of every staged level-0 file, oldest first.
 fn staged(rig: &Rig) -> Vec<u64> {
     Rig::files(&rig.staging, Level::ZERO)
         .iter()
@@ -2651,8 +2644,8 @@ fn an_env_prints_its_parts() {
 }
 
 /// An application that commits before every tick keeps the sync step busy on each one, and
-/// a sync that staged files used to end the tick before the upload step ran: uploads never
-/// ran, replication halted with no failure for health to report (simulator seed 0x593, under
+/// a sync that staged files must not end the tick before the upload step runs: else uploads never
+/// run, replication halts with no failure for health to report (simulator seed 0x593, under
 /// a lagging listing's hold). Uploads now take a turn ahead of the sync after
 /// [`state::FAIR_SHARE`] ticks in a row that passed them over.
 #[test]
@@ -2685,9 +2678,8 @@ fn uploads_keep_up_with_an_app_that_commits_every_tick() {
 
 /// A staged file that turns unreadable is dropped and a snapshot takes its place, but nothing
 /// has reached the replica: the upload failures before it still count toward a stall, so a
-/// replica that stays down is reported degraded on time. Before, the drop counted as the
-/// upload task's success and started its count again, and a halt that kept turning up
-/// unreadable files was never reported (simulator seeds 0x446 and 0x593).
+/// replica that stays down is reported degraded on time: the drop is not the
+/// upload task's success and does not restart its count (simulator seeds 0x446 and 0x593).
 #[test]
 fn a_resnapshot_keeps_the_failed_uploads_toward_a_stall() {
     let stalled = crate::fault::STALLED_AFTER.get();

@@ -12,15 +12,12 @@ workspace = true
 
 [features]
 default = ["bundled"]
-# SQLite compiled from libsqlite3-sys's bundled source. Off, libsqlite3-sys links the system's
-# (or the application's) SQLite, which must then be one of the builds the `version` module lists.
+# SQLite from libsqlite3-sys's bundled source. Off, the system's or application's SQLite is
+# linked, and must be a build the `version` module lists.
 bundled = ["libsqlite3-sys/bundled"]
-# `app_connection`, `ConnectionSetup::apply`, `check_app_connection` and `fail_fast_while` on a
-# rusqlite connection; any rusqlite from 0.39 to 0.43.
+# The application-connection helpers on a rusqlite connection.
 rusqlite = ["dep:rusqlite"]
-# The real-SQLite fault suite's support: the fault-injecting VFS and the harness that drives the
-# actor over a backend and judges the replica with the simulator's oracle. `serialize` reads the
-# database back through SQLite for the simulator's real backend.
+# The fault-injecting VFS and the real-SQLite fault harness.
 testing = ["dep:lsr-sim", "dep:lsr-store-fs", "dep:rustix", "lsr-core/testing", "rusqlite", "rusqlite/serialize", "rusqlite/bundled"]
 
 [dependencies]
@@ -35,16 +32,10 @@ rusqlite = { workspace = true, optional = true }
 thiserror.workspace = true
 
 [dev-dependencies]
-# The descriptor test drives a full sync and checkpoint cycle through core's in-memory store.
 lsr-core = { workspace = true, features = ["testing"] }
-# `set_limit`, so a setup pragma can be made to fail in its error's test.
 rusqlite = { workspace = true, features = ["bundled", "limits", "hooks"] }
-# The fault suite in tests/ runs on the testing feature.
 lsr-sqlite = { workspace = true, features = ["bundled", "testing"] }
-# The big cases restore into a file and compare it with the database.
 lsr-replica.workspace = true
-# The crash cycles judge every restore against the tree of committed histories.
 lsr-history.workspace = true
 tempfile.workspace = true
-# The simulator's model is held to this crate's answers on drawn histories.
 proptest.workspace = true

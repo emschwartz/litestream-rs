@@ -84,7 +84,6 @@ pub(crate) fn build(top: &Fields, env: &dyn Env, walk: &mut Walk) -> GoConfig {
     }
 }
 
-/// A duration that must be above zero, or at least zero.
 fn positive(fields: &Fields, name: &'static str, walk: &mut Walk) {
     if let Some(value) = fields.duration(name, walk).filter(|d| d.nanos() <= 0) {
         walk.problem(
@@ -315,7 +314,6 @@ fn source(
     }
 }
 
-/// `replica`, or the one item of `replicas`.
 fn db_replica(fields: &Fields, top: &Fields, walk: &mut Walk) -> Option<ReplicaConfig> {
     let single = fields.map("replica", walk);
     let list = match fields.maps("replicas", walk) {
@@ -520,7 +518,6 @@ fn choice<T: Copy>(
     None
 }
 
-/// The `UnsupportedValue` problem for `value` at key `name` of `fields`.
 fn unsupported(fields: &Fields, name: &str, value: String, allowed: String, walk: &mut Walk) {
     let kind = ProblemKind::UnsupportedValue { value, allowed };
     walk.problem(fields.path.key(name), fields.line(name), kind);

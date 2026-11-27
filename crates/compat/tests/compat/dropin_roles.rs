@@ -262,7 +262,6 @@ impl Aim {
     }
 }
 
-/// Cases per source in the aimed part.
 const AIMED: u32 = 32;
 
 const ROLE: &str = "arn:aws:iam::000000000000:role/fake";
@@ -410,7 +409,6 @@ fn answers_for(go: &Path, case: &Case) -> (Dump, Dump, String) {
     (go_out, rust_out, report)
 }
 
-/// The error text of the one replica's credentials, if they are an error.
 fn credential_error(dump: &Dump) -> Option<String> {
     match dump {
         Dump::Refused(error) => Some(error.clone()),

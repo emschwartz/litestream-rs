@@ -20,23 +20,17 @@ lsr-sidecar.workspace = true
 lsr-store-fs.workspace = true
 lsr-store-s3.workspace = true
 clap.workspace = true
-# The provider the binary installs at the start of main (rustls's own default).
+# The crypto provider the binary installs at the start of main.
 rustls = { workspace = true, features = ["aws-lc-rs", "std"] }
 serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 lsr-compat.workspace = true
-# The `-exec` child in tests/cli/sidecar.rs watches signals as a real child would.
 signal-hook.workspace = true
-# The replicate process test sets up its own application connection as an application must,
-# through the rusqlite helper: named here so the tests build without another crate's features.
 lsr-sqlite = { workspace = true, features = ["rusqlite"] }
 lsr-core = { workspace = true, features = ["testing"] }
-# FakeS3 drives the S3 path in-process, and the Tigris run's cleanup lists and aborts
-# multipart uploads with the store's raw requests; both sit behind the feature.
 lsr-store-s3 = { workspace = true, features = ["testing"] }
-# The Tigris run (tests/cli/tigris.rs) checkpoints the live database Go replicated.
 rusqlite = { workspace = true, features = ["bundled", "backup"] }
 tempfile.workspace = true
 

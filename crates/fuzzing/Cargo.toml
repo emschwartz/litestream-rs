@@ -10,14 +10,11 @@ publish.workspace = true
 [dependencies]
 arbitrary.workspace = true
 lsr-core = { workspace = true, features = ["testing"] }
-# The `index` target reads one page out of order, which only the testing feature offers.
 lsr-ltx = { workspace = true, features = ["testing"] }
 lsr-wal.workspace = true
-# The contract oracle the plan targets judge by.
 lsr-spec.workspace = true
 
 [dev-dependencies]
-# `WalBuilder` for the seeds and the target's own tests.
 lsr-wal = { workspace = true, features = ["testing"] }
 rusqlite = { workspace = true, features = ["bundled"] }
 tempfile.workspace = true

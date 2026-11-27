@@ -91,7 +91,6 @@ fn a_new_meta_directory_after_an_unreachable_replica_and_a_kill_carries_on() {
     std::fs::write(&blocked, b"not a directory").unwrap();
     point(&replica, &held);
 
-    // The replica takes the first commits.
     let app = database(&db);
     write(&app, 4);
     let mut daemon = replicate(&config);

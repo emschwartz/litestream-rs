@@ -366,7 +366,6 @@ struct Local<'a, F, P> {
 }
 
 impl<'a, F: Read + Seek, P: PageSource> Local<'a, F, P> {
-    /// The local state under `committed`.
     fn open(
         reader: Option<&'a mut WalReader<F>>,
         committed: CommittedRead,

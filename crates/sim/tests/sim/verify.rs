@@ -6,10 +6,7 @@ use lsr_sim::{Op, Opts, Seed};
 /// A bucket rollback takes the replica's newest files while the engine is down, and the engine
 /// boots without noticing (the gap BEHAVIOR D17 describes), so the transaction it reads live no
 /// longer restores: the plan stops at a gap. Verify must report the restore failing; one that
-/// calls it merged away (nothing to compare) hides the loss it exists to report. Found by the
-/// swarm against that plant at its 13th seed (seed 0xd, shrunk by deleting operations). An
-/// earlier history built on another writer's removed file stopped reaching the gap once the
-/// engine learned to stop on another writer.
+/// calls it merged away (nothing to compare) hides the loss it exists to report.
 #[test]
 fn verify_reports_a_live_transaction_a_rollback_took() {
     use lsr_sim::generate::{Hold, RemoteOp, WalOp};

@@ -199,7 +199,6 @@ mod scenarios {
     fn parts_that_land_newest_first_make_the_file_that_was_staged() {
         let mut ops = sliced(5);
         ops.extend(lands(&[3, 2, 1, 0]));
-        // The fifth part starts, the last 390 bytes are read and sealed behind it.
         ops.push(Op::Tick);
         ops.extend(lands(&[1, 0]));
         ops.push(Op::Tick);
@@ -231,7 +230,6 @@ mod scenarios {
         let failed = retried(&all, Fault::StoreTransient);
         assert_eq!(failed, 6, "{all:?}");
         assert!(failed < published(&all), "{all:?}");
-        // The file went again from its first byte.
         assert_eq!(sent(&all[failed..])[0], PART, "{all:?}");
         assert_eq!(report.reach.get("parts.landed.faulted"), 1);
         assert_eq!(report.reach.get("parts.uploads_open_at_the_end"), 0);
@@ -454,7 +452,6 @@ mod scenarios {
                 failure.step, failure.violation, failure.trace
             ),
         };
-        // The drain ended with the backlog owed, and the engine waited for parts sending it.
         assert!(
             report
                 .trace

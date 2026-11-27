@@ -408,14 +408,12 @@ fn transient(op: StoreOp) -> StoreError {
     }
 }
 
-/// A snapshot and its upload, with the engine up.
 fn live() -> Vec<Op> {
     let mut ops = vec![commit(3, false)];
     ops.extend(ticks(4));
     ops
 }
 
-/// [`live`], then `fault`, then more work and the oracle.
 fn injected(name: &'static str, fault: Vec<Op>, expect: Vec<Expect>) -> Scenario {
     let mut expect = expect;
     expect.push(Expect::Oracle);
@@ -1325,7 +1323,6 @@ pub fn bump_overtaken_then_the_wal_restarts() -> Scenario {
     s
 }
 
-/// The writer began right before the bump, and nothing failed or snapshotted.
 fn overtaken_at_the_bump(report: &RunReport) -> Result<(), String> {
     if report.reach.get("point.BumpSeq.Spill.ran") != 1 {
         return Err("no write transaction began right before the sequence bump".to_owned());
@@ -1819,7 +1816,6 @@ pub fn clock_steps_back_an_hour_mid_retry() -> Scenario {
     s
 }
 
-/// The upload after the clamp ran within a minute of wall clock of it.
 fn uploads_soon_after_the_clamp(report: &RunReport) -> Result<(), String> {
     let mut at = None;
     let mut clamped_at = None;
@@ -2177,7 +2173,6 @@ fn sealed_then(name: &'static str, op: SourceOp, err: SourceError) -> Scenario {
     s
 }
 
-/// The commit happened inside the tick and the checkpoint after it failed.
 fn sealed_then_failed(report: &RunReport) -> Result<(), String> {
     if report.commits_in_tick != 1 {
         return Err(format!(
@@ -2229,7 +2224,6 @@ pub fn sealed_then_bump_busy() -> Scenario {
     s
 }
 
-/// The commit happened inside the tick, the checkpoint after it ran, and no step failed.
 fn sealed_then_overtaken(report: &RunReport) -> Result<(), String> {
     if report.commits_in_tick != 1 {
         return Err(format!(

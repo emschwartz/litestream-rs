@@ -35,7 +35,7 @@ fn ts(n: i64) -> Timestamp {
     Timestamp::from_unix_millis(n)
 }
 
-/// What a database page holds when no WAL frame covers it.
+/// A page no WAL frame covers.
 fn db_fill(n: u32) -> u8 {
     0xD0_u8.saturating_add(u8::try_from(n).unwrap())
 }

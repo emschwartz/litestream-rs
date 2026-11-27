@@ -115,7 +115,6 @@ fn an_incompressible_64k_page_decodes_from_an_lz4_frame() {
     assert_eq!(decoded.verified.trailer().post_apply(), Some(post));
     assert_eq!(decode_chunked(&bytes, &[7, 65_536, 3]).unwrap(), decoded);
 
-    // Rust re-encodes it as a block, and the page survives that too.
     let mut encoder = Encoder::new(Vec::new(), decoded.header).unwrap();
     encoder
         .write_page(PageNo::new(1, page_size()).unwrap(), &page)
