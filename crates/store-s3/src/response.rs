@@ -234,21 +234,11 @@ pub fn parse_delete_failure_codes(r: &HttpResponse) -> Result<Vec<S3Code>, Respo
         .collect())
 }
 
-/// Lowercase hex, the form of a part's ETag.
-#[must_use]
-pub fn hex(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .flat_map(|byte| [byte >> 4, byte & 0x0f])
-        .filter_map(|nibble| char::from_digit(u32::from(nibble), 16))
-        .collect()
-}
-
 /// The quoted hex MD5 of `body`, as a part's ETag reads on S3.
 #[must_use]
 #[cfg(feature = "testing")]
 pub fn quoted_md5(body: &[u8]) -> String {
-    format!("\"{}\"", hex(&Md5::digest(body)))
+    format!("\"{}\"", hex::encode(Md5::digest(body)))
 }
 
 #[cfg(test)]

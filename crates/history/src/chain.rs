@@ -80,21 +80,10 @@ impl Chain {
         format!(
             "INSERT INTO chain(k, h, payload) VALUES ({}, X'{}', X'{}')",
             self.k,
-            hex(self.h.bytes()),
-            hex(payload)
+            hex::encode(self.h.bytes()),
+            hex::encode(payload)
         )
     }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
-    for b in bytes {
-        for nibble in [b >> 4, b & 0x0f] {
-            out.extend(DIGITS.get(usize::from(nibble)).map(|d| char::from(*d)));
-        }
-    }
-    out
 }
 
 /// The chain `conn` holds, verified row by row from the genesis. A database without the table is
