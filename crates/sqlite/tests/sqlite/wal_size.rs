@@ -7,7 +7,7 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 use lsr_core::{CheckpointMode, Checkpointer, Event, Tick};
-use lsr_sqlite::testing::{Placement, Rig, RigConfig};
+use lsr_sqlite::testing::{Placement, Rig, RigConfig, rig_actor_config};
 use lsr_sqlite::{DEFAULT_JOURNAL_SIZE_LIMIT, Sqlite, SqliteConfig, app_connection};
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -100,6 +100,47 @@ fn burst_through_the_actor(
     }
     let after = len(&rig.wal());
     Burst { rig, peak, after }
+}
+
+/// A WAL several times the limit, with the TRUNCATE threshold out of reach, shrinks by itself:
+/// the engine's PASSIVE checkpoints backfill it, and its sequence bump on the writer connection
+/// (the one holding `journal_size_limit`) restarts the log and cuts the file, though the
+/// application, which sets no limit, wrote the burst through its own connection.
+#[test]
+fn a_wal_several_times_the_limit_shrinks_with_truncate_out_of_reach() {
+    const BOUND: u32 = 5_000;
+    for placement in Placement::ALL {
+        let dir = TempDir::new().unwrap();
+        let mut actor = rig_actor_config();
+        actor.checkpoint.truncate_pages = None;
+        let cfg = RigConfig {
+            actor,
+            oracle: false,
+            ..RigConfig::placed(placement)
+        };
+        let mut rig = Rig::<Sqlite>::new(dir.path(), cfg).unwrap();
+        rig.insert(100).unwrap();
+        rig.settle().unwrap();
+        let begin = rig.ticks().len();
+        let limit = DEFAULT_JOURNAL_SIZE_LIMIT.get();
+        rig.exec(&burst_sql(200, MIB, "zeroblob")).unwrap();
+        let peak = len(&rig.wal());
+        assert!(peak > 3 * limit, "{placement:?}: {peak}");
+        let mut ticks = 0;
+        while len(&rig.wal()) > limit {
+            assert!(
+                ticks < BOUND,
+                "{placement:?}: still {} after {ticks} ticks",
+                len(&rig.wal())
+            );
+            rig.tick().unwrap();
+            ticks += 1;
+        }
+        assert!(rig.checkpointed_since(begin, CheckpointMode::Passive, false));
+        for busy in [false, true] {
+            assert!(!rig.checkpointed_since(begin, CheckpointMode::Truncate, busy));
+        }
+    }
 }
 
 /// No snapshot after the boot's first one, and no fault, in the whole run.
