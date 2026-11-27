@@ -35,6 +35,7 @@
 //! same [`settle`].
 
 use std::future::Future;
+use std::num::NonZeroU64;
 
 use lsr_ltx::Timestamp;
 
@@ -57,6 +58,69 @@ pub(crate) struct Writer<U> {
 /// sent. Dropping one does no I/O and leaves scratch the store's `remove_scratch` clears at
 /// the next boot, as a crash does.
 pub(crate) type Open = Writer<Box<dyn DynUpload>>;
+
+/// The send half of a sliced upload, shared by the snapshot's and the compaction's slice
+/// loops: what was handed over, and whether the last slice stopped for the upload's parts
+/// (`docs/decisions/D233.md`).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Handoff {
+    /// How many bytes were handed to the replica.
+    pub(crate) sent: u64,
+    /// The last slice stopped for the upload's parts.
+    pub(crate) waits: bool,
+}
+
+impl Handoff {
+    /// Starts a slice: it has not stopped for the parts yet.
+    pub(crate) const fn restart(&mut self) {
+        self.waits = false;
+    }
+
+    /// Whether a slice may go on handing over bytes (`rest`: [`Upload::flight`]). `patient`
+    /// waits for the parts inside the write instead, so it never asks. When the parts are in
+    /// the way, `waits` says the slice stopped for them.
+    ///
+    /// # Errors
+    /// What the store's answer was.
+    pub(crate) async fn clear(
+        &mut self,
+        open: &mut Open,
+        rest: Rest,
+        patient: bool,
+    ) -> Result<bool, StoreError> {
+        if patient {
+            return Ok(true);
+        }
+        let flight = open.flight(rest).await?;
+        let clear = match rest {
+            Rest::More => flight != Flight::Full,
+            Rest::None => flight == Flight::Idle,
+        };
+        self.waits = !clear;
+        Ok(clear)
+    }
+
+    /// Hands over the first `room` bytes of `out` at most, and drains what went. The room
+    /// left, or `None` once it is spent.
+    ///
+    /// # Errors
+    /// What the store's write returned.
+    pub(crate) async fn send(
+        &mut self,
+        open: &mut Open,
+        out: &mut Vec<u8>,
+        room: NonZeroU64,
+    ) -> Result<Option<NonZeroU64>, StoreError> {
+        let n = out
+            .len()
+            .min(usize::try_from(room.get()).unwrap_or(usize::MAX));
+        open.write(out.get(..n).unwrap_or_default()).await?;
+        out.drain(..n);
+        let n = u64::try_from(n).unwrap_or(u64::MAX);
+        self.sent = self.sent.saturating_add(n);
+        Ok(NonZeroU64::new(room.get().saturating_sub(n)))
+    }
+}
 
 impl<U> std::fmt::Debug for Writer<U> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

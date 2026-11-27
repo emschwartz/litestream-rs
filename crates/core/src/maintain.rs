@@ -113,6 +113,7 @@ use crate::fault::role::Role;
 use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::plan::PlanOutcome;
+use crate::publish::Handoff;
 use crate::store::{CorruptCause, ObjectStore, ReadLen, StoreError, WriteMode};
 use crate::witness::Sent;
 use retain::{Retention, retention};
@@ -1039,30 +1040,8 @@ pub enum Outcome {
     Failed(MaintainError),
 }
 
-/// Runs one merge of `inputs` into `level`: a compaction, or the first snapshot (D205). A merge
-/// of level-0 files reads `local` when every input's local copy is the replica's object
-/// ([`local_is_replica`], which asks the replica nothing about a file `sent` holds a token
-/// for), and the replica otherwise or once when an input is missing or does not
-/// decode locally (the local copy may be gone after a restart, or rotten); every other level
-/// reads the replica. The output always goes to the replica. Inputs are never
-/// deleted.
-///
-/// An output key that already holds an object (an earlier run's output a listing did not
-/// show, Go's output for the same range) is never written over, and the job is planned
-/// again from a fresh listing. The bucket says so: the output is a create-only write
-/// ([`WriteMode::New`]), so a taken key refuses the commit and costs no request to
-/// find out (`docs/decisions/D239.md`). Go writes over whatever the key holds. On a store
-/// that said it cannot make create-only writes ([`WriteMode::Replace`]) the output replaces.
-///
-/// When the store acknowledged the output with a size other than the one sent, the output
-/// key is deleted before returning: a listing would otherwise show it as coverage, see
-/// [`leaves_bad_output`]. A checksum refusal deletes nothing (`docs/decisions/D280.md`):
-/// the key may hold an earlier attempt's output, and the read-back the actor then owes
-/// removes one that does not verify. The key is not read first on any store: Go
-/// writes its compaction output with no read either (`compactor.go:104`,
-/// `Compactor::Compact`), and the job was planned from a listing that shows every
-/// file this engine wrote (a store whose listings lag is unsupported,
-/// `docs/decisions/D173.md`, `docs/decisions/D246.md`).
+/// Runs one merge of `inputs` into `level` to its end in one patient slice (tests only; the
+/// engine slices a [`Merging`] across ticks).
 #[cfg(test)]
 pub(crate) async fn run_compaction<L: Role, R: Role>(
     inputs: &CompactionInputs,
@@ -1090,9 +1069,33 @@ pub(crate) async fn run_compaction<L: Role, R: Role>(
     )))
 }
 
-/// A merge of [`run_compaction`] part-way: the compaction ([`Compacting`]), and what its end is
-/// judged by. The engine runs it a slice a tick, syncing and uploading between
+/// A merge of `inputs` into `level` part-way: a compaction, or the first snapshot (D205), and
+/// what its end is judged by. The engine runs it a slice a tick, syncing and uploading between
 /// (`docs/decisions/D259.md`).
+///
+/// A merge of level-0 files reads `local` when every input's local copy is the replica's object
+/// ([`local_is_replica`], which asks the replica nothing about a file `sent` holds a token
+/// for), and the replica otherwise or once when an input is missing or does not
+/// decode locally (the local copy may be gone after a restart, or rotten); every other level
+/// reads the replica. The output always goes to the replica. Inputs are never
+/// deleted.
+///
+/// An output key that already holds an object (an earlier run's output a listing did not
+/// show, Go's output for the same range) is never written over, and the job is planned
+/// again from a fresh listing. The bucket says so: the output is a create-only write
+/// ([`WriteMode::New`]), so a taken key refuses the commit and costs no request to
+/// find out (`docs/decisions/D239.md`). Go writes over whatever the key holds. On a store
+/// that said it cannot make create-only writes ([`WriteMode::Replace`]) the output replaces.
+///
+/// When the store acknowledged the output with a size other than the one sent, the output
+/// key is deleted before returning: a listing would otherwise show it as coverage, see
+/// [`leaves_bad_output`]. A checksum refusal deletes nothing (`docs/decisions/D280.md`):
+/// the key may hold an earlier attempt's output, and the read-back the actor then owes
+/// removes one that does not verify. The key is not read first on any store: Go
+/// writes its compaction output with no read either (`compactor.go:104`,
+/// `Compactor::Compact`), and the job was planned from a listing that shows every
+/// file this engine wrote (a store whose listings lag is unsupported,
+/// `docs/decisions/D173.md`, `docs/decisions/D246.md`).
 #[derive(Debug)]
 pub(crate) struct Merging {
     job: Compacting,
@@ -1186,14 +1189,10 @@ impl Merging {
         Err(judge(ended, output, replica).await)
     }
 
-    /// Bytes handed to the replica so far.
-    pub(crate) const fn sent(&self) -> u64 {
-        self.job.sent
-    }
-
-    /// The last slice stopped for the upload's parts.
-    pub(crate) const fn waits(&self) -> bool {
-        self.job.waits
+    /// Bytes handed to the replica so far, and whether the last slice stopped for the
+    /// upload's parts.
+    pub(crate) const fn handoff(&self) -> Handoff {
+        self.job.handoff
     }
 
     /// Whether it reads staged copies, which the staging prune must leave alone until it ends.

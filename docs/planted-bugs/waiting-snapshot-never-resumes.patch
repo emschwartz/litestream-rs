@@ -1,8 +1,8 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index c2b1e430a..b7d26f7da 100644
+index af5170dc9..3c38b9621 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2835,6 +2835,9 @@ impl Actor {
+@@ -2961,6 +2961,9 @@ impl Actor {
          now: Timestamp,
          created_at_read: u64,
      ) -> Option<Tick> {
@@ -11,4 +11,4 @@ index c2b1e430a..b7d26f7da 100644
 +        }
          let (job, sliced) = self.engine.sliced.take()?;
          let budget = self.kept.cfg.upload.bytes_per_tick.get();
-         let before = sliced.sent();
+         let before = sliced.handoff().sent;

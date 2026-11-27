@@ -1,64 +1,64 @@
 diff --git a/crates/core/src/compact.rs b/crates/core/src/compact.rs
-index 29d855c21..61eaec11c 100644
+index e3950d890..0815a5344 100644
 --- a/crates/core/src/compact.rs
 +++ b/crates/core/src/compact.rs
-@@ -61,7 +61,9 @@ use crate::fault::role::{Replica, Role, STAGING_WINDOW};
- use crate::layout::{FileInfo, FileKey, Level};
- use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, Next, ReadFault, check_link};
- use crate::publish::{Open, Writer};
--use crate::store::{Flight, ObjectStore, ReadLen, ReadStream, Rest, StoreError, Upload, WriteMode};
-+use crate::store::{
-+    DynUpload, Flight, ObjectStore, ReadLen, ReadStream, Rest, StoreError, Upload, WriteMode,
-+};
- 
- #[cfg(test)]
- #[expect(
-@@ -717,7 +719,7 @@ pub(crate) struct Compacting {
-     encoder: Option<Encoder<Vec<u8>>>,
-     rest: Vec<u8>,
-     trailer: Option<Trailer>,
--    upload: Open,
-+    upload: Box<dyn DynUpload>,
-     pages: u32,
-     /// The first page the regrow check has not looked at.
-     unchecked_from: u32,
-@@ -788,10 +790,11 @@ impl Compacting {
+@@ -798,10 +798,11 @@ impl Compacting {
          let encoder = Encoder::new(out, header).map_err(CompactError::Encode)?;
          let key = FileKey::new(level, inputs.range());
          let created_at = header.fields().timestamp;
 -        let upload = Writer::begin(dest, &key, created_at, mode, None)
--            .await
++        let raw = dest
++            .begin_sized_upload(&key, created_at, mode, None)
+             .await
 -            .map_err(CompactError::Dest)?
 -            .boxed();
-+        let upload: Box<dyn DynUpload> = Box::new(
-+            dest.begin_upload(&key, created_at, mode)
-+                .await
-+                .map_err(CompactError::Dest)?,
-+        );
++            .map_err(CompactError::Dest)?;
++        let upload = Writer::over(raw, key, mode).boxed();
          Ok(Self {
              merge,
              header,
-@@ -964,12 +967,8 @@ impl Compacting {
+@@ -936,12 +937,12 @@ impl Compacting {
          dest: &D,
          trailer: Trailer,
      ) -> Result<Compacted, CompactError> {
--        let info = self
--            .upload
++        let _ = dest;
+         let info = self
+             .upload
 -            .commit(dest)
--            .await
++            .commit_unchecked()
+             .await
 -            .map_err(|err| CompactError::Dest(err.into_error()))?
 -            .info();
-+        let _ = dest;
-+        let info = self.upload.commit().await.map_err(CompactError::Dest)?;
++            .map_err(CompactError::Dest)?;
          Ok(Compacted {
              info,
              header: self.header,
-@@ -1074,7 +1073,7 @@ fn read_fault(err: StoreError, store_fault: fn(StoreError) -> CompactError) -> C
- 
- /// An abort that fails leaves scratch the store cleans up; the error that made
- /// us abort is the one worth reporting.
--async fn abort_quietly<U: Upload>(upload: Writer<U>) {
-+async fn abort_quietly<U: Upload>(upload: U) {
-     match upload.abort().await {
-         Ok(()) | Err(_) => {}
+diff --git a/crates/core/src/publish.rs b/crates/core/src/publish.rs
+index 8a550e116..509aff0e7 100644
+--- a/crates/core/src/publish.rs
++++ b/crates/core/src/publish.rs
+@@ -271,6 +271,24 @@ impl<U: Upload> Writer<U> {
+         self.upload.abort().await
      }
+ 
++    /// Wraps an upload the caller opened on its own.
++    pub(crate) const fn over(upload: U, key: FileKey, mode: WriteMode) -> Self {
++        Self {
++            key,
++            upload,
++            written: 0,
++            mode,
++        }
++    }
++
++    /// Publishes without the check against the bytes written.
++    ///
++    /// # Errors
++    /// What the store's commit returned.
++    pub(crate) async fn commit_unchecked(self) -> Result<FileInfo, StoreError> {
++        self.upload.commit().await
++    }
++
+     /// Publishes the object into `store`, the one it was begun in, checked against the bytes
+     /// written.
+     ///

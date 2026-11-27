@@ -178,6 +178,18 @@ fn a_drain_ends_the_snapshot_part_way() {
     assert_eq!(newest(&rig, Level::SNAPSHOT), None);
 }
 
+/// A snapshot part-way reads the database, never staged copies: the staging prune has no
+/// reason to wait for it.
+#[test]
+fn a_snapshot_part_way_reads_no_staged_copy() {
+    let (mut rig, mut actor) = before_a_long_snapshot();
+    assert!(actor.engine.slicing().is_none());
+    part_way(&mut rig, &mut actor);
+    let sliced = actor.engine.slicing().unwrap();
+    assert!(sliced.is_snapshot());
+    assert!(!sliced.reads_staging());
+}
+
 /// A failed slice ends the snapshot and lets the pin go; the job is retried from its first
 /// page on its own schedule.
 #[test]
@@ -208,7 +220,7 @@ fn a_failed_slice_ends_the_snapshot_and_lets_the_pin_go() {
 fn a_snapshot_whose_upload_waits_for_its_parts_is_no_slice() {
     let (mut rig, mut actor) = before_a_long_snapshot();
     part_way(&mut rig, &mut actor);
-    let sent = actor.engine.sliced.as_ref().map(|(_, s)| s.sent());
+    let sent = actor.engine.sliced.as_ref().map(|(_, s)| s.handoff().sent);
     rig.remote.flights.lock().unwrap().extend([Flight::Full; 3]);
     let tick = rig.tick(&mut actor, T0);
     assert!(actor.awaits_parts(), "{tick:?}");
@@ -217,7 +229,10 @@ fn a_snapshot_whose_upload_waits_for_its_parts_is_no_slice() {
         "{tick:?}"
     );
     assert_ne!(next_of(&tick), Some(Next::Now), "{tick:?}");
-    assert_eq!(actor.engine.sliced.as_ref().map(|(_, s)| s.sent()), sent);
+    assert_eq!(
+        actor.engine.sliced.as_ref().map(|(_, s)| s.handoff().sent),
+        sent
+    );
     for _ in 0..200 {
         if newest(&rig, Level::SNAPSHOT).is_some() {
             break;
@@ -389,7 +404,7 @@ fn a_file_in_flight_and_a_snapshot_part_way_take_turns() {
     let (mut rig, mut actor) = before_a_long_snapshot();
     part_way(&mut rig, &mut actor);
     file_in_flight_beside_the_snapshot(&mut rig, &mut actor);
-    let job_sent = |actor: &Actor| actor.engine.sliced.as_ref().map(|(_, s)| s.sent());
+    let job_sent = |actor: &Actor| actor.engine.sliced.as_ref().map(|(_, s)| s.handoff().sent);
     let mut turns = Vec::new();
     for _ in 0..12 {
         let (file, job) = (actor.engine.in_flight.sent(), job_sent(&actor));

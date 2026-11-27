@@ -190,12 +190,15 @@ fn a_compaction_whose_upload_waits_for_its_parts_is_no_slice() {
     let (mut rig, mut actor) = before_a_long_compaction();
     let now = T0 + 60_000;
     part_way(&mut rig, &mut actor, now);
-    let sent = actor.engine.sliced.as_ref().map(|(_, s)| s.sent());
+    let sent = actor.engine.sliced.as_ref().map(|(_, s)| s.handoff().sent);
     rig.remote.flights.lock().unwrap().extend([Flight::Full; 3]);
     let tick = rig.tick(&mut actor, now);
     assert!(actor.awaits_parts(), "{tick:?}");
     assert_ne!(next_of(&tick), Some(Next::Now), "{tick:?}");
-    assert_eq!(actor.engine.sliced.as_ref().map(|(_, s)| s.sent()), sent);
+    assert_eq!(
+        actor.engine.sliced.as_ref().map(|(_, s)| s.handoff().sent),
+        sent
+    );
     assert!(
         until_compacted(&mut rig, &mut actor, now, 2_000).is_some(),
         "a compaction that waited for its parts was never written"
@@ -241,7 +244,7 @@ fn a_slice_that_hands_bytes_over_before_it_waits_is_the_ticks_unit() {
         if newest(&rig, Level::ONE).is_some() {
             break;
         }
-        let before = actor.engine.sliced.as_ref().map(|(_, s)| s.sent());
+        let before = actor.engine.sliced.as_ref().map(|(_, s)| s.handoff().sent);
         // The slice's first question about its parts finds room; any after it, a part.
         rig.remote
             .flights
@@ -253,11 +256,11 @@ fn a_slice_that_hands_bytes_over_before_it_waits_is_the_ticks_unit() {
         let Some((_, sliced)) = actor.engine.sliced.as_ref() else {
             continue;
         };
-        if sliced.waits() && Some(sliced.sent()) != before {
+        if sliced.handoff().waits && Some(sliced.handoff().sent) != before {
             assert_eq!(
                 event(&tick),
                 Some(&Event::Sending {
-                    bytes: sliced.sent()
+                    bytes: sliced.handoff().sent
                 }),
                 "{tick:?}"
             );
@@ -298,7 +301,7 @@ fn a_staged_copy_lost_part_way_starts_the_merge_again_from_the_replica() {
     rig.tick(&mut actor, now);
     let reads_staging = |actor: &Actor| matches!(&actor.engine.sliced, Some((_, s)) if matches!(&**s, Sliced::Merge(m) if m.reads_staging()));
     assert!(reads_staging(&actor));
-    let sent = actor.engine.sliced.as_ref().map(|(_, s)| s.sent());
+    let sent = actor.engine.sliced.as_ref().map(|(_, s)| s.handoff().sent);
     assert!(sent > Some(0));
     let key = Rig::files(&rig.remote, Level::ZERO)
         .iter()
@@ -317,7 +320,7 @@ fn a_staged_copy_lost_part_way_starts_the_merge_again_from_the_replica() {
     }
     assert!(compacting(&actor), "the merge ended");
     assert!(!reads_staging(&actor));
-    assert!(actor.engine.sliced.as_ref().map(|(_, s)| s.sent()) < sent);
+    assert!(actor.engine.sliced.as_ref().map(|(_, s)| s.handoff().sent) < sent);
     assert!(until_compacted(&mut rig, &mut actor, now, 2_000).is_some());
     assert_eq!(
         rig.remote.inner.scratch(),

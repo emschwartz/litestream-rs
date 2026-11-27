@@ -6,6 +6,7 @@ use super::*;
 use crate::conformance::block_on;
 use crate::layout::Level;
 use crate::mem::MemStore;
+use crate::mem::reread::Rereads;
 use crate::mem::short::{DigestLiar, SizeLiar};
 use crate::store::{PageLimit, StoreOp};
 
@@ -186,4 +187,67 @@ fn an_open_upload_prints_its_key_what_it_wrote_and_its_mode() {
     assert!(printed.contains(&format!("key: {:?}", key())), "{printed}");
     assert!(printed.contains("written: 4"), "{printed}");
     assert!(printed.contains("mode: New"), "{printed}");
+}
+fn open_upload(store: &Rereads) -> Open {
+    block_on(Writer::begin(
+        store,
+        &key(),
+        Timestamp::from_unix_millis(1),
+        WriteMode::Replace,
+        None,
+    ))
+    .unwrap()
+    .boxed()
+}
+
+/// A slice asks the upload's parts before it hands bytes over, and once more before it
+/// publishes; `waits` says the last answer stopped it, and a patient slice never asks.
+#[test]
+fn a_handoff_asks_the_parts_unless_patient_and_notes_when_it_waits() {
+    let store = Rereads::default();
+    store.asked().flights = [
+        Ok(Flight::Room),
+        Ok(Flight::Full),
+        Ok(Flight::Room),
+        Ok(Flight::Idle),
+    ]
+    .into();
+    let mut open = open_upload(&store);
+    let mut handoff = Handoff::default();
+    assert!(block_on(handoff.clear(&mut open, Rest::More, true)).unwrap());
+    assert!(store.asked().rests.is_empty());
+    assert!(block_on(handoff.clear(&mut open, Rest::More, false)).unwrap());
+    assert!(!handoff.waits, "room for a write");
+    assert!(!block_on(handoff.clear(&mut open, Rest::More, false)).unwrap());
+    assert!(handoff.waits, "a whole part waits");
+    handoff.restart();
+    assert!(!handoff.waits);
+    assert!(!block_on(handoff.clear(&mut open, Rest::None, false)).unwrap());
+    assert!(handoff.waits, "a part is still out at the end");
+    handoff.restart();
+    assert!(block_on(handoff.clear(&mut open, Rest::None, false)).unwrap());
+    assert!(!handoff.waits);
+    assert_eq!(
+        store.asked().rests,
+        [Rest::More, Rest::More, Rest::None, Rest::None]
+    );
+}
+
+/// A send hands over at most the room, drains what went, and answers the room left.
+#[test]
+fn a_handoff_sends_at_most_the_room_and_drains_what_went() {
+    let store = Rereads::default();
+    let mut open = open_upload(&store);
+    let mut handoff = Handoff::default();
+    let mut out = vec![1_u8; 10];
+    let room = NonZeroU64::new(4).unwrap();
+    assert_eq!(
+        block_on(handoff.send(&mut open, &mut out, room)).unwrap(),
+        None
+    );
+    assert_eq!((out.len(), handoff.sent), (6, 4));
+    let room = NonZeroU64::new(9).unwrap();
+    let left = block_on(handoff.send(&mut open, &mut out, room)).unwrap();
+    assert_eq!(left, NonZeroU64::new(3));
+    assert_eq!((out.len(), handoff.sent), (0, 10));
 }

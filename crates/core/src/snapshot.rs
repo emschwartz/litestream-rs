@@ -33,9 +33,9 @@ use crate::fault::{BugSite, Fault};
 use crate::layout::{FileInfo, FileKey};
 use crate::pages::PageChecksumTable;
 use crate::position::{Continuity, ReadLockHold, SyncedThrough};
-use crate::publish::{Open, Writer};
+use crate::publish::{Handoff, Open, Writer};
 use crate::source::{CommittedRead, PageSource, WalSource};
-use crate::store::{Flight, Rest, WriteMode};
+use crate::store::{Rest, WriteMode};
 use crate::sync::{Filling, PageFrom, Plan, clamp, scan_whole};
 use crate::verify::LivePages;
 
@@ -90,10 +90,10 @@ pub(crate) async fn write_snapshot<W: WalSource, P: PageSource, S: Role>(
     }
 }
 
-/// Everything a whole-database read at a proof's transaction reads: the WAL reader, and
+/// Everything a whole-database read at a proof's transaction reads: the WAL's salts, and
 /// where each page comes from.
-struct Whole<R> {
-    reader: WalReader<R>,
+struct Whole {
+    salts: Salts,
     map: PageMap,
     commit: NonZeroU32,
     page_size: PageSize,
@@ -102,13 +102,9 @@ struct Whole<R> {
 /// The checks a whole-database read makes before it reads a page, and its plan: the WAL
 /// frames of the current generation up to the synced end win, the database file supplies
 /// the rest, and the page count is the proof's last commit.
-fn whole<W: WalSource>(proof: &SyncedThrough, wal: &mut W) -> Result<Whole<W::Wal>, Fault> {
+fn whole<W: WalSource>(proof: &SyncedThrough, wal: &mut W) -> Result<Whole, Fault> {
     let position = proof.position();
-    let file = wal
-        .open()
-        .map_err(Fault::from_source)?
-        .ok_or(Fault::WalUnlinked)?;
-    let mut reader = WalReader::open(file).map_err(open_fault)?;
+    let mut reader = open_wal(wal)?;
     let committed = wal.committed().map_err(Fault::from_source)?;
     let salts = reader.header().salts();
     let page_size = position.page_size();
@@ -134,7 +130,7 @@ fn whole<W: WalSource>(proof: &SyncedThrough, wal: &mut W) -> Result<Whole<W::Wa
         BugSite::SnapshotScan
     );
     Ok(Whole {
-        reader,
+        salts,
         map,
         commit,
         page_size,
@@ -166,11 +162,8 @@ pub(crate) struct Snapshotting {
     page_size: PageSize,
     filling: Filling,
     open: Option<Open>,
-    /// How many bytes were handed to the replica.
-    pub(crate) sent: u64,
+    pub(crate) handoff: Handoff,
     pinned: bool,
-    /// The last slice stopped for the upload's parts (`docs/decisions/D233.md`).
-    pub(crate) waits: bool,
 }
 
 impl Snapshotting {
@@ -191,7 +184,7 @@ impl Snapshotting {
         let failed = |fault| SnapshotFailed { fault, key };
         let epoch = wal.epoch();
         let Whole {
-            reader,
+            salts,
             map,
             commit,
             page_size,
@@ -217,16 +210,15 @@ impl Snapshotting {
         Ok(Self {
             key,
             epoch,
-            salts: reader.header().salts(),
+            salts,
             frames: proof.position().synced().offset().frame_index(),
             map,
             commit,
             page_size,
             filling,
             open: Some(open),
-            sent: 0,
+            handoff: Handoff::default(),
             pinned,
-            waits: false,
         })
     }
 
@@ -250,7 +242,7 @@ impl Snapshotting {
         budget: u64,
         patient: bool,
     ) -> Result<Option<FileInfo>, Fault> {
-        self.waits = false;
+        self.handoff.restart();
         self.holds(wal, pages)?;
         let mut reader = self.reader(wal)?;
         let plan = Plan::new(&self.map, None, self.commit, self.page_size);
@@ -264,43 +256,21 @@ impl Snapshotting {
         while let Some(room) = left
             && !self.filling.whole()
         {
-            if !patient
-                && open
-                    .flight(Rest::More)
-                    .await
-                    .map_err(|err| S::fault(&err))?
-                    == Flight::Full
-            {
-                self.waits = true;
+            let clear = self.handoff.clear(open, Rest::More, patient);
+            if !clear.await.map_err(|err| S::fault(&err))? {
                 break;
             }
             self.filling
                 .encode(&plan, &mut reader, db, pages, self.pinned)?;
-            let out = self.filling.out();
-            let n = out
-                .len()
-                .min(usize::try_from(room.get()).unwrap_or(usize::MAX));
-            let chunk = out.get(..n).ok_or_else(|| BugSite::Encode.hit())?;
-            open.write(chunk).await.map_err(|err| S::fault(&err))?;
-            out.drain(..n);
-            let n = u64::try_from(n).unwrap_or(u64::MAX);
-            (left, self.sent) = (
-                NonZeroU64::new(room.get().saturating_sub(n)),
-                self.sent.saturating_add(n),
-            );
+            let sent = self.handoff.send(open, self.filling.out(), room);
+            left = sent.await.map_err(|err| S::fault(&err))?;
         }
         pages.pin_past(self.filling.next());
         if !self.filling.whole() {
             return Ok(None);
         }
-        if !patient
-            && open
-                .flight(Rest::None)
-                .await
-                .map_err(|err| S::fault(&err))?
-                != Flight::Idle
-        {
-            self.waits = true;
+        let clear = self.handoff.clear(open, Rest::None, patient);
+        if !clear.await.map_err(|err| S::fault(&err))? {
             return Ok(None);
         }
         self.holds(wal, pages)?;
@@ -340,11 +310,7 @@ impl Snapshotting {
 
     /// The WAL, opened again for this slice: the same generation, or the snapshot ends.
     fn reader<W: WalSource>(&self, wal: &mut W) -> Result<WalReader<W::Wal>, Fault> {
-        let file = wal
-            .open()
-            .map_err(Fault::from_source)?
-            .ok_or(Fault::WalUnlinked)?;
-        let reader = WalReader::open(file).map_err(open_fault)?;
+        let reader = open_wal(wal)?;
         if reader.header().salts() == self.salts {
             Ok(reader)
         } else {
@@ -399,6 +365,15 @@ pub(crate) fn read_live<W: WalSource, P: PageSource>(
         commit,
         digests,
     ))
+}
+
+/// The WAL opened and its header read.
+fn open_wal<W: WalSource>(wal: &mut W) -> Result<WalReader<W::Wal>, Fault> {
+    let file = wal
+        .open()
+        .map_err(Fault::from_source)?
+        .ok_or(Fault::WalUnlinked)?;
+    WalReader::open(file).map_err(open_fault)
 }
 
 /// A WAL whose header cannot be read: a torn header is a restart in progress, so

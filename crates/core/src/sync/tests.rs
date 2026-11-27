@@ -36,6 +36,35 @@ use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError, StoreOp};
 
 const PS: PageSize = PageSize::MIN;
 
+/// An outbound file hands over the encoder's buffer, then the tail the trailer leaves, and
+/// writes the trailer once.
+#[test]
+fn an_outbound_hands_over_the_encoder_buffer_then_the_tail() {
+    let txid = Txid::new(1).unwrap();
+    let header = Header::new(HeaderFields {
+        tracked: false,
+        page_size: PS,
+        commit: 1,
+        txids: TxidRange::new(txid, txid).unwrap(),
+        timestamp: Timestamp::from_unix_millis(1),
+        pre_apply: None,
+        wal: None,
+        node_id: 0,
+    })
+    .unwrap();
+    let mut buf = Outbound::new(Encoder::new(Vec::new(), header).unwrap());
+    assert!(!buf.whole());
+    let page = vec![0_u8; PS.bytes()];
+    buf.encoder().unwrap().write_page(pg(1), &page).unwrap();
+    while buf.encoder().unwrap().write_index_chunk().unwrap() {}
+    assert!(buf.finish(None).unwrap().is_some());
+    assert!(buf.encoder().is_none());
+    assert!(!buf.out().is_empty() && !buf.whole(), "the tail waits");
+    assert!(buf.finish(None).unwrap().is_none(), "written once");
+    buf.out().clear();
+    assert!(buf.whole());
+}
+
 fn pg(n: u32) -> PageNo {
     PageNo::new(n, PS).unwrap()
 }
