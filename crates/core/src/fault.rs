@@ -632,9 +632,7 @@ impl DegradedCause {
             StopCause::Shutdown => None,
         }
     }
-}
 
-impl DegradedCause {
     /// The stop this cause makes when its response is to stop; `None` for a stall, which
     /// never stops the engine.
     #[must_use]
