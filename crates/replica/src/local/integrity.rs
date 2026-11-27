@@ -25,6 +25,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use lsr_sqlite::{SqliteError, ffi};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
 use thiserror::Error;
 
 /// How many problems are kept in an [IntegrityFailure].
@@ -119,17 +120,15 @@ pub(crate) enum CheckError {
 /// A `file:` URI for an absolute path: every byte but the unreserved ones and
 /// `/` percent-encoded, so `?`, `#` and `%` in a name stay part of the path.
 fn immutable_uri(path: &Path) -> io::Result<String> {
+    const KEPT: &AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'.')
+        .remove(b'_')
+        .remove(b'~')
+        .remove(b'/');
     let absolute = std::path::absolute(path)?;
-    let mut uri = String::from("file://");
-    for &byte in absolute.as_os_str().as_bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
-            uri.push(char::from(byte));
-        } else {
-            uri.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    uri.push_str("?mode=ro&immutable=1");
-    Ok(uri)
+    let path = percent_encode(absolute.as_os_str().as_bytes(), KEPT);
+    Ok(format!("file://{path}?mode=ro&immutable=1"))
 }
 
 /// Whether a SQLite error is SQLite judging the file, not the environment

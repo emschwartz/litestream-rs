@@ -106,10 +106,10 @@ use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::verified;
 use crate::publish::{self, Open, Unpublished, Writer};
 use crate::store::{
-    Again, BoxFuture, Flight, ListAt, ObjectStore, Opened, PageLimit, ReadLen, Reread, Rest, Seen,
-    StoreError, StoreOp, WriteMode,
+    Again, BoxFuture, Flight, ListAt, ObjectStore, Opened, PageLimit, ReadLen, Reread, Rest,
+    Seeing, Seen, StoreError, StoreOp, WriteMode,
 };
-use crate::witness::{ByteTally, Witnessed, Witnesses};
+use crate::witness::{Witnessed, Witnesses};
 
 /// How much of a staged file is read at once.
 const CHUNK: ReadLen = ReadLen::or_chunk(256 * 1024);
@@ -684,7 +684,7 @@ pub(crate) struct Sending {
     /// The staged file held open since its first read, by a store that has something to hold
     /// (a file store, which would otherwise open the file again for every chunk).
     source: Option<Box<dyn Opened>>,
-    tally: ByteTally,
+    tally: Seeing,
     /// What was read before the header was whole; empty once the upload is begun.
     held: Vec<u8>,
     /// Begun as soon as the header is known.
@@ -1031,7 +1031,7 @@ impl Sending {
             decoder: Decoder::new(),
             offset: 0,
             source: None,
-            tally: ByteTally::new(),
+            tally: Seeing::new(),
             held: Vec::new(),
             open: None,
             notes: Notes::default(),
