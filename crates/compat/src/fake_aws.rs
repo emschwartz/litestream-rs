@@ -72,7 +72,6 @@ pub struct Answers {
     pub imds: Answer,
 }
 
-/// The token the instance metadata service hands out.
 const IMDS_TOKEN: &str = "fake-imds-token";
 /// A request larger than this is not one the chains send.
 const MAX_REQUEST: u64 = 64 * 1024;

@@ -1,6 +1,6 @@
 //! SIGINT, SIGTERM and SIGHUP, as the CLI's `replicate` already takes them:
-//! through `signal-hook` (MIT or Apache-2.0), because installing a handler needs
-//! `unsafe` and this workspace keeps that in `lsr-sqlite`.
+//! through `signal-hook`, because installing a handler needs `unsafe` and this
+//! workspace keeps that in `lsr-sqlite`.
 //!
 //! The handlers are installed before any replicator starts, so a signal never
 //! meets the default action (which ends the process with nothing synced). One

@@ -1,7 +1,7 @@
 //! A store that acknowledges an upload one byte short holds a truncated object (the
 //! simulator's `FaultShape::SizeMismatch`). Every engine commit compares the acknowledged size
 //! with what it wrote and deletes the object on a mismatch, so no restore meets it, at any
-//! point. Seed 0x46 of the fixed set reaches the same fault through compaction.
+//! point.
 
 use lsr_core::StoreOp;
 use lsr_sim::run::run_ops;

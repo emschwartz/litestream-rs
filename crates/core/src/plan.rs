@@ -168,7 +168,6 @@ impl ContiguousChain {
         })
     }
 
-    /// Adds a file if it keeps the invariants; reports whether it did.
     fn push(&mut self, next: FileInfo) -> bool {
         let range = next.key.range();
         let fits = touches(range.min(), self.reaches)
@@ -398,7 +397,6 @@ fn eligible(info: &FileInfo, target: RestoreTarget) -> bool {
     }
 }
 
-/// A file's created-at time, when known, with what it dates for its level.
 fn stamp_of(info: &FileInfo, created_at: Option<CreatedAt>) -> Option<Stamp> {
     created_at.map(|created_at| Stamp::of(info.key.level(), created_at))
 }
@@ -507,7 +505,6 @@ fn plan_unchecked(listed: Listed<'_>, target: RestoreTarget) -> PlanOutcome {
     extend_to(listed, chain, target)
 }
 
-/// [`chain`] extended over the eligible files toward [`target`], and what it reached.
 fn extend_to(listed: Listed<'_>, mut chain: ContiguousChain, target: RestoreTarget) -> PlanOutcome {
     let pool = || listed.files().filter(|info| eligible(info, target));
     extend(&mut chain, Sweep::new(listed, target));
@@ -800,10 +797,8 @@ fn is_usable_beyond(info: &FileInfo) -> bool {
     !info.key.level().is_snapshot() || is_snapshot_start(info)
 }
 
-/// The preference of a level 0-8 file at an extension step; larger is better.
 type Preference = (Txid, Level, Reverse<Txid>);
 
-/// Where an [`AsOfPlanner`] is.
 #[derive(Clone, Debug)]
 enum Pass {
     /// Walking the transaction-1 files for the first eligible one.
@@ -1028,8 +1023,6 @@ impl Step for AsOfPlanner<'_> {
     }
 }
 
-/// Whether a file is created strictly before [`instant`], once its exact
-/// created-at time is known.
 fn eligible_at(info: &FileInfo, instant: Timestamp, resolved: &ResolvedCreatedAt) -> Option<bool> {
     stamp_of(info, resolved.exact(info)).map(|stamp| stamp.before(instant))
 }

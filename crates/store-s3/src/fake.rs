@@ -71,9 +71,7 @@ struct State {
     uploads: BTreeMap<String, Pending>,
     next_upload: u64,
     denied_deletes: BTreeSet<String>,
-    /// Keys a DeleteObjects was refused for, as it refused them.
     refused_deletes: u64,
-    /// Answers a conditional write with 501, as a provider without them.
     no_conditional_writes: bool,
     /// Lists in Cloudflare R2's order: a name that is the start of others after all of them.
     r2_order: bool,
@@ -206,10 +204,9 @@ impl FakeS3 {
     }
 
     /// How many parts arrived for an upload that was already completed or aborted, or never
-    /// begun; each was answered 404 `NoSuchUpload`. S3 may keep a part that is on its way
-    /// while the upload is aborted, so a client that ends an upload with a part still on
-    /// the wire can leave storage behind; one that waits for its parts first sends none of
-    /// these.
+    /// begun; each was answered 404 `NoSuchUpload`. S3 may keep a part still on its way when
+    /// the upload is aborted, so a client that does not wait for its parts can leave storage
+    /// behind.
     #[must_use]
     pub fn parts_after_the_end(&self) -> u64 {
         self.state().parts_after_the_end
@@ -672,7 +669,6 @@ struct Joined {
     etag: String,
 }
 
-/// The `(part number, ETag)` pairs a CompleteMultipartUpload body lists.
 fn parse_parts(body: &[u8]) -> Vec<(u16, String)> {
     let text = String::from_utf8_lossy(body);
     text.split("<Part>")

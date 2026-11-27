@@ -157,7 +157,6 @@ pub fn load_config(flag: Option<&str>, expand: Expand) -> Result<Loaded, Sidecar
     load_file(&path, expand)
 }
 
-/// The config file, or Go's one-database config.
 fn load(flags: &Flags) -> Result<Loaded, SidecarError> {
     let expand = if flags.no_expand_env {
         Expand::Off
@@ -175,7 +174,6 @@ fn load(flags: &Flags) -> Result<Loaded, SidecarError> {
     }
 }
 
-/// A config file, `-` for standard input, as `-config` names it.
 fn load_file(path: &Path, expand: Expand) -> Result<Loaded, SidecarError> {
     let env = ProcessEnv;
     if path.as_os_str() == "-" {

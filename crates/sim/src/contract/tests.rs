@@ -48,7 +48,6 @@ fn a_txid_inside_a_compacted_file_is_inside_it() {
         })
     };
     assert!(allows(&want, &files, &refused(files[1].key)));
-    // The base does not pass the target.
     assert!(!allows(&want, &files, &refused(files[0].key)));
 }
 
@@ -144,7 +143,6 @@ fn a_fallback_created_at_does_not_date_the_next_transaction() {
     fell_back.listed = ListedTime::Created(CreatedAt::fallback(at(40)));
     let files = [file(0, 1, 1, 10), fell_back];
     assert_eq!(as_of(&files, at(25)), Expected::AsOfInside { reach: tx(1) });
-    // Stored, the same time dates transaction 2.
     let files = [file(0, 1, 1, 10), file(1, 2, 2, 40)];
     assert_eq!(as_of(&files, at(25)), Expected::Plan(tx(1)));
 }

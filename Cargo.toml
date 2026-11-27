@@ -1,8 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-# cargo-fuzz crate: nightly only, its own lockfile. The sqlx build check: its own lockfile, so the
-# workspace's never holds sqlx.
+# Each keeps its own lockfile: fuzz builds on nightly, and sqlx stays out of the workspace's.
 exclude = ["fuzz", "sqlx-check"]
 
 [workspace.package]
@@ -11,8 +10,6 @@ rust-version = "1.100"
 license = "Apache-2.0"
 publish = false
 
-# Every dependency is declared here once and referenced with `workspace = true`;
-# a crate adds features on top, never a version.
 [workspace.dependencies]
 lsr-compat = { path = "crates/compat" }
 lsr-config = { path = "crates/config" }
@@ -23,79 +20,54 @@ lsr-sidecar = { path = "crates/sidecar" }
 lsr-ltx = { path = "crates/ltx" }
 lsr-sim = { path = "crates/sim" }
 lsr-spec = { path = "crates/spec" }
-# No default features: a crate that links SQLite through it names `bundled` itself, so an
-# application's `default-features = false` on lsr-replica reaches libsqlite3-sys.
+# No default features, so an application's `default-features = false` on lsr-replica reaches
+# libsqlite3-sys; a crate that wants `bundled` names it.
 lsr-sqlite = { path = "crates/sqlite", default-features = false }
 lsr-store-fs = { path = "crates/store-fs" }
 lsr-store-s3 = { path = "crates/store-s3" }
 lsr-wal = { path = "crates/wal" }
-# Structure-aware fuzz input (MIT OR Apache-2.0): `lsr-fuzzing` only, builds typed listings
-# from libFuzzer's bytes. No derive feature, so no proc-macro build.
 arbitrary = { version = "1.4", default-features = false }
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
-# Argument parsing for `lsr`'s own commands, `verify`, `files`, `trust-local` and `config check` (MIT OR Apache-2.0). Go-compatible commands keep the hand-written Go flag parser.
 clap = { version = "4", default-features = false, features = ["std", "error-context"] }
 crc = "3.4.0"
-# The format's CRC-64 on SIMD (MIT OR Apache-2.0), see docs/decisions/D223.md. No default features:
-# they add the C-compatible API and a panic handler this crate has no use for.
 crc-fast = { version = "1.10.0", default-features = false, features = ["std"] }
 jiff = { version = "1.0", default-features = false, features = ["std"] }
 lz4_flex = { version = "0.14.2", default-features = false, features = ["std", "safe-decode", "safe-encode"] }
-# Hex encoding of digests and ETags (MIT OR Apache-2.0).
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
-# HMAC-SHA-256 for SigV4 signing (MIT OR Apache-2.0), already in the lock through rusty-s3.
 hmac = { version = "0.13", default-features = false }
 md-5 = { version = "0.11", default-features = false }
-# Recognising a TLS failure from an application's native-tls reqwest client (the S3 store's optional
-# `native-tls` feature); reqwest names the same 0.2 line, so an application using it compiles it already.
 native-tls = { version = "0.2.16", default-features = false }
 percent-encoding = { version = "2", default-features = false, features = ["alloc"] }
-# `rustls-no-provider`: the store hands reqwest a finished rustls config on the provider rustls
-# resolves (the one ureq gets too), so reqwest's own default provider, aws-lc-rs (a C build), stays out.
+# `rustls-no-provider` (here and on ureq): the store supplies the provider rustls resolves, so
+# neither client pulls in its own default (aws-lc-rs or ring). See docs/decisions/D249.md.
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
 rustls = { version = "0.23.46", default-features = false }
-# The operating system's certificate verifier, used on macOS and Windows as Go uses it there.
 rustls-platform-verifier = { version = "0.7", default-features = false }
-# The system's root certificates (Apache-2.0 OR ISC OR MIT) on Linux and the BSDs, for the S3
-# store's own clients; `webpki-roots` below is the fallback when the system holds none.
 rustls-native-certs = { version = "0.8", default-features = false }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
-# SQLite's C API for the engine's own connections (MIT). A range, so an application's own
-# SQLite stack can share it (`links = "sqlite3"` allows one version per build): 0.37 to 0.40
-# bundle SQLite 3.51.3 to 3.54.1, every build of which lsr-sqlite's version check lists
-# (docs/decisions/D200.md). `bundled` is lsr-sqlite's default feature, not forced here.
+# Ranges, so an application's own SQLite stack can share them (`links = "sqlite3"` allows one
+# version per build). Every SQLite these bundle is in lsr-sqlite's version list (D200).
 libsqlite3-sys = ">=0.37, <0.41"
-# The range that pairs with libsqlite3-sys's: rusqlite 0.39 to 0.43. Each crate that opens its
-# own connections adds `bundled`; lsr-sqlite's optional `rusqlite` feature adds nothing.
 rusqlite = { version = ">=0.39, <0.44", default-features = false }
-# The sidecar forwards signals to its -exec child and waits for it without reaping
-# (`kill`, `waitid`), which needs unsafe code otherwise. Already in the lock through tempfile.
 rustix = { version = "1.1.6", default-features = false, features = ["std", "process"] }
 rusty-s3 = { version = "0.12", default-features = false, features = ["rustcrypto", "full"] }
 saphyr-parser = { version = "0.3.4", default-features = false }
-# Randomized schedule exploration (Apache-2.0). Dev-dependency only, and only under
-# `--cfg shuttle` (`just shuttle`), so no other build compiles it.
 shuttle = { version = "0.9.10", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
-# `preserve_order`: the daemon's and `lsr`'s JSON keeps the order its code writes the keys in.
+# `preserve_order`: JSON output keeps the key order the code writes.
 serde_json = { version = "1", default-features = false, features = ["std", "preserve_order"] }
 sha2 = { version = "0.11.1", default-features = false }
-# The CLI's `replicate` waits for SIGINT, SIGTERM and SIGHUP without unsafe code of its own.
 signal-hook = { version = "0.4.6", default-features = false, features = ["iterator"] }
 tempfile = { version = "3", default-features = false }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", default-features = false, features = ["rt"] }
 toml = { version = "1.1", default-features = false, features = ["parse", "serde", "std"] }
-# `rustls-no-provider`: the store takes the provider rustls resolves (see D249) and hands
-# it over, so ureq's own `rustls` feature, which forces ring, stays out.
 ureq = { version = "3.5.2", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
 url = { version = "2.5.4", default-features = false, features = ["std"] }
-# Mozilla's roots, trusted when the system has none (as Go's x509roots/fallback, which litestream links).
 webpki-roots = { version = "1", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
 
-# The lint set is strict by design, plus the four marked "port" below. Gates run with
-# `-D warnings`, so every "warn" here fails a land.
+# Gates run with `-D warnings`, so every "warn" here fails a land.
 [workspace.lints.clippy]
 too_many_lines = "deny"
 indexing_slicing = "warn"
@@ -144,12 +116,10 @@ cast_precision_loss = "warn"
 cast_possible_truncation = "warn"
 arithmetic_side_effects = "warn"
 manual_bit_width = "warn"
-# port: a state or fault enum that grows must break every match on it.
+# A state or fault enum that grows must break every match on it.
 wildcard_enum_match_arm = "warn"
 match_wildcard_for_single_variants = "warn"
-# port: no `as`; conversions are `From`, `TryFrom` or a named helper.
 as_conversions = "warn"
-# port: `expect` is an assert in disguise; a reasoned `#[expect(clippy::expect_used)]` names the invariant.
 expect_used = "warn"
 
 [workspace.lints.rust]
@@ -174,19 +144,13 @@ opt-level = 3
 debug = 0
 strip = "none"
 
-# The simulator soaks (`just sim-soak`, `just sim-nightly`). The unoptimized workspace crates
-# spend most of a run in iterator adapters, copies and ordered-map walks; opt 1 keeps every
-# assertion and overflow check and runs about 3.4 times as many seeds per second.
+# The simulator soaks: opt 1 keeps every check and runs about 3.4 times as many seeds per second.
 [profile.sim]
 inherits = "dev"
 opt-level = 1
 
-# The engine's tests built the way the shipped binary is: every code generation setting of
-# `release` (opt-level, lto, codegen-units, panic strategy, incremental), inherited so a change
-# to the release profile reaches it. Only debug assertions and overflow checks are turned on, so
-# `invariant!` panics and the `debug_assert!` tier behave as the tests expect. Which level
-# miscompiles a function depends on its shape and on inlining, so `sim` (opt 1) says little
-# about opt 3. Run by `just test-release-opt` in the nightly workflow (docs/decisions/D187.md).
+# The tests under the release code generation, with assertions on: `sim` (opt 1) says little
+# about what opt 3 miscompiles (docs/decisions/D187.md).
 [profile.release-asserts]
 inherits = "release"
 debug-assertions = true

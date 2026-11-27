@@ -6,7 +6,6 @@ use rusqlite::Connection;
 
 use super::{build, locate, value, varint};
 
-/// The pages of a database file, one vector each.
 fn pages_of(path: &std::path::Path, size: usize) -> Vec<Vec<u8>> {
     std::fs::read(path)
         .unwrap()

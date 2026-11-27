@@ -10,7 +10,6 @@ use super::*;
 /// How often the replicator thread polls with nothing to do.
 const POLL: i64 = 1_000;
 
-/// A simulated minute.
 const MINUTE: i64 = 60_000;
 
 /// More than a minute of polls and every backoff in it: an actor that asks for
@@ -23,8 +22,6 @@ const BOUND: usize = 200;
 fn restored_with_no_wal(snapshot_due: bool) -> (Rig, Actor) {
     let (mut rig, _) = caught_up();
     rig.staging = Counting::default();
-    // The restore wrote transaction 1 into the database file; SQLite has not
-    // written the WAL since it was emptied.
     rig.db.write_page(pg(1), &vec![1; PS.bytes()]);
     rig.wal.force_restart();
     rig.wal.truncate_file(0);

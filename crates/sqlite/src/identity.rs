@@ -40,7 +40,6 @@ mod unix {
         name == "unix" || name.starts_with("unix-")
     }
 
-    /// The descriptor in `file`, which a unix-family VFS opened.
     #[expect(
         unsafe_code,
         reason = "the descriptor is a field of SQLite's unixFile, read through a raw pointer"

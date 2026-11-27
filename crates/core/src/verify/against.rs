@@ -8,8 +8,9 @@
 //! with the database. With `NoChecksum` files nothing in the replica can show a stale page,
 //! so the comparison is the part Go lacks (`docs/PLAN.md` section 7). The listing half is
 //! [verify](super::verify()) at [Depth::Names](super::Depth::Names), whose
-//! holes and malformed snapshots cover Go's gap and order checks; the comparison is the dry run's restore, aimed at [LivePages::txid] instead of
-//! the latest state, into the same one-checksum-a-page sink.
+//! holes and malformed snapshots cover Go's gap and order checks; the comparison
+//! is the dry run's restore, aimed at [LivePages::txid] instead of the latest
+//! state, into the same one-checksum-a-page sink.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;

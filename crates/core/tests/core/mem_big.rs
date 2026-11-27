@@ -9,7 +9,6 @@ use crate::mem::{
     assert_snapshot_law,
 };
 
-/// 4 KiB pages in a mebibyte.
 const PAGES_PER_MIB: u32 = 256;
 
 /// The smaller database of the restore gate; the larger is four times it.

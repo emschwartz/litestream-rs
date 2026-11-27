@@ -82,7 +82,7 @@ fn a_staged_file_replaced_under_a_running_engine_is_never_uploaded() {
         event(tick),
         Some(Event::Resnapshot(SnapshotCause::NewestStagedFileUnreadable))
     )));
-    // Maintenance may have compacted level 0 meanwhile; the newest state is 2.
+    // Maintenance may have compacted level 0 meanwhile.
     assert_eq!(restored(&rig), 2);
 }
 
@@ -109,8 +109,7 @@ fn pending_files_in_the_live_wal_are_uploaded_as_staged() {
 }
 
 /// A boot reads each pending staged file once: the bytes it reads from staging are the
-/// pending files' own, where a boot that swept them, witnessed them, recovered from the
-/// newest and seeded the page table read each one four times. The replica is empty here, so
+/// pending files' own, not four reads each. The replica is empty here, so
 /// every staged file is pending and the first is the whole database.
 #[test]
 fn a_boot_reads_each_pending_staged_file_once() {
@@ -271,8 +270,7 @@ fn a_refused_copy_of_a_torn_tail_leaves_the_listed_key_to_the_replica() {
 /// A torn tail behind a listing that lags and leaves its key out, its staged copy not
 /// chaining to the file before it, so the boot refuses that copy. Only a read can tell the key is still on the replica; a
 /// listing that left it out freed the key for the transactions committed since
-/// ("transaction 16 covers commit 45 and then commit 57", which the simulator first found
-/// through a forged staged copy).
+/// ("transaction 16 covers commit 45 and then commit 57").
 #[test]
 fn a_tail_checkpointed_away_behind_a_lagging_listing_leaves_the_key_to_the_replica() {
     let (mut rig, mut actor) = caught_up();
@@ -307,10 +305,8 @@ fn a_tail_checkpointed_away_behind_a_lagging_listing_leaves_the_key_to_the_repli
 
 /// The takeover kept before the boot drops a refused staged copy covers the replica's
 /// newest key: reads that came back wrong judged that tail torn, so it is not the confirmed
-/// position, and a record capped at the confirmed transaction stopped one short of it. Once
-/// reads were honest, a later boot refused the engine's own upload (seed 0x3ed in the
-/// simulator: "a boot refused replica files through 0x26 with staging intact and no other
-/// writer").
+/// position, and a record capped at the confirmed transaction stopped one short of it, so a
+/// later boot refused the engine's own upload.
 #[test]
 fn the_takeover_before_a_refused_copy_drop_covers_a_torn_looking_tail() {
     // Enough wrong reads of the tail that every read the boot makes of it comes back wrong.
@@ -632,8 +628,7 @@ fn a_staged_file_below_the_newest_that_the_wal_rewrote_costs_a_snapshot() {
 fn a_replica_outage_past_the_witness_cap_holds_the_position_and_costs_no_snapshot() {
     let (mut rig, mut actor) = caught_up();
     let cap = crate::witness::MAX_WITNESSED;
-    // The last commit's byte appears nowhere else, so restoring it means it
-    // reached the replica.
+    // The last commit's byte appears nowhere else, so restoring it proves it reached the replica.
     let mut commits: Vec<u8> = (0..cap.saturating_add(5))
         .map(|n| u8::try_from(n % 200).unwrap().saturating_add(2))
         .collect();
@@ -666,7 +661,7 @@ fn a_replica_outage_past_the_witness_cap_holds_the_position_and_costs_no_snapsho
 }
 
 /// A staging directory holding more pending files than the witness cap (left
-/// by Go, which has no cap, or by an older build): boot witnesses up to the
+/// by Go, which has no cap): boot witnesses up to the
 /// cap and deletes the rest as it deletes a file the WAL does not vouch for.
 /// The WAL still holds their frames, so they are staged again once uploads
 /// make room, and nothing is snapshotted.
@@ -677,8 +672,7 @@ fn pending_files_past_the_cap_at_boot_are_regenerated_from_the_wal() {
     let fill = |n: usize| u8::try_from(n % 200).unwrap().saturating_add(2);
     let first: Vec<u8> = (0..cap).map(fill).collect();
     stage_held(&mut rig, &mut actor, &first, T0 + 1);
-    // Forget the tokens, so this engine stages past the cap as one without
-    // one would.
+    // Forget the tokens, so staging goes past the cap as it would without them.
     actor.engine.witnesses = Witnesses::new();
     let more: Vec<u8> = (0..10).map(fill).chain([255]).collect();
     stage_held(&mut rig, &mut actor, &more, T0 + 1);

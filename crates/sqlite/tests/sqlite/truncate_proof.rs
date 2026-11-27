@@ -24,7 +24,6 @@ use lsr_sqlite::{OpenError, Sqlite};
 use rusqlite::{Connection, OpenFlags};
 use tempfile::TempDir;
 
-/// What runs before each of the engine's calls.
 type Hook = Box<dyn FnMut(SourceOp)>;
 
 thread_local! {
@@ -46,7 +45,6 @@ fn hook(op: SourceOp) {
     }
 }
 
-/// The engine's real backend, with [`HOOK`] run before each call.
 #[derive(Clone, Debug)]
 pub(crate) struct Hooked(Sqlite);
 
@@ -148,7 +146,6 @@ pub(crate) fn connect(db: &Path, vfs: &str) -> Connection {
     conn
 }
 
-/// The database as a fresh reader sees it.
 fn image(db: &Path, vfs: &str) -> Vec<u8> {
     connect(db, vfs)
         .serialize(rusqlite::MAIN_DB)
@@ -178,7 +175,6 @@ enum At {
     SecondOpener,
 }
 
-/// What another process does at each of the engine's calls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Other {
     /// A PASSIVE checkpoint: it backfills whatever no reader's mark holds back.
@@ -190,7 +186,6 @@ enum Other {
     Nothing,
 }
 
-/// What one case saw.
 #[derive(Debug)]
 struct Seen {
     outcome: CheckpointOutcome,
@@ -204,7 +199,6 @@ struct Seen {
     snapshotted: bool,
 }
 
-/// Images of every state the database has been in, as a fresh reader saw each.
 type Images = Arc<Mutex<Vec<Vec<u8>>>>;
 
 fn note(images: &Images, db: &Path, vfs: &str) {
@@ -214,7 +208,6 @@ fn note(images: &Images, db: &Path, vfs: &str) {
         .push(image(db, vfs));
 }
 
-/// A commit's result, as SQLite reported it.
 type Commit = Arc<Mutex<Option<Result<(), String>>>>;
 
 /// A database of a few dozen pages and an engine with a proven position on it.
@@ -371,7 +364,6 @@ fn run(at: At, others: Other) -> Seen {
     }
 }
 
-/// The database the staged files restore to at `target`, page by page.
 fn restored(stepper: &Stepper<Hooked>, target: RestoreTarget) -> Vec<u8> {
     let sink = MemSink::new();
     block_on(lsr_core::restore(&stepper.staging, target, sink.clone())).unwrap();
@@ -392,7 +384,6 @@ fn nth_checkpoint(calls: &[SourceOp], nth: usize) -> usize {
         .expect("the engine's checkpoint calls")
 }
 
-/// The wal-index beside `db`.
 fn shm_of(db: &Path) -> std::path::PathBuf {
     let mut name = db.as_os_str().to_owned();
     name.push("-shm");
@@ -411,7 +402,6 @@ fn hold_a_second_descriptor(db: &Path) {
     std::mem::forget(std::fs::File::open(shm_of(db)).unwrap());
 }
 
-/// The child's role for [`At::StaleBackfill`].
 const STALE_BACKFILL: &str = "commit-then-stale-backfill";
 
 /// This file's roles for the binary's `child_process_entry` (`common::spawn`): whether `role`

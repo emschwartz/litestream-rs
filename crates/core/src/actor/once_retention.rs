@@ -106,7 +106,7 @@ impl Actor {
         }
     }
 
-    /// Where the retention pass a drain ends with stands.
+    /// Where the pass stands.
     #[must_use]
     pub fn final_retention(&self) -> FinalRetention {
         self.kept.final_retention.clone()
@@ -136,10 +136,9 @@ impl Actor {
                 return Some(self.retention_ended(FinalRetention::Failed { deleted, fault }));
             }
         };
-        // Extra requests beyond Go's, two small reads a level: Go deletes the older snapshots and
-        // lower levels on the strength of the newest file of each level without reading it, so
-        // a newest file a store took cut short or damaged costs the files that could still
-        // restore (D293). The daemon reads back before it plans from a listing as well.
+        // Extra requests beyond Go's, two small reads a level: Go deletes older files on the
+        // strength of each level's newest file without reading it, so a newest file a store cut
+        // short or damaged would cost the files that could still restore (D293).
         let enforcing = self.kept.cfg.maintenance.retention() == RetentionMode::Enforce;
         if enforcing && self.engine.maintain.read_back_owed {
             match read_back(env.remote, &inventory).await {
@@ -196,7 +195,6 @@ impl Actor {
         })
     }
 
-    /// Runs one delete job of the pass.
     async fn delete_step<R: Role>(
         &mut self,
         remote: &R,
@@ -222,7 +220,6 @@ impl Actor {
         }
     }
 
-    /// The pass has ended: the drain finishes.
     fn retention_ended(&mut self, ended: FinalRetention) -> Tick {
         self.kept.final_retention = ended;
         self.drained()

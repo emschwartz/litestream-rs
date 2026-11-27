@@ -2,7 +2,7 @@
 //!
 //! Every reader of whole files goes through [`LtxRead`]: restore, compaction,
 //! verify, the newest staged file's recovery check and the page table's seeding.
-//! It owns the three rules each of them used to repeat by hand:
+//! It owns three rules:
 //! - The listed size is advisory: only the decoder knows where a file ends.
 //! - A chunk shorter than asked is the end of the object (the read contract
 //!   of [`ObjectStore::read`]), so no empty read follows to learn it.

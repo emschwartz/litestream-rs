@@ -30,22 +30,17 @@ const MINUTE: i64 = 60 * SECOND;
 const HOUR: i64 = 60 * MINUTE;
 const DAY: i64 = 24 * HOUR;
 
-/// Days of history before the final settle.
 const DAYS: usize = 3;
 /// Ticks after a day's jump during which the kill may land: a snapshot, the compactions behind
 /// it and the delete jobs follow one tick each.
 const AFTER_JUMP: usize = 6;
-/// Seeds each kill position is swept over.
 const SEEDS: u64 = 2;
 
 /// What happens to the engine at the chosen tick after a day's jump.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kill {
-    /// Nothing: the history alone.
     None,
-    /// The process dies during the tick, at a point the seed picks.
     Process,
-    /// The machine loses power during the tick, at a point the seed picks.
     Power,
     /// The next delete the replica is asked for fails, and the process dies on the tick after.
     RefusedDelete,
@@ -58,12 +53,10 @@ fn reset() -> StoreError {
     }
 }
 
-/// A tick, then the oracle's restore of everything the replica holds.
 fn settle(ticks: usize) -> Vec<Op> {
     (0..ticks).flat_map(|_| [Op::Tick, Op::Restore]).collect()
 }
 
-/// Ticks with no restore between them: the bursts, where nothing is deleted yet.
 fn ticks(ticks: usize) -> Vec<Op> {
     vec![Op::Tick; ticks]
 }
@@ -139,7 +132,6 @@ fn run(ops: &[Op], seed: u64) -> RunReport {
     }
 }
 
-/// The first and last transaction of a file.
 fn span(key: &FileKey) -> (u64, u64) {
     let range = key.range();
     (range.min().get(), range.max().get())
@@ -173,7 +165,6 @@ fn hole(files: &BTreeSet<FileKey>) -> Option<String> {
     })
 }
 
-/// What replaying the recorder's puts and deletes showed.
 #[derive(Debug, Default)]
 struct Replay {
     /// Delete calls, each judged on the files left.
@@ -252,7 +243,6 @@ fn the_windows_are_reached_and_every_kind_of_file_is_deleted() {
     );
 }
 
-/// Swept over where the kill lands after each day's jump and over seeds.
 fn sweep(kill: Kill) {
     let mut crashed = 0_u64;
     let mut deletes = 0_usize;
@@ -275,7 +265,6 @@ fn a_kill_during_the_ticks_after_a_jump_loses_no_retained_point() {
     sweep(Kill::Process);
 }
 
-/// The machine loses power during those ticks.
 #[test]
 fn a_power_loss_during_the_ticks_after_a_jump_loses_no_retained_point() {
     sweep(Kill::Power);

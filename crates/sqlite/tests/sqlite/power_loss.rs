@@ -22,7 +22,6 @@ fn config() -> RigConfig {
     }
 }
 
-/// The cycle, stopping at the first settle after the power failed.
 fn cycle_until_dark<B: Backend>(rig: &mut Rig<B>) -> Result<(), RigError> {
     rig.cycle_with(|rig| {
         if !rig.vfs().powered() {
@@ -37,7 +36,6 @@ fn cycle_until_dark<B: Backend>(rig: &mut Rig<B>) -> Result<(), RigError> {
     })
 }
 
-/// What a loss at one WAL sync led to.
 #[derive(Debug)]
 struct Outcome {
     /// Why the next boot snapshots, if it does.
@@ -47,7 +45,6 @@ struct Outcome {
     needed_a_write: bool,
 }
 
-/// The snapshot cause a boot named, for a tick that is a boot.
 fn boot_cause(tick: &Tick) -> Option<Option<SnapshotCause>> {
     match tick {
         Tick::Ran {
@@ -289,7 +286,6 @@ fn failing_wal_sync(dir: &TempDir) -> (Rig<Sqlite>, ((u32, u32), u64)) {
     (rig, before)
 }
 
-/// Asserts no level-0 file was staged from the failed generation past what was staged before.
 fn nothing_unproven_staged<B: Backend>(rig: &Rig<B>, before: ((u32, u32), u64)) {
     let (salts, end) = before;
     let past: Vec<_> = staged_ranges(rig)

@@ -69,8 +69,7 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// The stack of a sender thread: an HTTPS request through ureq and rustls needs 48 KiB (see
-/// `lsr-replica`'s `stack` module for how that was measured), and this is about five times
-/// that.
+/// `lsr-replica`'s `stack` module), and this is about five times that.
 // Shuttle's threads have no stack size to set.
 #[cfg(not(shuttle))]
 const SENDER_STACK: usize = 256 * 1024;
@@ -93,7 +92,7 @@ struct Queue {
 }
 
 impl Queue {
-    /// A sender thread: takes tasks until the store is gone and none is left.
+    /// A sender thread's loop.
     fn work(&self) {
         let mut waiting = lock(&self.waiting);
         loop {
@@ -141,7 +140,7 @@ fn spawn(queue: Arc<Queue>) -> bool {
     true
 }
 
-/// Lanes on threads, for a blocking client (the module docs).
+/// Lanes on threads (the module docs).
 pub struct Sender {
     queue: Arc<Queue>,
     most: usize,
@@ -165,7 +164,6 @@ impl Sender {
         }
     }
 
-    /// How many threads are alive.
     #[cfg(all(test, not(shuttle)))]
     fn threads(&self) -> usize {
         lock(&self.queue.waiting).threads
@@ -188,8 +186,7 @@ impl Lanes for Sender {
             self.queue.more.notify_one();
             return;
         }
-        // The OS gave no thread. With another alive the task waits its turn; with none, the
-        // caller is the only thread there is.
+        // The OS gave no thread: with another alive the task waits; with none, run it here.
         let stranded = {
             let mut waiting = lock(&self.queue.waiting);
             waiting.threads = waiting.threads.saturating_sub(1);
@@ -291,8 +288,8 @@ mod tests {
 
     use super::*;
 
-    /// What the tasks of a test share: how many are inside at once, the most that ever were,
-    /// how many ended, and a gate that holds them inside.
+    /// What the tasks share: how many are inside, the most ever inside, how many ended, and a
+    /// gate that holds them inside.
     #[derive(Default)]
     struct Seen {
         state: Mutex<(usize, usize, usize, bool)>,
@@ -300,7 +297,6 @@ mod tests {
     }
 
     impl Seen {
-        /// A task that waits inside until the gate opens.
         fn task(self: &Arc<Self>) -> Task {
             let seen = Arc::clone(self);
             Box::new(move || {
@@ -349,7 +345,6 @@ mod tests {
         for _ in 0..8 {
             sender.start(seen.task());
         }
-        // `start` came back eight times with every task still held inside or queued.
         seen.until(|state| state.0 == 3);
         assert_eq!(sender.threads(), 3);
         seen.open();
@@ -366,7 +361,6 @@ mod tests {
         for n in 1..=5 {
             sender.start(seen.task());
             seen.until(|state| state.2 == n);
-            // The thread is idle again before the next part comes.
             while lock(&sender.queue.waiting).idle == 0 {
                 std::thread::yield_now();
             }

@@ -24,13 +24,11 @@ use crate::transport::{Body, MAX_BODY, Transport};
 pub(crate) struct S3Stream<T> {
     inner: Arc<Inner<T>>,
     key: FileKey,
-    /// Where the GET starts.
     from: u64,
     state: State,
 }
 
 enum State {
-    /// No request yet.
     Unsent,
     /// The body, and how much of it the response declared that is still to come.
     Open {
@@ -51,7 +49,6 @@ impl<T: Transport> S3Stream<T> {
         }
     }
 
-    /// Sends the GET and judges its head.
     fn open(&self) -> Result<State, StoreError> {
         let op = StoreOp::Read;
         let key = self.key;
@@ -100,7 +97,6 @@ impl<T: Transport> S3Stream<T> {
         *left = left.map(|left| left.saturating_sub(got));
         let ended = got < want;
         if read.is_err() || (ended && left.is_some_and(|left| left > 0)) {
-            // The connection failed, or ended before the body did.
             self.state = State::Done;
             read?;
             return Err(StoreError::Transient {

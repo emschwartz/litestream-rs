@@ -364,8 +364,7 @@ mod staged_input {
     /// A staging backup holding the first snapshot as transaction 1 is put
     /// back after the engine took 1 again from a later commit and uploaded
     /// it. Level 1 was built from the staged copy of level 0 while restores
-    /// read the replica's, so transaction 1 had two contents (seed 0xcf8,
-    /// shrunk).
+    /// read the replica's, so transaction 1 had two contents.
     #[test]
     fn level_one_is_not_built_from_a_staged_file_unlike_the_replica() {
         let ops = [
@@ -419,7 +418,7 @@ mod prefix_page_size {
     /// transaction 3. The backup is put back and the database moves to 1024
     /// again: the boot judged the page size by the staged file alone and
     /// snapshotted 1024-byte pages onto the 2048 prefix, so restores stopped
-    /// on the change (seed 0xdc8, shrunk).
+    /// on the change.
     #[test]
     fn a_boot_behind_the_replica_keeps_its_page_size() {
         let ops = [
@@ -470,7 +469,7 @@ mod budget {
     /// Level 1 merges level-0 files 2 to 5, and a later bucket rollback
     /// takes 2 to 4. The budget left the taken files out of level 0 but kept
     /// the level-1 file built from them, so it charged level 1 for bytes it
-    /// had read (seed 0x54e, shrunk).
+    /// had read.
     #[test]
     fn a_level_built_from_files_a_rollback_took_is_within_budget() {
         let back = Op::Remote(RemoteOp::RollBack);
@@ -538,7 +537,7 @@ mod failed_drop {
     /// on; that delete fails. The uploader had already taken 7 as confirmed
     /// and uploaded the staged 8, built on the staged 7, onto the other
     /// writer's file: level 1 could then not be merged from the replica and
-    /// maintenance degraded on `RemoteCorrupt` (seed 0xd79, shrunk).
+    /// maintenance degraded on `RemoteCorrupt`.
     #[test]
     fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
         let ops = [
@@ -644,8 +643,7 @@ mod second_writer {
     /// newest while it runs. Maintenance listed the replica every window and
     /// compacted the other writer's file into level 1 instead of stopping;
     /// the engine's own upload of that transaction then replaced the
-    /// level-0 key, so the replica held two histories for one transaction
-    /// (seed 0x50c, shrunk).
+    /// level-0 key, so the replica held two histories for one transaction.
     #[test]
     fn maintenance_stops_on_another_writer() {
         let mut ops = vec![
@@ -680,7 +678,7 @@ mod second_writer {
     /// The other writer's file appears while the engine is down; the boot
     /// takes it as history and snapshots after it, then the operator removes
     /// it. The removal takes that transaction for good, which the oracle
-    /// counted as a gap the engine left (seed 0xf85, shrunk).
+    /// counted as a gap the engine left.
     #[test]
     fn removing_a_file_a_boot_built_on_loses_its_transaction() {
         use lsr_core::{SourceError, SourceOp};
@@ -700,8 +698,7 @@ mod second_writer {
 
     /// The engine's own upload of the same transaction replaces the other
     /// writer's file before any listing, and level 1 is built from it: the
-    /// oracle mapped that level-1 file to the other writer's pages (seed
-    /// 0x433, shrunk).
+    /// oracle mapped that level-1 file to the other writer's pages.
     #[test]
     fn a_level_built_after_the_engine_replaced_the_file_holds_its_pages() {
         let ops = [
@@ -721,7 +718,7 @@ mod second_writer {
     /// into levels 1 to 9. The oracle ordered the first removal after the
     /// second put (both at one recorder length) and mapped the compacted file
     /// to the engine's own staged note for 3 instead of the other writer's
-    /// pages (seed 0x18efc, shrunk).
+    /// pages.
     #[test]
     fn a_removal_before_a_second_put_of_the_same_id() {
         use lsr_core::{StoreError, StoreOp};
@@ -861,7 +858,7 @@ mod refused_upload {
     /// staged copy came back with a flipped byte, so the read-back judged the
     /// staged copy torn and confirmed the other writer's object as the
     /// engine's own transaction: a restore of it returned the other writer's
-    /// pages (seed 0x4ef under its swarm mix, shrunk from 23 operations).
+    /// pages.
     #[test]
     fn one_bad_staged_read_after_a_refusal_confirms_no_other_object() {
         let seed = Seed::new(0x4ef);
@@ -903,7 +900,7 @@ mod short_object_left {
     /// read. Reading it degrades the sync task with `RemoteCorrupt`, which the judge excuses as
     /// it does a corrupted publish. The hold (other processes' readers pin the WAL) runs a
     /// sub-history drawn from the seed under `overlap`, so this scenario is a shrunk recording
-    /// of seed 0x4c, kept until someone can write the hold's draws out.
+    /// of one seed, kept until someone can write the hold's draws out.
     #[test]
     fn a_short_object_a_delete_could_not_remove_is_damage() {
         let ops = [

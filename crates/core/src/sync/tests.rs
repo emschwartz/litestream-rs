@@ -15,7 +15,6 @@ use tempfile::TempDir;
 
 use super::*;
 
-/// The pages of a plan, listed.
 fn plan_pages(
     map: &PageMap,
     prev_commit: Option<u32>,
@@ -916,7 +915,6 @@ fn the_default_cap_is_go_s_64_mib() {
     assert_eq!(SyncConfig::default().cap, NonZeroU64::new(64 * 1024 * 1024));
 }
 
-/// A sink that keeps each chunk it is given.
 #[derive(Default)]
 struct Chunks(Vec<Vec<u8>>);
 

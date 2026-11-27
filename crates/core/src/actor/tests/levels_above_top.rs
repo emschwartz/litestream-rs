@@ -15,7 +15,6 @@ fn s3_like(rig: &mut Rig) {
     };
 }
 
-/// The LISTs sent at `level` from the `from`th request on.
 fn lists_at(rig: &Rig, from: usize, level: u8) -> usize {
     rig.remote
         .requests_from(from)
@@ -24,9 +23,8 @@ fn lists_at(rig: &Rig, from: usize, level: u8) -> usize {
         .unwrap_or_default()
 }
 
-/// A first start lists each level above the top once, at boot, where its three whole listings
-/// (the boot's, the snapshot's pass and the pass after it) used to list them three times:
-/// fifteen LISTs Go does not send became five. The snapshot is planned from the boot's listing
+/// A first start lists each level above the top once, at boot, not once per whole listing.
+/// The snapshot is planned from the boot's listing
 /// (`docs/decisions/D287.md`), so only two whole listings remain, the boot's and the one after
 /// the snapshot: the levels it lists (0 to 3 and 9) twice.
 #[test]

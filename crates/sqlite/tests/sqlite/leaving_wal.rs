@@ -28,7 +28,6 @@ fn number(conn: &Connection, sql: &str) -> i64 {
     conn.query_row(sql, [], |row| row.get(0)).unwrap()
 }
 
-/// A connection set up as the library asks.
 fn app(db: &Path) -> Connection {
     let conn = Connection::open(db).unwrap();
     app_connection(&conn).unwrap();
@@ -58,7 +57,6 @@ fn wal(db: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// The database as SQLite reads it through `conn`: sound, every row there.
 fn sound(conn: &Connection, at: &str) {
     assert_eq!(string(conn, "PRAGMA integrity_check"), "ok", "{at}");
     assert_eq!(number(conn, "SELECT count(*) FROM t"), ROWS, "{at}");

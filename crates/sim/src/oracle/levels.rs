@@ -68,7 +68,6 @@ pub fn judge_level_put(
     }
     let (min, max) = (key.range().min().get(), key.range().max().get());
     let below = |file: &&FileInfo| file.key.level().get() == level.saturating_sub(1);
-    // Where the level's files that start before this one end.
     let before = files
         .iter()
         .filter(|file| file.key.level().get() == level && file.key.range().min().get() < min)

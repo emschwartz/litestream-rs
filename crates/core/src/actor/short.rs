@@ -49,7 +49,7 @@ impl Actor {
             )
         };
         if plan.is_empty() {
-            // Nothing is due, or nothing a listing could change: a pass that asks for no request.
+            // Nothing is due, or nothing a listing could change: no request at all.
             let maintain = &mut self.engine.maintain;
             maintain.remembered.settle();
             maintain.stale = false;

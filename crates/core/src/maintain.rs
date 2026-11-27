@@ -691,7 +691,6 @@ pub(crate) fn snapshot_end(inventory: &Inventory) -> Option<Txid> {
         .map(|info| info.key.range().max())
 }
 
-/// The snapshot's step: its backoff, the delete of a rejected one, or the plan.
 fn snapshot_step(
     inventory: &Inventory,
     now: Timestamp,
@@ -787,9 +786,7 @@ fn plan_level(
     {
         return Ok(Step::Wait(next));
     }
-    // The rule every compaction keeps: its inputs are the contiguous run that starts at the
-    // first source file above the destination's newest, and that file starts at the
-    // transaction after it. A tail that shows otherwise is not planned from.
+    // The rule in "Holes": a tail that shows otherwise is not planned from.
     // An empty level may start anywhere, so the snapshot's end is not its newest file.
     let follows =
         dst_last.is_none_or(|last| last.key.range().max().next() == Some(first.key.range().min()));
@@ -904,12 +901,10 @@ fn fill(inventory: &Inventory, level: Level, hole: TxidRange) -> Option<CompactJ
     }
 }
 
-/// The delete of a distrusted output, alone.
 fn delete_first(bad: FileKey) -> Step {
     DeleteJob::new(vec![bad]).map_or(Step::Idle, |job| Step::Run(Job::Delete(job)))
 }
 
-/// The longest strictly contiguous prefix, at most [`MAX_INPUTS`] files.
 fn contiguous_run<'a>(files: impl Iterator<Item = &'a FileInfo>) -> Vec<FileInfo> {
     let mut run: Vec<FileInfo> = Vec::new();
     for info in files {
@@ -1206,9 +1201,8 @@ impl Merging {
     }
 }
 
-/// Begins the merge from the staged copies when `staged`, and from the replica's otherwise or
-/// once a staged copy is missing or does not decode (the local copy may be gone after a
-/// restart, or rotten). Says which it reads.
+/// Begins the merge from the staged copies when `staged`, else from the replica's (see
+/// [`Merging`]). Says which it reads.
 async fn open<L: Role, R: Role>(
     staged: bool,
     inputs: &CompactionInputs,
@@ -1228,7 +1222,6 @@ async fn open<L: Role, R: Role>(
     begun.map(|job| (job, false))
 }
 
-/// What a merge's end means for maintenance.
 async fn judge<R: Role>(
     result: Result<Compacted, CompactError>,
     output: FileKey,

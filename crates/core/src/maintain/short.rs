@@ -2,10 +2,9 @@
 //!
 //! A whole listing pages through every file of every level (but the levels above the top the boot
 //! found empty, `docs/decisions/D294.md`), so its cost grows with the
-//! replica's retention: a week of level-1 files is about 20,000 entries and 21 requests, and
-//! maintenance used to run one whole listing at least every 15 seconds while the database was
-//! written (issue 324, and upstream's report of the same shape). The engine now remembers, in
-//! memory only, the newest file it knows at each level 1 to 8 ([`Remembered`]), and between
+//! replica's retention: a week of level-1 files is about 20,000 entries and 21 requests,
+//! too much to repeat every 15 seconds while the database is written (issue 324, and upstream's
+//! report of the same shape). The engine remembers, in memory only, the newest file it knows at each level 1 to 8 ([`Remembered`]), and between
 //! whole listings a pass asks the store only for what its decision reads ([`Plan`], [`Tail`]): level 0,
 //! the tail of a compaction level whose window is open and the level below it, level 1 after the
 //! cover cursor when level-0 retention is due, and level 9 when the snapshot window is open. A pass with nothing due lists nothing, and the
@@ -17,7 +16,7 @@
 //! # When a pass is whole
 //!
 //! [`Remembered::short_ok`] is false, and the pass lists everything and decides with [`super::due`]
-//! exactly as before, at boot and after any fault (the actor calls `forget`), after a refused or
+//! at boot and after any fault (the actor calls `forget`), after a refused or
 //! listed upload, a step back of the clock, a compaction that found an input gone, a level whose sources no longer follow its newest file or a compaction that closed such a hole (see "Holes" in [`super`]), while a restore point is pinned, a rejected output is distrusted or the boot
 //! read-back is owed, after a retention delete or a snapshot, when the last whole listing did not
 //! pass the retention gate ([`Gate::Held`]), when snapshot retention next has
@@ -53,15 +52,15 @@
 //!
 //! # The second-writer check
 //!
-//! - Caught at once, as before: a create-only upload another writer's file already holds is refused
+//! - Caught at once: a create-only upload another writer's file already holds is refused
 //!   (that is the upload's own check, untouched).
 //! - Caught on the pass that lists it: a file past this engine's position at level 0 (listed whole
 //!   every pass) or at any level 1 to 8 after the remembered newest file. A live second writer
-//!   uploads at level 0, so this is its first file's next pass, as before.
+//!   uploads at level 0, so this is its first file's next pass.
 //! - Caught at the next whole listing: a file past this engine's position that sorts before the
 //!   remembered newest file of its level (a foreign compaction of an older range), and a replica
 //!   that lost files below the tail. The longest that takes is [`FULL_LISTING_INTERVAL`] of
-//!   maintenance passes (a replica nothing is written to has no passes, as before).
+//!   maintenance passes (a replica nothing is written to has no passes).
 //! - With a record above the configured top, level-0 retention is decided on whole listings only
 //!   (see [`Remembered::plan`]): the record may name a file another process removed, which would
 //!   hold the anchor too high.

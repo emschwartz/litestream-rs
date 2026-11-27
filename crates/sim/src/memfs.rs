@@ -44,7 +44,6 @@ enum Node {
 #[derive(Debug, Default)]
 struct Dir {
     entries: BTreeMap<OsString, Node>,
-    /// Each name changed since the last sync, with what it durably held.
     durable: BTreeMap<OsString, Option<Node>>,
 }
 
@@ -87,7 +86,6 @@ struct State {
     dirs: BTreeMap<PathBuf, Dir>,
     inodes: BTreeMap<Ino, Inode>,
     next_ino: Ino,
-    /// Bumped by every power loss; a handle from an earlier epoch is dead.
     epoch: u64,
     law: CrashLaw,
     rng: Rng,
@@ -111,7 +109,6 @@ fn err(kind: io::ErrorKind) -> io::Error {
     io::Error::from(kind)
 }
 
-/// The parent directory and the name of `path`; the root has neither.
 fn split(path: &Path) -> io::Result<(&Path, OsString)> {
     match (path.parent(), path.file_name()) {
         (Some(parent), Some(name)) => Ok((parent, name.to_owned())),
@@ -120,7 +117,6 @@ fn split(path: &Path) -> io::Result<(&Path, OsString)> {
 }
 
 impl State {
-    /// The directory at `path`, or the error the real call gives for a missing one.
     fn dir_mut(&mut self, path: &Path) -> io::Result<&mut Dir> {
         if !self.dirs.contains_key(path) {
             return Err(self.missing(path));
@@ -218,7 +214,6 @@ impl State {
         self.change(from_dir, vec![(from_name, None), (to_name, Some(node))])
     }
 
-    /// A second name for a file, in the same directory, as `rename` allows; a taken name fails.
     fn hard_link(&mut self, from: &Path, to: &Path) -> io::Result<()> {
         let (from_dir, _) = split(from)?;
         let (to_dir, to_name) = split(to)?;
@@ -328,7 +323,6 @@ fn undo_unsynced_entries(state: &mut State, report: &mut PowerLoss) {
     }
 }
 
-/// Each file keeps what the law keeps of its writes since its last sync.
 fn crash_files(state: &mut State, report: &mut PowerLoss) {
     let law = state.law;
     let State { inodes, rng, .. } = state;
@@ -356,7 +350,6 @@ fn crash_files(state: &mut State, report: &mut PowerLoss) {
     }
 }
 
-/// Drops the files no directory names.
 fn collect_unreachable(state: &mut State) {
     let named: Vec<Ino> = state
         .dirs
@@ -465,7 +458,6 @@ pub struct MemFile {
 }
 
 impl MemFile {
-    /// Runs `f` on the inode while the handle's process is alive.
     fn with<T>(&self, f: impl FnOnce(&mut Inode) -> io::Result<T>) -> io::Result<T> {
         let mut state = self.fs.lock();
         if state.epoch != self.epoch {

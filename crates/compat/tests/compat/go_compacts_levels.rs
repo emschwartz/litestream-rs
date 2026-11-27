@@ -98,7 +98,6 @@ fn write_levels() -> Written {
     chain.finish().expect("finish")
 }
 
-/// The transaction ranges of `level` in the replica, oldest first.
 fn ranges(replica: &Path, level: u8) -> Vec<(u64, u64)> {
     list(replica)
         .expect("list")

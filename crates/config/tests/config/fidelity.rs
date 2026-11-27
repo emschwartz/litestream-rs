@@ -7,7 +7,6 @@ use lsr_config::{Expected, GoDuration, ProblemKind, ReplicaConfig, WarningKind};
 
 use crate::common::{parse, problem_at, refused};
 
-/// A replica with `key: value`.
 fn replica_text(key: &str, value: &str) -> String {
     format!("dbs:\n  - path: /db\n    replica:\n      url: s3://bucket/db\n      {key}: {value}\n")
 }

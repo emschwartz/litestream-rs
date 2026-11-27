@@ -23,7 +23,6 @@ use crate::error::{rc_error, source_error};
 use crate::{Sqlite, ffi};
 use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, ReadLockHold, SourceError};
 
-/// SQLite's result code and its two frame counts.
 fn wal_checkpoint(conn: Handle<'_>, mode: CheckpointMode) -> (c_int, c_int, c_int) {
     let mode = match mode {
         CheckpointMode::Passive | CheckpointMode::Backlog => ffi::SQLITE_CHECKPOINT_PASSIVE,
@@ -163,7 +162,6 @@ mod tests {
 
     use super::*;
 
-    /// SQLite's authorizer callback: refuses ROLLBACK, allows everything else.
     #[expect(
         unsafe_code,
         reason = "SQLite calls the authorizer through a C function pointer"
@@ -201,7 +199,6 @@ mod tests {
         assert_eq!(rc, ffi::SQLITE_OK);
     }
 
-    /// A database in WAL mode under a temporary directory, and our handle on it.
     fn open() -> (tempfile::TempDir, std::path::PathBuf, Sqlite) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
@@ -212,7 +209,6 @@ mod tests {
         (dir, path, sqlite)
     }
 
-    /// The sequence number another connection reads.
     fn seq(path: &std::path::Path) -> Option<i64> {
         Connection::open(path)
             .unwrap()

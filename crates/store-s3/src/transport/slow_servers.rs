@@ -6,7 +6,6 @@ use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-/// Bytes the paced server reads at a time.
 const CHUNK: usize = 64 * 1024;
 
 const OK: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok";

@@ -37,7 +37,6 @@ fn assert_fails_or_aliases(original: &Decoded, spans: &[Range<usize>], flipped: 
     }
 }
 
-/// Changes every byte of `bytes` by every mask in `masks`, one at a time.
 fn flip_all(bytes: &[u8], masks: &[u8]) -> usize {
     let original = decode(bytes).unwrap();
     let spans = compressed_block_spans(bytes).expect("the file's blocks parse");

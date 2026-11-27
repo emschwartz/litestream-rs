@@ -148,7 +148,6 @@ impl Runner {
     }
 }
 
-/// Whether verify's verdict agrees with the truth.
 fn judge(compared: &Compared, truth: &Truth) -> Result<(), Violation> {
     let agrees = match (compared, truth) {
         (Compared::Same { .. }, Truth::Right)

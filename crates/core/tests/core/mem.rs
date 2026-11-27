@@ -49,7 +49,6 @@ use lsr_wal::{Salts, WalReader};
 #[global_allocator]
 static HEAP: Counting = Counting;
 
-/// A kibibyte, a mebibyte.
 pub const KIB: usize = 1024;
 pub const MIB: usize = 1024 * KIB;
 
@@ -222,7 +221,6 @@ impl Upload for NoUpload {
 impl ObjectStore for Spool {
     type Upload = NoUpload;
 
-    /// Leaves no scratch.
     async fn remove_scratch(&self) -> Result<u64, StoreError> {
         Ok(0)
     }
@@ -442,7 +440,6 @@ impl Upload for VoidUpload {
 impl ObjectStore for Void {
     type Upload = VoidUpload;
 
-    /// Leaves no scratch.
     async fn remove_scratch(&self) -> Result<u64, StoreError> {
         Ok(0)
     }
@@ -572,10 +569,9 @@ pub fn snapshot_run(pages: u32) -> SnapshotRun {
 /// and the encoder's page index. The table is one 8-byte slot a page and the index about
 /// nine varint bytes, so the law is linear in the database's pages and its floor is 17
 /// bytes a page (74 MiB measured at 16 GiB of 4 KiB pages: 18). The plan holds nothing a page costs: it
-/// is walked, never listed (it was 32 bytes a page, 48 while sorted); the table was a map
-/// (about 20), and the index was copied twice at the end of the file. Measured: 16 to 18
-/// bytes a page, from 86; the ceiling is that plus about 15%, so any of those again, or holding
-/// page contents, which is 4096 bytes a page, breaks it.
+/// is walked, never listed. Measured: 16 to 18 bytes a page; the ceiling is that plus about
+/// 15%, so a listed plan, a map table, a copied index, or holding page contents (4096 bytes a
+/// page) breaks it.
 pub const SNAPSHOT_BYTES_PER_PAGE: usize = 20;
 
 /// The most one `Upload::write` may carry, the last included: a snapshot streams its pages

@@ -442,7 +442,6 @@ pub fn preflight_over(target: &Path, existing: Existing) -> Result<Vec<PathBuf>,
     Ok(present)
 }
 
-/// The first of the target and its journal files that exists.
 fn first_present(target: &Path) -> io::Result<Option<PathBuf>> {
     for path in std::iter::once(target.to_path_buf()).chain(journal_files(target)) {
         if exists(&path)? {
@@ -465,7 +464,6 @@ fn open_scratch(scratch: &Path, fresh: bool) -> io::Result<File> {
     options.open(scratch)
 }
 
-/// Takes the scratch's exclusive advisory lock, or says a restore of the target runs.
 fn lock_scratch(file: &File, scratch: &Path) -> Result<(), CreateError> {
     match file.try_lock() {
         Ok(()) => Ok(()),
@@ -477,7 +475,6 @@ fn lock_scratch(file: &File, scratch: &Path) -> Result<(), CreateError> {
     }
 }
 
-/// Whether `scratch` still names the file `held` was opened as.
 fn names_what_it_holds(scratch: &Path, held: &File) -> bool {
     fs::metadata(scratch).is_ok_and(|named| {
         held.metadata()
@@ -570,7 +567,6 @@ impl FileSink {
         self
     }
 
-    /// The scratch file's path, for the tests.
     #[cfg(test)]
     pub(crate) fn scratch_path(&self) -> &Path {
         &self.scratch

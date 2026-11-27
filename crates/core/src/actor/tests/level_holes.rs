@@ -1,9 +1,7 @@
 //! Levels above 1 have no hole when level 1 gains two files in one window.
 //!
 //! Level 1 gains two files in one window when its sources outnumber what one compaction
-//! takes: the first job is full and leaves the window open for the rest. (Before a level's
-//! own compaction closed its window, a commit that landed while the compaction ran did the
-//! same, since the output carries its last input's time, from the window before.) The trial
+//! takes: the first job is full and leaves the window open for the rest. The trial
 //! drill saw level 2 then take the files before the first of the two and the second alone,
 //! never the first: a hole Go's compaction refuses to read across
 //! (`non-contiguous transaction ids in input files`, ltx `compactor.go:125`).
@@ -110,7 +108,6 @@ fn write_more_than_one_compaction_takes(
     (seen, outputs)
 }
 
-/// The keys of the compaction outputs published at `level`, in order.
 fn outputs_at(seen: &[Tick], level: u8) -> Vec<FileKey> {
     seen.iter()
         .filter_map(|tick| match event(tick) {
@@ -142,7 +139,6 @@ fn slow_level_three() -> ActorConfig {
     }
 }
 
-/// The transaction ranges of `level` on the replica, oldest first.
 fn ranges_at(rig: &Rig, level: u8) -> Vec<(u64, u64)> {
     Rig::files(&rig.remote, Level::new(level).unwrap())
         .iter()
@@ -202,7 +198,7 @@ fn two_level_one_files_in_one_window_leave_no_hole_in_the_levels_above() {
     }
 }
 
-/// A replica an earlier version left with holes in level 2 (level 1 whole, level 3 behind):
+/// A replica left with holes in level 2 (level 1 whole, level 3 behind):
 /// the first listing closes each from level 1, one after the other, without waiting for any
 /// window. Until then Go's compaction into level 3 fails at every tick.
 #[test]
@@ -216,7 +212,6 @@ fn holes_already_on_the_replica_are_closed_at_the_first_listing() {
     let gone = [two[1].key, two[3].key];
     block_on(rig.remote.inner.delete(&gone)).unwrap();
     assert!(first_hole(&ranges_at(&rig, 2)).is_some());
-    // A new process: it lists the whole replica at its start.
     let mut actor = Actor::new(slow_level_three());
     let seen = rig.settle(&mut actor, T0 + 95_600);
     no_stop(&seen);
@@ -254,7 +249,6 @@ fn a_level_one_file_deleted_under_the_engine_is_written_again_from_level_zero() 
     assert!(two.last().unwrap().1 > first_above.range().max().get());
 }
 
-/// A short pass runs `due` as the engine does.
 fn act_on_short(rig: &mut Rig, actor: &mut Actor, due: Due, now: i64) -> Tick {
     let (staging, remote) = (Staging(&rig.staging), Replica(&rig.remote));
     let mut env = Env {
@@ -297,7 +291,6 @@ fn a_short_pass_compaction_that_would_leave_a_hole_is_a_bug_and_writes_nothing()
         let inputs = crate::CompactionInputs::new(files.to_vec()).unwrap();
         Job::Compact(crate::maintain::CompactJob::new(inputs, Level::new(1).unwrap()).unwrap())
     };
-    // The second and third files alone: the first would be in no level-1 file.
     let skipping = job(&zero[1..]);
     let tick = crate::fault::reporting_bugs(|| {
         assert_eq!(
@@ -308,7 +301,6 @@ fn a_short_pass_compaction_that_would_leave_a_hole_is_a_bug_and_writes_nothing()
     });
     assert!(matches!(tick, Tick::Stopped(_)), "{tick:?}");
     assert_eq!(ranges_at(&rig, 1), one, "the job ran");
-    // All three files start right after level 1's newest: that job follows.
     assert_eq!(actor.follows_its_level(&job(&zero)), Ok(()));
 }
 

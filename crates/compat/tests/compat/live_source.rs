@@ -34,7 +34,6 @@ fn confirmed<W: WalSource>(
     }
 }
 
-/// A tiny deterministic generator, so a chain replays from its seed.
 struct Rng(u64);
 
 impl Rng {
@@ -108,7 +107,6 @@ impl Rig {
         self.live.wal_path()
     }
 
-    /// The WAL header's 32 bytes: salts, checkpoint sequence and checksum.
     fn wal_header(&self) -> [u8; 32] {
         let bytes = fs::read(self.wal_path()).expect("wal");
         bytes[..32].try_into().expect("32 bytes")
@@ -132,7 +130,6 @@ impl Rig {
         self.position.expect("synced").txid()
     }
 
-    /// The WAL as one read of its header and one read of the wal-index see it.
     fn view(&mut self) -> (WalReader<fs::File>, WalView, CommittedRead) {
         let file = self.live.open().expect("open").expect("wal exists");
         let wal = WalReader::open(file).expect("wal header");

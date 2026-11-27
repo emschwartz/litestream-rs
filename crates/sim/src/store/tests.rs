@@ -82,7 +82,6 @@ fn faults_wrapper_leaves_raw_store_clean() {
     assert_ne!(clean, flipped);
     assert_eq!(clean.get(3).map(|b| b ^ 1), flipped.get(3).copied());
     assert_eq!(block_on(raw.read(&fkey(0, 1, 1), 0, len)).unwrap(), clean);
-    // One-shot: the next read through the wrapper is clean again.
     assert_eq!(
         block_on(faults.read(&fkey(0, 1, 1), 0, len)).unwrap(),
         clean
@@ -142,7 +141,6 @@ fn recorder_records_err_after_publish() {
     assert_eq!(*got, wal);
 }
 
-/// A create-only upload of transaction 1, `ltx(1, 1, ..)` in size.
 async fn create_only<S: ObjectStore>(store: &S) -> Result<(), StoreError> {
     let mut up = store
         .begin_upload(

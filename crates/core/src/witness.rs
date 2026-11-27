@@ -38,8 +38,8 @@
 //!
 //! A token outlives its upload in [`Sent`]: once the replica has acknowledged this
 //! process's put of a file, the token says what the replica holds under that key, and the
-//! level-1 compaction that reads the staged copy compares it with the token where it once
-//! read the replica's copy back (`crate::maintain`, `docs/decisions/D236.md`).
+//! level-1 compaction that reads the staged copy compares it with the token instead of
+//! reading the replica's copy back (`crate::maintain`, `docs/decisions/D236.md`).
 
 use std::collections::BTreeMap;
 use std::io::{Read, Seek};
@@ -62,7 +62,6 @@ use crate::upload::StagedPages;
 /// keeps the frames), and the boot pass witnesses no more than this many.
 pub(crate) const MAX_WITNESSED: usize = 4096;
 
-/// How much of a file one store read asks for during the boot pass.
 const READ: ReadLen = ReadLen::CHUNK;
 
 /// Proof that a staged file's bytes were made by this process or matched the

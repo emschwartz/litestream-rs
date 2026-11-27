@@ -817,13 +817,10 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
     /// The seal and the PASSIVE, both under the barrier.
     ///
     /// The read transaction the checkpoint call retakes is the proof of continuity from here
-    /// on, and it is sound only because the barrier keeps writers out from the seal's
-    /// committed read until that retake: the hold begins at `synced == committed`. So the
-    /// position is pinned to it as the call returns, on every answer but a lost retake, and
-    /// stays pinned through whatever fails later (a busy bump, a release that failed, a step
-    /// over the new generation). A writer that restarts the WAL after the barrier is released
-    /// is then followed by the next sync; before, a fault in between left the position
-    /// unpinned and that restart cost a snapshot of the whole database.
+    /// on, sound only because the barrier keeps writers out from the seal's committed read
+    /// until that retake. So the position is pinned to it as the call returns, on every
+    /// answer but a lost retake, and stays pinned through any later fault: a writer that
+    /// restarts the WAL after the barrier is released is then followed, not snapshotted.
     async fn seal_and_checkpoint(&mut self) -> Result<CheckpointRun, Fault> {
         self.step(Step::Incremental(self.position())).await?;
         let sealed = matches!(self.staged.reached, Reached::Through(_));

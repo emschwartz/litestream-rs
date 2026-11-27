@@ -5,16 +5,16 @@
 //! is read from the local copy and every other level from the replica.
 //!
 //! Each input is read through one stream (one GET on S3, as Go's compactor opens each
-//! input once), in bounded chunks, through its own decoder (the shared
-//! `LtxRead`, which ends a file at its first short chunk); the pages of all
-//! inputs are merged in ascending page order and the newest input holding a
-//! page wins. A page above the output's commit is dropped, and the lock page
-//! never appears because [PageNo] cannot hold it. Memory is one read window
-//! ([`Role::COMPACT_WINDOW`]: at most 128 KiB from staging and 1 MiB from the replica, the
-//! role's [`Role::COMPACT_BUDGET`] shared out) and one
-//! page per input plus the encoder's output buffer, whatever the database size: the output page index (at most 30 bytes a page) is the only thing that
-//! grows with it. Go's fan-in is unbounded (upstream #1467); a level with more
-//! files than [MAX_INPUTS] is compacted into several files by the caller.
+//! input once), in bounded chunks, through its own decoder (the shared `LtxRead`, which ends
+//! a file at its first short chunk); the pages of all inputs are merged in ascending page
+//! order and the newest input holding a page wins. A page above the output's commit is
+//! dropped, and the lock page never appears because [PageNo] cannot hold it. Memory is one
+//! read window ([`Role::COMPACT_WINDOW`]: at most 128 KiB from staging and 1 MiB from the
+//! replica, the role's [`Role::COMPACT_BUDGET`] shared out) and one page per input plus the
+//! encoder's output buffer, whatever the database size: the output page index (at most 30
+//! bytes a page) is the only thing that grows with it. Go's fan-in is unbounded (upstream
+//! #1467); a level with more files than [MAX_INPUTS] is compacted into several files by the
+//! caller.
 //!
 //! The output header follows ltx v0.5.3 `compactor.go`: page size, commit, max
 //! TXID and timestamp come from the last input, min TXID and pre-apply checksum
@@ -498,7 +498,6 @@ impl Input {
         }
     }
 
-    /// Fills the waiting page, or records the verified end.
     async fn fill<'s, S: ObjectStore>(
         &mut self,
         read: (&'s S, &mut Slot<'s>),
@@ -594,7 +593,6 @@ impl Merge {
         self.peak = self.peak.max(held);
     }
 
-    /// The output header, from the first and last inputs.
     fn output_header(&self, level: Level, range: TxidRange) -> Result<Header, CompactError> {
         let (first, last) = (&self.first, self.last());
         if level.is_snapshot() && !first.header.is_snapshot() {
@@ -678,8 +676,8 @@ impl Merge {
         }
     }
 
-    /// Every neighbouring pair of tracked inputs must chain, checked once all
-    /// are verified; returns the last input's verified summary.
+    /// Checks that every neighbouring pair of tracked inputs chains, once all are verified;
+    /// returns the last input's verified summary.
     fn verified_chain(&self) -> Result<Verified, CompactError> {
         let mut before = &self.first;
         for after in &self.rest {
@@ -956,7 +954,7 @@ impl Compacting {
         })
     }
 
-    /// Ends the compaction: its upload is aborted, so nothing of it stays as scratch.
+    /// Aborts the upload, so nothing stays as scratch.
     pub(crate) async fn abort(self) {
         abort_quietly(self.upload).await;
     }

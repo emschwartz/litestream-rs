@@ -38,7 +38,6 @@ const UP: Duration = Duration::from_secs(30);
 const BIG_ROWS: u32 = 2000;
 /// S3's minimum part and both writers' default: a larger object went up in parts.
 const PART: u64 = 5 * 1024 * 1024;
-/// Commits per handover turn, each staged before the next.
 const COMMITS: u32 = 8;
 
 /// The MinIO of `just compat-s3`, reachable; fails without it. `None` only when the runner
@@ -313,10 +312,8 @@ fn turn(
 ) -> Option<Summary> {
     let kind = process.kind();
     process.wait_up(UP).expect("the process comes up");
-    // On a fresh database the first commit waits for the first staged file: Go before v0.5.4
-    // stalls for good when its first sync meets a commit SQLite has not finished writing to
-    // the WAL. It stages transaction 1 at the WAL header with no frames, and every later sync
-    // fails "prev WAL offset is less than the header size" (upstream issue #900, fixed by #901).
+    // The first commit waits for the first staged file: Go before v0.5.4 stalls for good
+    // otherwise (see handover.rs; upstream #900, fixed by #901).
     let mut at = match previous {
         Some(prev) => Some(prev),
         None => Some(wait_staged_past(&mut process, fixture, None).expect("the first file")),
@@ -343,8 +340,6 @@ fn turn(
     boot
 }
 
-/// The switch to `kind` continued: its first file is the next transaction and holds only
-/// what the commits wrote.
 fn assert_continued(name: &str, kind: Kind, boot: Option<&Summary>, prev: Txid) {
     let boot = boot.expect("a boot file after a previous position");
     let fields = boot.header.fields();

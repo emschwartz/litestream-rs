@@ -130,8 +130,6 @@ pub fn check(
     within(Bound::CommitCalls, counts.commits, commits)
 }
 
-/// Each compaction level holds at most the bytes of the level below plus one
-/// header and trailer per output ([`PER_FILE`]), over the files in `sized`.
 fn level_bytes(sized: &BTreeMap<FileKey, u64>, lost: &BTreeSet<Txid>) -> Result<(), Violation> {
     let mut bytes = [0_u64; 10];
     let mut files = [0_u64; 10];

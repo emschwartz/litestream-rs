@@ -112,7 +112,7 @@ fn no_tracked_file_holds_a_credential() {
             offenders.push(name.to_owned());
         }
     }
-    // 2,400 today: a listing that came back empty or a root that moved scans nothing.
+    // A listing that came back empty or a root that moved scans nothing.
     assert!(
         scanned >= MIN_SCANNED,
         "scanned only {scanned} tracked files"
