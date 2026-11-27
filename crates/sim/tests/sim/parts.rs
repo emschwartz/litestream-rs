@@ -216,13 +216,42 @@ mod scenarios {
         assert_eq!(report.reach.get("parts.landed.faulted"), 0);
     }
 
-    /// The second part's request fails while the first, third and fourth are started. The
-    /// engine reports the replica's fault at its next tick, nothing of that upload is ever
-    /// published, the three parts left send nothing more, and the file goes up again whole.
+    /// A part's request fails on every try its upload gives it (eight, as Go's uploader does).
+    fn part_fails_for_good() -> impl Iterator<Item = Op> {
+        (0..8).map(|_| Op::HttpFault(HttpFault::Internal(HttpShape::UploadPart)))
+    }
+
+    /// One request of a part fails while the first, third and fourth are started. The part is
+    /// sent again by its own upload, the parts already sent stay, and the engine never sees a
+    /// fault: the file is published once, from its first slice, with no second upload.
+    #[test]
+    fn a_part_that_fails_once_is_sent_again_and_the_file_is_not_restarted() {
+        let mut ops = sliced(4);
+        ops.push(Op::HttpFault(HttpFault::Internal(HttpShape::UploadPart)));
+        ops.extend(lands(&[1]));
+        ops.push(Op::Tick);
+        ops.extend(the_rest());
+        let report = run(&ops);
+        let all = events(&report);
+        assert!(
+            !all.iter()
+                .any(|event| matches!(event, Event::Retrying { .. })),
+            "{all:?}"
+        );
+        assert_eq!(report.reach.get("http_fault.unmet"), 0);
+        // The fault was met, by one landing, and the part still ended well.
+        assert_eq!(report.reach.get("parts.landed.faulted"), 1);
+        assert_eq!(report.reach.get("parts.uploads_open_at_the_end"), 0);
+    }
+
+    /// Every try of the second part's request fails while the first, third and fourth are
+    /// started. The engine reports the replica's fault at its next tick, nothing of that upload
+    /// is ever published, the three parts left send nothing more, and the file goes up again
+    /// whole.
     #[test]
     fn a_part_that_fails_with_others_started_fails_the_upload_and_the_file_goes_again() {
         let mut ops = sliced(4);
-        ops.push(Op::HttpFault(HttpFault::Internal(HttpShape::UploadPart)));
+        ops.extend(part_fails_for_good());
         ops.extend(lands(&[1]));
         ops.push(Op::Tick);
         ops.extend(the_rest());
@@ -245,7 +274,7 @@ mod scenarios {
         let mut ops = sliced(5);
         ops.extend(lands(&[0, 0, 0, 0]));
         ops.push(Op::Tick);
-        ops.push(Op::HttpFault(HttpFault::Internal(HttpShape::UploadPart)));
+        ops.extend(part_fails_for_good());
         ops.extend(lands(&[1]));
         ops.push(Op::Tick);
         ops.extend(the_rest());

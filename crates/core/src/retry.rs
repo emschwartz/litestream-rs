@@ -662,7 +662,8 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> Upload for RetryingUpload<S, P, E> 
         .await
     }
 
-    /// Not a call of its own: it sends nothing, and a part's failure is the upload's.
+    /// Not a call of its own: it sends nothing, and a part's failure, once the store has sent it
+    /// again as often as it will, is the upload's.
     async fn flight(&mut self, rest: Rest) -> Result<Flight, StoreError> {
         self.inner.flight(rest).await
     }

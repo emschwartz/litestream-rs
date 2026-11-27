@@ -13,6 +13,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use crate::request::{HttpRequest, Method};
 use crate::response::quoted_md5;
@@ -167,6 +168,7 @@ struct Script {
     pending: VecDeque<Fault>,
     seen: Vec<RequestShape>,
     fired: Vec<Fault>,
+    paused: Vec<Duration>,
 }
 
 /// A [`Transport`] that plays its script over `inner`.
@@ -214,6 +216,12 @@ impl<T: Transport> FaultTransport<T> {
         self.script().fired.clone()
     }
 
+    /// Every wait a part asked for between two tries, oldest first; none is waited out.
+    #[must_use]
+    pub fn pauses(&self) -> Vec<Duration> {
+        self.script().paused.clone()
+    }
+
     /// Every request seen so far, oldest first.
     #[must_use]
     pub fn requests(&self) -> Vec<RequestShape> {
@@ -242,6 +250,10 @@ impl<T: Transport> FaultTransport<T> {
 }
 
 impl<T: Transport> Transport for FaultTransport<T> {
+    fn pause(&self, wait: Duration) {
+        self.script().paused.push(wait);
+    }
+
     fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
         let shape = Shape::of(&request);
         let Some(fault) = self.record_and_take(&request, shape) else {

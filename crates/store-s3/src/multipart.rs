@@ -29,7 +29,13 @@
 //! Parts are sent one request each on the store's lanes (`upload.rs`, `lanes.rs`); each is
 //! judged alone when its upload collects its answer, and its ETag is kept by its number.
 
-use lsr_core::{CorruptCause, FileKey, PartNumber, StoreError, StoreOp, WriteMode};
+use std::num::NonZeroU8;
+use std::time::Duration;
+
+use lsr_core::{
+    Class, CorruptCause, FileKey, PartNumber, RetryPolicy, StoreError, StoreOp, WriteMode,
+    classify as retry_class,
+};
 use lsr_ltx::Timestamp;
 
 use crate::classify::{S3Code, classify, error_in_ok_body, invalid_data, is_not_implemented};
@@ -66,6 +72,31 @@ pub(crate) struct Sent {
 /// The HTTP status a store-side "too large" is reported as: an upload that
 /// would need more than 10000 parts.
 pub(crate) const PAYLOAD_TOO_LARGE: u16 = 413;
+
+/// How a part is sent again: Go's uploader sends each request through the AWS SDK's retryer,
+/// which litestream sets to 8 attempts with waits of at most one second
+/// (`.upstream/litestream/s3/replica_client.go:605`, `newTransportRetryer`).
+const PART_RETRY: RetryPolicy = RetryPolicy {
+    attempts: NonZeroU8::MIN.saturating_add(7),
+    base: Duration::from_millis(100),
+    cap: Duration::from_secs(1),
+};
+
+/// How long to wait before sending a part again after its `failures`-th failure (1-based),
+/// or `None` when the failure is the part's last: the attempts are used up, the error is not
+/// one a repeat can mend, or the store named a wait longer than the cap. The wait has no
+/// jitter: the lanes of one upload do not fail in step for long, and the store holds no
+/// entropy source.
+pub(crate) fn part_retry_wait(failures: u32, err: &StoreError) -> Option<Duration> {
+    if failures >= u32::from(PART_RETRY.attempts.get()) {
+        return None;
+    }
+    match retry_class(err) {
+        Class::Retry => Some(PART_RETRY.bound(failures)),
+        Class::RetryAfter(wait) if wait <= PART_RETRY.cap => Some(wait),
+        Class::RetryAfter(_) | Class::Missing | Class::Permanent => None,
+    }
+}
 
 /// What one UploadPart's answer must prove: a success status, and an ETag to name the part
 /// by in the complete.

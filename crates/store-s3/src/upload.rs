@@ -41,9 +41,14 @@
 //! (`docs/decisions/D233.md`). Such an upload is written through the source only: a plain
 //! `write` of it is refused, since the store no longer holds what it would send.
 //!
-//! **Failure.** The first part that fails is the upload's failure, returned by the call that
-//! collects it; nothing is retried here. Parts not yet on the wire are then not sent, and the
-//! caller restarts the upload. A failed upload sends no AbortMultipartUpload itself: its id
+//! **Failure.** A part whose request fails in a way worth repeating (a 5xx, a throttle, a dropped
+//! connection) is sent again by the thread that sent it, from the same verified bytes (the
+//! buffer it still holds, or its source's cells), a bounded number of times and with a capped
+//! wait between tries, as
+//! Go's uploader retries a part (`multipart.rs`, `docs/decisions/D308.md`); the parts already
+//! uploaded stay. A source that gave nothing is never retried here. The first part that fails
+//! for good is the upload's failure, returned by the call that collects it. Parts not yet on
+//! the wire are then not sent, and the caller restarts the upload. A failed upload sends no AbortMultipartUpload itself: its id
 //! goes on the orphan list (`orphans.rs`).
 //!
 //! **Leaving.** `commit` and `abort` return only when every part started has ended, so
@@ -83,12 +88,33 @@ use lsr_ltx::Timestamp;
 use crate::again::{Run, Sealed};
 use crate::classify::{classify, transient_other};
 use crate::lanes::{Condvar, Mutex, MutexGuard, lock};
-use crate::multipart::{PAYLOAD_TOO_LARGE, Sent, completed_etag_fits, judge_part};
+use crate::multipart::{PAYLOAD_TOO_LARGE, Sent, completed_etag_fits, judge_part, part_retry_wait};
 use crate::part_plan::{MAX_OBJECT, held_width, plan_part_size};
 use crate::request::{HttpRequest, Precondition, RequestBuilder, RequestError, UploadId};
 use crate::sigv4::PayloadHash;
 use crate::store::Inner;
 use crate::transport::{HttpResponse, StreamedRequest, Transport};
+
+/// Why a send gave no answer: the request failed, or the source gave nothing to send. Only
+/// the first is a failure of the wire, so only it is tried again (`Report::run`).
+pub(crate) enum Unsent {
+    Request(StoreError),
+    Source(StoreError),
+}
+
+impl From<StoreError> for Unsent {
+    fn from(err: StoreError) -> Self {
+        Self::Request(err)
+    }
+}
+
+impl From<Unsent> for StoreError {
+    fn from(unsent: Unsent) -> Self {
+        match unsent {
+            Unsent::Request(err) | Unsent::Source(err) => err,
+        }
+    }
+}
 
 /// A part's bytes: a buffer, or what is needed to read them again.
 pub(crate) enum Bytes {
@@ -107,8 +133,8 @@ impl Bytes {
 
     /// Sends the write `build` makes for these bytes, with them as its body, and returns the
     /// answer and the length the request declared. A buffer's SHA-256 is taken as the request
-    /// is built, after the clock and the credentials are read, and the buffer is moved into it,
-    /// never copied. A part written from a source carries the SHA-256 of what it was handed
+    /// is built, after the clock and the credentials are read, and the buffer is lent to it,
+    /// never copied, and given back. A part written from a source carries the SHA-256 of what it was handed
     /// and streams its body from the bytes it kept or from a second read (`again.rs`); a read
     /// that gave nothing is the result, whatever the request came to.
     /// Nothing is sent once `stop` is set.
@@ -121,22 +147,29 @@ impl Bytes {
             Timestamp,
             (u64, PayloadHash),
         ) -> Result<HttpRequest, RequestError>,
-    ) -> Result<(HttpResponse, u64), StoreError> {
+    ) -> Result<(HttpResponse, u64), Unsent> {
         let op = StoreOp::Upload;
         if stop.load(Ordering::Relaxed) {
-            return Err(StoreError::Transient {
+            return Err(Unsent::Request(StoreError::Transient {
                 op,
                 kind: io::ErrorKind::Interrupted,
-            });
+            }));
         }
         match self {
             Self::Held(buf) => {
-                let body = std::mem::take(buf);
+                // The request borrows the buffer and gives it back, so a part that fails is
+                // still held, verified by the hash it was signed with, for its next try.
+                let body = Arc::new(std::mem::take(buf));
                 let len = u64::try_from(body.len()).unwrap_or(u64::MAX);
-                let mut request =
-                    inner.request(op, |b, now| build(b, now, (len, PayloadHash::of(&body))))?;
-                request.set_body(body);
-                Ok((inner.send(op, request)?, len))
+                let sent = inner
+                    .request(op, |b, now| build(b, now, (len, PayloadHash::of(&body))))
+                    .and_then(|mut request| {
+                        request.set_body(Arc::clone(&body));
+                        inner.send(op, request)
+                    });
+                // The transport has dropped the request by now; a copy only if one lingers.
+                *buf = Arc::try_unwrap(body).unwrap_or_else(|shared| shared.to_vec());
+                Ok((sent?, len))
             }
             Self::Again(part) => {
                 let sized = (part.len(), part.sha256());
@@ -145,7 +178,7 @@ impl Bytes {
                 let streamed = StreamedRequest::new(request, sized.0, &mut body);
                 let sent = inner.send_streamed(op, streamed);
                 if let Some(unread) = body.failed() {
-                    return Err(unread);
+                    return Err(Unsent::Source(unread));
                 }
                 Ok((sent?, sized.0))
             }
@@ -299,13 +332,31 @@ impl<T: Transport> Report<T> {
         if let Some(mut bytes) = self.bytes.take() {
             let (key, id) = (&self.shared.key, &self.shared.id);
             let number = self.number;
-            self.sent = Some(
-                bytes
-                    .send_with(&self.shared.inner, &self.shared.stop, |b, now, sized| {
-                        b.upload_part_of(now, key, id, number, sized)
-                    })
-                    .map(|(response, _)| response),
-            );
+            let (inner, stop) = (&self.shared.inner, &self.shared.stop);
+            let mut failures = 0_u32;
+            self.sent = Some(loop {
+                let sent = bytes.send_with(inner, stop, |b, now, sized| {
+                    b.upload_part_of(now, key, id, number, sized)
+                });
+                failures = failures.saturating_add(1);
+                let (answer, failed) = match sent {
+                    Ok((response, _)) => {
+                        let failed = judge_part(key, number, &response).err();
+                        (Ok(response), failed)
+                    }
+                    // A source that gave nothing is the source's failure, not the wire's.
+                    Err(Unsent::Source(err)) => break Err(err),
+                    Err(Unsent::Request(err)) => (Err(err.clone()), Some(err)),
+                };
+                let wait = failed
+                    .as_ref()
+                    .filter(|_| !stop.load(Ordering::Relaxed))
+                    .and_then(|err| part_retry_wait(failures, err));
+                let Some(wait) = wait else {
+                    break answer;
+                };
+                inner.pause(wait);
+            });
         }
     }
 }

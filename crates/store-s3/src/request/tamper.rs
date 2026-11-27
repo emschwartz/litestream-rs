@@ -45,7 +45,7 @@ impl HttpRequest {
     /// Replaces the body, keeping the hash the request was signed with.
     #[must_use]
     pub fn tamper_body(mut self, body: Vec<u8>) -> Self {
-        self.body = body;
+        self.body = body.into();
         self
     }
 }

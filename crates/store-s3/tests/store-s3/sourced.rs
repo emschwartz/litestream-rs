@@ -9,6 +9,7 @@ use std::io::ErrorKind;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
@@ -437,7 +438,9 @@ fn a_parts_failure_is_reported_as_what_it_was() {
         (true, unreadable()),
     ] {
         let harness = FakeHarness::with_config(small_parts());
-        harness.wire.push(reset.clone());
+        for _ in 0..8 {
+            harness.wire.push(reset.clone());
+        }
         let source = Source::of(&bytes);
         if unread {
             source.fail_read(1, unreadable());
@@ -446,9 +449,140 @@ fn a_parts_failure_is_reported_as_what_it_was() {
         assert_eq!(failed, Err(want), "unread: {unread}");
         assert_eq!(
             count(&harness.wire, Shape::UploadPart),
-            usize::from(!unread)
+            if unread { 0 } else { 8 }
         );
         assert_eq!(stored(&harness, &key(0, 1, 1)), None);
+    }
+}
+
+/// A request that fails the way a busy bucket does is sent again for its part alone, from the
+/// source's verified bytes: the upload keeps the parts it has, completes, and starts nothing
+/// over. Go's uploader does the same through the AWS SDK's retryer (D308).
+#[test]
+fn a_part_that_fails_once_is_sent_again_and_the_upload_completes() {
+    let bytes = body(2 * PART + 100_000);
+    for (fault, waits) in [
+        (
+            Fault::Status {
+                on: Shape::UploadPart,
+                status: 500,
+                code: Some("InternalError"),
+                retry_after: None,
+            },
+            vec![Duration::from_millis(100)],
+        ),
+        (
+            Fault::Transport {
+                on: Shape::UploadPart,
+                err: TransportError::Io(ErrorKind::ConnectionReset),
+            },
+            vec![Duration::from_millis(100)],
+        ),
+        (
+            Fault::Status {
+                on: Shape::UploadPart,
+                status: 503,
+                code: Some("SlowDown"),
+                retry_after: Some("1"),
+            },
+            vec![Duration::from_secs(1)],
+        ),
+    ] {
+        let harness = FakeHarness::with_config(small_parts());
+        harness.wire.push(Fault::Pass {
+            on: Shape::UploadPart,
+        });
+        harness.wire.push(fault.clone());
+        let source = Source::of(&bytes);
+        put_from(&harness.store, &key(0, 1, 1), &bytes, CELL, &source).unwrap();
+        assert_eq!(count(&harness.wire, Shape::UploadPart), 4, "{fault:?}");
+        assert_eq!(
+            count(&harness.wire, Shape::CreateMultipart),
+            1,
+            "no restart"
+        );
+        assert_eq!(count(&harness.wire, Shape::Complete), 1);
+        assert_eq!(harness.wire.pauses(), waits, "{fault:?}");
+        assert_eq!(stored(&harness, &key(0, 1, 1)).as_deref(), Some(&bytes[..]));
+    }
+}
+
+/// A part that keeps failing is tried eight times, as Go tries it, with each wait under the
+/// one-second cap, and then fails the upload with the error it last got: nothing is published,
+/// the parts after it are not sent, and the open upload waits on the orphan list.
+#[test]
+fn a_part_that_keeps_failing_aborts_the_upload_after_eight_tries() {
+    let bytes = body(PART + 100_000);
+    let harness = FakeHarness::with_config(small_parts());
+    for _ in 0..9 {
+        harness.wire.push(Fault::Status {
+            on: Shape::UploadPart,
+            status: 500,
+            code: Some("InternalError"),
+            retry_after: None,
+        });
+    }
+    let source = Source::of(&bytes);
+    let failed = put_from(&harness.store, &key(0, 1, 1), &bytes, CELL, &source);
+    assert!(
+        matches!(
+            failed,
+            Err(StoreError::Transient {
+                op: StoreOp::Upload,
+                ..
+            })
+        ),
+        "{failed:?}"
+    );
+    assert_eq!(
+        count(&harness.wire, Shape::UploadPart),
+        8,
+        "the part, then nothing"
+    );
+    assert_eq!(count(&harness.wire, Shape::Complete), 0);
+    let ms = |ms| Duration::from_millis(ms);
+    assert_eq!(
+        harness.wire.pauses(),
+        [
+            ms(100),
+            ms(200),
+            ms(400),
+            ms(800),
+            ms(1000),
+            ms(1000),
+            ms(1000)
+        ]
+    );
+    assert_eq!(harness.store.pending_orphans(), 1);
+    assert_eq!(stored(&harness, &key(0, 1, 1)), None);
+}
+
+/// A failure a repeat cannot mend is not repeated: a refusal, a wait the store names beyond
+/// the cap, and a source that gave nothing.
+#[test]
+fn a_part_failure_a_repeat_cannot_mend_is_not_repeated() {
+    let bytes = body(PART + 100_000);
+    for fault in [
+        Fault::Status {
+            on: Shape::UploadPart,
+            status: 403,
+            code: Some("AccessDenied"),
+            retry_after: None,
+        },
+        Fault::Status {
+            on: Shape::UploadPart,
+            status: 503,
+            code: Some("SlowDown"),
+            retry_after: Some("30"),
+        },
+    ] {
+        let harness = FakeHarness::with_config(small_parts());
+        harness.wire.push(fault.clone());
+        let source = Source::of(&bytes);
+        let failed = put_from(&harness.store, &key(0, 1, 1), &bytes, CELL, &source);
+        assert!(failed.is_err(), "{fault:?}");
+        assert_eq!(count(&harness.wire, Shape::UploadPart), 1, "{fault:?}");
+        assert!(harness.wire.pauses().is_empty(), "{fault:?}");
     }
 }
 

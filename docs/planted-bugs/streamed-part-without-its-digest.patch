@@ -1,9 +1,9 @@
 diff --git a/crates/store-s3/src/upload.rs b/crates/store-s3/src/upload.rs
-index e13b72951..09e1f59c7 100644
+index 93c78dea0..8bf743433 100644
 --- a/crates/store-s3/src/upload.rs
 +++ b/crates/store-s3/src/upload.rs
-@@ -139,7 +139,7 @@ impl Bytes {
-                 Ok((inner.send(op, request)?, len))
+@@ -172,7 +172,7 @@ impl Bytes {
+                 Ok((sent?, len))
              }
              Self::Again(part) => {
 -                let sized = (part.len(), part.sha256());

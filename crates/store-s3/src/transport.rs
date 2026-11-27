@@ -24,7 +24,6 @@ use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Arc, PoisonError};
-#[cfg(any(feature = "ureq", feature = "reqwest"))]
 use std::time::Duration;
 
 // Under `--cfg shuttle` (`just shuttle`) the batch runs on shuttle's scheduler, which explores
@@ -452,6 +451,13 @@ pub trait Transport: Send + Sync + 'static {
     /// then not sent, or ends short of the length it declared.
     fn send_streamed(&self, request: StreamedRequest<'_>) -> Result<HttpResponse, TransportError> {
         self.send(request.into_buffered()?)
+    }
+
+    /// Waits `wait` on the calling thread, between a part's attempts (`multipart.rs`). The
+    /// default waits for nothing, so the in-memory and fault-injecting transports stay
+    /// deterministic and a test records the waits instead; the socket clients sleep.
+    fn pause(&self, wait: Duration) {
+        let _ = wait;
     }
 
     /// The lanes the parts of this store's uploads are sent on, at most `most` at once
