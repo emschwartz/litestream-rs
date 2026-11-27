@@ -2,6 +2,6 @@
 # the replicator's writes-held flag after it closes. Re-expressed against the busy handler that
 # replaced the commit hook (docs/decisions/D192.md).
 name = "gate-leaks-its-flag"
-fix = "70f61c6"
+fix = "e7426329f"
 package = "lsr-sqlite"
 tests = ["gate::tests::the_handler_is_set_up_once_and_freed_with_its_connection"]

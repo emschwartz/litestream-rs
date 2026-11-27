@@ -1,6 +1,6 @@
 # The HTTP request is built from a copy of the part body: every part in flight is held twice.
 name = "part-body-copied"
-fix = "48cf8e021"
+fix = "20eb65cc6"
 package = "lsr-store-s3"
 tests = [
     "memory::an_upload_through_the_real_client_holds_five_parts_in_flight_and_one_more",

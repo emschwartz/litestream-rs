@@ -1,4 +1,4 @@
 name = "clock-window-is-permission"
-fix = "cf4edfa7c"
+fix = "0a03798f6"
 package = "lsr-store-s3"
 tests = ["classify::tests::a_signature_outside_its_time_window_is_the_clock"]

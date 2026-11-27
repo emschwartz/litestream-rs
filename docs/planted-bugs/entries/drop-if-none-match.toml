@@ -1,7 +1,7 @@
 # The uploader asks the bucket to refuse a taken level-0 key (If-None-Match: *); the store stops
 # sending the header.
 name = "drop-if-none-match"
-fix = "92613ce"
+fix = "27936dd33"
 package = "lsr-store-s3"
 test_bin = "store-s3"
 tests = [

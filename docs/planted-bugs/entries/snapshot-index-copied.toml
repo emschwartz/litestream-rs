@@ -1,6 +1,6 @@
 # A snapshot does not hand its index onward in pieces, so the whole index lands in the output buffer at the end of the file and the buffer doubles over it.
 name = "snapshot-index-copied"
-fix = "f005779a1"
+fix = "efc92fe3f"
 package = "lsr-core"
 test_bin = "core"
 tests = [

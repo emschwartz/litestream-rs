@@ -1,6 +1,6 @@
 # The same plant, against the memory gate that reads inputs from a directory.
 name = "compaction-window-unshared-fs"
-fix = "e7aafe56e"
+fix = "efc92fe3f"
 package = "lsr-store-fs"
 patch = "compaction-window-unshared"
 test_bin = "store-fs"
