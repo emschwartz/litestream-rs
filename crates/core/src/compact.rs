@@ -853,7 +853,7 @@ impl Compacting {
             if self.trailer.is_none() && len < self.merge.budget.flush {
                 break;
             }
-            // Every pass hands over a byte, so the count down cannot stand still.
+            // Every pass hands over a byte, so the count down cannot stand still (checked below).
             if len == 0 {
                 break;
             }
@@ -864,6 +864,9 @@ impl Compacting {
             let out = self.buf.out();
             let sent = self.handoff.send(&mut self.upload, out, room);
             left = sent.await.map_err(CompactError::Dest)?;
+            if left == Some(room) {
+                return Err(CompactError::Bug(BugSite::Encode.hit()));
+            }
         }
         let Some(trailer) = self.trailer.filter(|_| self.buf.whole()) else {
             return Ok(None);

@@ -247,7 +247,8 @@ impl Snapshotting {
         let mut reader = self.reader(wal)?;
         let plan = Plan::new(&self.map, None, self.commit, self.page_size);
         // Zero once the budget is spent: a loop on a nonzero count cannot be left spinning on a
-        // wrong comparison, and every pass hands over a byte.
+        // wrong comparison, and every pass must hand over a byte (an encoded but unsent byte
+        // waits whenever the file is not whole), so a pass that leaves the room as it was is a bug.
         let mut left = NonZeroU64::new(budget);
         let open = self
             .open
@@ -264,6 +265,7 @@ impl Snapshotting {
                 .encode(&plan, &mut reader, db, pages, self.pinned)?;
             let sent = self.handoff.send(open, self.filling.out(), room);
             left = sent.await.map_err(|err| S::fault(&err))?;
+            crate::invariant!(left != Some(room), BugSite::Encode);
         }
         pages.pin_past(self.filling.next());
         if !self.filling.whole() {
