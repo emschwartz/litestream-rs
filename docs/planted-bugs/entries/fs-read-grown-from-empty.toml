@@ -1,6 +1,6 @@
 # A directory read grown from empty: each compaction input holds twice its read.
 name = "fs-read-grown-from-empty"
-fix = "8bf156d6b"
+fix = "20eb65cc6"
 package = "lsr-store-fs"
 tests = [
     "memory::a_compaction_holds_its_share_of_the_budget_per_replica_input",

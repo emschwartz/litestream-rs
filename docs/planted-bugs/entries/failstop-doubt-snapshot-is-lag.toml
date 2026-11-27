@@ -1,5 +1,5 @@
 name = "failstop-doubt-snapshot-is-lag"
-fix = "87cd10d"
+fix = "143c17132"
 package = "lsr-core"
 tests = [
     "lag::a_doubt_snapshot_at_boot_over_a_replicated_wal_is_not_lag",

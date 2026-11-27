@@ -2,7 +2,7 @@
 # the snapshot, which on a database of tens of GB with steady writes meant three snapshot downloads
 # and a failure; the fix keeps the applied files and plans only the rest.
 name = "restore-tail-restarts"
-fix = "81aa67141"
+fix = "08d1263ff"
 package = "lsr-core"
 tests = [
     "a_file_compacted_away_while_the_snapshot_downloads_keeps_the_snapshot",
