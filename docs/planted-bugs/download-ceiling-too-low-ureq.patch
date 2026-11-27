@@ -1,17 +1,13 @@
 diff --git a/crates/store-s3/src/ureq_transport.rs b/crates/store-s3/src/ureq_transport.rs
-index c60f0a1cc..2596e29f7 100644
+index 2d544d9b8..920c68ed2 100644
 --- a/crates/store-s3/src/ureq_transport.rs
 +++ b/crates/store-s3/src/ureq_transport.rs
-@@ -125,11 +125,7 @@ impl UreqTransport {
-     ) -> http::Request<S> {
-         // A GET's answer is read under its own cap once its length is declared
-         // (`read_body`); this one is the ceiling over request and answer together.
--        let answer = if request.method() == http::Method::GET {
--            MAX_BODY
--        } else {
--            0
--        };
-+        let answer = 0;
-         self.agent
-             .configure_request(request)
-             .timeout_global(Some(self.bounds.cap(body_len.saturating_add(answer))))
+@@ -285,7 +285,7 @@ impl Transport for UreqTransport {
+ 
+     fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
+         let head_only = request.method() == Method::Head;
+-        let cap = self.bounds.for_request(&request);
++        let cap = self.bounds.cap(u64::try_from(request.body().len()).unwrap_or(u64::MAX));
+         self.exchange(self.capped(Self::build(&request)?, cap), head_only)
+     }
+ 

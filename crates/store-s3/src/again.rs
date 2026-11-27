@@ -66,15 +66,8 @@ pub(crate) struct Run {
 }
 
 /// A whole part, or an object's last one, let go of: what its request and its body need.
-pub(crate) struct Sealed {
-    offset: u64,
-    size: u64,
-    len: u64,
-    hash: PayloadHash,
-    kept: Vec<u8>,
-    cells: Vec<Seen>,
-    reader: Box<dyn Again>,
-}
+/// Nothing more can be added to it.
+pub(crate) struct Sealed(Run);
 
 /// What a pass ends with when the upload is over: nobody reads it.
 fn stopped() -> StoreError {
@@ -128,7 +121,6 @@ impl Run {
     }
 
     /// The memory the cells and the kept bytes hold.
-    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn held(&self) -> usize {
         self.cells
             .capacity()
@@ -161,48 +153,38 @@ impl Run {
     /// The part, whole.
     pub(crate) fn seal(mut self) -> Sealed {
         if !self.cell.is_empty() {
-            self.cells.push(self.cell.seen());
+            self.cells.push(std::mem::take(&mut self.cell).seen());
         }
-        Sealed {
-            offset: self.offset,
-            size: self.size,
-            len: self.len,
-            hash: PayloadHash::from_hasher(self.hash),
-            kept: self.kept,
-            cells: self.cells,
-            reader: self.reader,
-        }
+        Sealed(self)
     }
 }
 
 impl Sealed {
     /// The part's length.
     pub(crate) const fn len(&self) -> u64 {
-        self.len
+        self.0.len
     }
 
     /// The memory the cells and the kept bytes hold.
     pub(crate) fn held(&self) -> usize {
-        self.cells
-            .capacity()
-            .saturating_mul(std::mem::size_of::<Seen>())
-            .saturating_add(self.kept.capacity())
+        self.0.held()
     }
 
     /// The SHA-256 of the part as first handed over.
-    pub(crate) const fn sha256(&self) -> PayloadHash {
-        self.hash
+    pub(crate) fn sha256(&self) -> PayloadHash {
+        PayloadHash::from_hasher(self.0.hash.clone())
     }
 
     /// The part's bytes as they are sent: the ones kept, or each cell read again.
     pub(crate) fn body<'a>(&'a mut self, stop: &'a AtomicBool) -> Body<'a> {
-        let kept = self.len <= self.size;
+        let run = &mut self.0;
+        let kept = run.len <= run.size;
         Body {
-            reader: &mut *self.reader,
-            cells: if kept { [].iter() } else { self.cells.iter() },
-            offset: self.offset,
+            reader: &mut *run.reader,
+            cells: if kept { [].iter() } else { run.cells.iter() },
+            offset: run.offset,
             stop,
-            cell: Cow::Borrowed(if kept { &self.kept } else { &[] }),
+            cell: Cow::Borrowed(if kept { &run.kept } else { &[] }),
             given: 0,
             failed: None,
         }

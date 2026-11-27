@@ -1,12 +1,12 @@
 diff --git a/crates/store-s3/src/ureq_transport.rs b/crates/store-s3/src/ureq_transport.rs
-index c60f0a1cc..936caf5a4 100644
+index 2d544d9b8..6ddab5612 100644
 --- a/crates/store-s3/src/ureq_transport.rs
 +++ b/crates/store-s3/src/ureq_transport.rs
-@@ -132,7 +132,7 @@ impl UreqTransport {
-         };
+@@ -134,7 +134,7 @@ impl UreqTransport {
+     ) -> http::Request<S> {
          self.agent
              .configure_request(request)
--            .timeout_global(Some(self.bounds.cap(body_len.saturating_add(answer))))
+-            .timeout_global(Some(cap))
 +            .timeout_global(Some(self.bounds.stall()))
              .build()
      }

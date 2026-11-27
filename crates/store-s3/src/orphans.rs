@@ -67,8 +67,7 @@ impl<T: Transport> Inner<T> {
     /// One AbortMultipartUpload. An upload that is already gone is aborted.
     pub(crate) fn abort_upload(&self, key: &FileKey, id: &UploadId) -> Result<(), StoreError> {
         let op = StoreOp::Upload;
-        let request = self.request(op, |b, now| b.abort_multipart(now, key, id))?;
-        let response = self.send(op, request)?;
+        let response = self.call(op, |b, now| b.abort_multipart(now, key, id))?;
         if response.status() == 404
             && S3Code::from_body(response.body()) == Some(S3Code::NoSuchUpload)
         {
@@ -107,8 +106,7 @@ impl<T: Transport> Inner<T> {
             let at = markers
                 .as_ref()
                 .map(|(key, id)| (key.as_str(), id.as_str()));
-            let request = self.request(op, |b, now| b.list_uploads(now, at))?;
-            let response = self.send(op, request)?;
+            let response = self.call(op, |b, now| b.list_uploads(now, at))?;
             classify(op, None, None, &response)?;
             let page =
                 parse_uploads(&response, self.prefix()).map_err(|err| err.into_store(op, None))?;

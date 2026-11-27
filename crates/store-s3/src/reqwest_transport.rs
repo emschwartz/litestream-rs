@@ -51,8 +51,10 @@ use tokio::task::JoinSet;
 
 use crate::lanes::{Lanes, Sender};
 use crate::request::{HttpRequest, Method};
-use crate::transport::{Bounds, HttpResponse, Opened, Transport, TransportError};
-use crate::transport::{MAX_BODY, map_io};
+use crate::transport::{
+    BodyCap, Bounds, Declared, HttpResponse, Opened, Transport, TransportError,
+};
+use crate::transport::{MAX_BODY, PANICKED, map_io};
 use crate::trust;
 
 /// Why a [`ReqwestTransport`] could not be built.
@@ -184,17 +186,7 @@ impl ReqwestTransport {
         let mut builder = self
             .client
             .request(method(request.method()), request.url().as_str())
-            .timeout(
-                self.bounds.cap(
-                    u64::try_from(request.body().len())
-                        .unwrap_or(u64::MAX)
-                        .saturating_add(if request.method() == Method::Get {
-                            MAX_BODY
-                        } else {
-                            0
-                        }),
-                ),
-            )
+            .timeout(self.bounds.for_request(request))
             .body(request.body().to_vec());
         // Every header is sent as signed, `content-length` included: hyper keeps a
         // given length (it equals the body's), and without it an empty PUT goes
@@ -216,30 +208,21 @@ fn method(method: Method) -> reqwest::Method {
     }
 }
 
-impl ReqwestTransport {
-    fn drive<F>(&self, future: F, failed: F::Output) -> F::Output
-    where
-        F: std::future::Future + Send,
-        F::Output: Send,
-    {
-        self.driver.drive(future, failed)
-    }
-}
-
 impl Driver {
     /// Drives `future` to completion. Inside a runtime, where `block_on`
-    /// panics, it runs on a fresh thread, which is outside every runtime.
-    fn drive<F>(&self, future: F, failed: F::Output) -> F::Output
+    /// panics, it runs on a fresh thread, which is outside every runtime; a panic there is
+    /// [`PANICKED`].
+    fn drive<T, F>(&self, future: F) -> Result<T, TransportError>
     where
-        F: std::future::Future + Send,
-        F::Output: Send,
+        T: Send,
+        F: std::future::Future<Output = Result<T, TransportError>> + Send,
     {
         if Handle::try_current().is_ok() {
             std::thread::scope(|scope| {
                 scope
                     .spawn(|| self.block_on(future))
                     .join()
-                    .unwrap_or(failed)
+                    .unwrap_or(Err(PANICKED))
             })
         } else {
             self.block_on(future)
@@ -256,28 +239,22 @@ struct Streamed {
     response: reqwest::Response,
     /// What is left of the chunk being handed out.
     pending: VecDeque<u8>,
-    began: std::time::Instant,
-    allowed: Duration,
+    cap: BodyCap,
 }
 
 impl crate::transport::Body for Streamed {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
         if self.pending.is_empty() {
-            if self.began.elapsed() > self.allowed {
-                return Err(TransportError::Timeout);
-            }
+            self.cap.check()?;
             let stall = self.stall;
             let response = &mut self.response;
-            let next = self.driver.drive(
-                async move {
-                    tokio::time::timeout(stall, response.chunk())
-                        .await
-                        .map_err(|_elapsed| TransportError::Timeout)?
-                        .map_err(|err| map_error(&err))
-                        .map(|chunk| chunk.map(|bytes| bytes.to_vec()))
-                },
-                Err(TransportError::Io(io::ErrorKind::Other)),
-            )?;
+            let next = self.driver.drive(async move {
+                tokio::time::timeout(stall, response.chunk())
+                    .await
+                    .map_err(|_elapsed| TransportError::Timeout)?
+                    .map_err(|err| map_error(&err))
+                    .map(|chunk| chunk.map(|bytes| bytes.to_vec()))
+            })?;
             let Some(chunk) = next else { return Ok(0) };
             self.pending = chunk.into();
         }
@@ -286,38 +263,30 @@ impl crate::transport::Body for Streamed {
 }
 
 impl Transport for ReqwestTransport {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "a socket timeout runs on the real clock, which no injected clock reaches"
-    )]
     fn open(&self, request: HttpRequest) -> Result<Opened, TransportError> {
         // No cap over the whole exchange, which would cut a long body: the request up to its
         // head has the stall bound, and the body its own cap from there.
         let builder = self.build(&request).timeout(Duration::MAX);
         let stall = self.bounds.stall();
-        let response = self.drive(
-            async move {
-                tokio::time::timeout(stall, builder.send())
-                    .await
-                    .map_err(|_elapsed| TransportError::Timeout)?
-                    .map_err(|err| map_error(&err))
-            },
-            Err(TransportError::Io(io::ErrorKind::Other)),
-        )?;
+        let response = self.driver.drive(async move {
+            tokio::time::timeout(stall, builder.send())
+                .await
+                .map_err(|_elapsed| TransportError::Timeout)?
+                .map_err(|err| map_error(&err))
+        })?;
         let head = HttpResponse::new(
             response.status().as_u16(),
             head_of(&response),
             Vec::new(),
             true,
         );
-        let allowed = self.bounds.cap(response.content_length().unwrap_or(0));
+        let cap = BodyCap::start(self.bounds, response.content_length().unwrap_or(0));
         let body = Streamed {
             driver: Arc::clone(&self.driver),
             stall,
             response,
             pending: VecDeque::new(),
-            began: std::time::Instant::now(),
-            allowed,
+            cap,
         };
         Ok((head, Box::new(body)))
     }
@@ -326,7 +295,7 @@ impl Transport for ReqwestTransport {
         let head_only = request.method() == Method::Head;
         let sent = u64::try_from(request.body().len()).unwrap_or(u64::MAX);
         let exchange = exchange(self.build(&request), head_only, self.bounds, sent);
-        self.drive(exchange, Err(TransportError::Io(io::ErrorKind::Other)))
+        self.driver.drive(exchange)
     }
 
     /// Each sender thread drives its own request with `block_on`, as the replicator thread
@@ -348,10 +317,9 @@ impl Transport for ReqwestTransport {
                 (self.build(request), request.method() == Method::Head, sent)
             })
             .collect();
-        let failed = (0..count)
-            .map(|_| Err(TransportError::Io(io::ErrorKind::Other)))
-            .collect();
-        self.drive(exchange_many(builders, limit, self.bounds), failed)
+        self.driver
+            .drive(async { Ok(exchange_many(builders, limit, self.bounds).await) })
+            .unwrap_or_else(|err| (0..count).map(|_| Err(err)).collect())
     }
 }
 
@@ -369,7 +337,7 @@ async fn exchange_many(
     bounded(tasks, limit)
         .await
         .into_iter()
-        .map(|slot| slot.unwrap_or(Err(TransportError::Io(io::ErrorKind::Other))))
+        .map(|slot| slot.unwrap_or(Err(PANICKED)))
         .collect()
 }
 
@@ -418,10 +386,7 @@ async fn exchange(
         .map_err(|err| map_error(&err))?;
     let status = response.status().as_u16();
     let headers = head_of(&response);
-    let declared = response.content_length();
-    let expected = declared
-        .filter(|_| !head_only)
-        .map_or(0, |n| n.min(MAX_BODY));
+    let declared = Declared::new(response.content_length(), head_only);
     let mut body = Vec::new();
     let read = async {
         loop {
@@ -438,10 +403,10 @@ async fn exchange(
             }
         }
     };
-    tokio::time::timeout(bounds.cap(expected), read)
+    tokio::time::timeout(bounds.cap(declared.expected()), read)
         .await
         .map_err(|_elapsed| TransportError::Timeout)??;
-    let complete = head_only || declared.is_none_or(|n| u64::try_from(body.len()) == Ok(n));
+    let complete = declared.complete(body.len());
     Ok(HttpResponse::new(status, headers, body, complete))
 }
 

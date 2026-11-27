@@ -37,7 +37,7 @@ use ureq::tls::RootCerts;
 use crate::ConfigError;
 use crate::lanes::{Lanes, Sender};
 use crate::request::{HttpRequest, Method};
-use crate::transport::{Bounds, Opened};
+use crate::transport::{BodyCap, Bounds, Declared, Opened};
 use crate::transport::{
     HttpResponse, MAX_BODY, StreamedRequest, Transport, TransportError, map_io, send_on_threads,
 };
@@ -124,42 +124,42 @@ impl UreqTransport {
         self
     }
 
-    /// `request` with the cap on its whole life that a body of `body_len` bytes allows: the
-    /// agent's own bounds only cut a request that makes no progress.
+    /// `request` with `cap` on its whole life: the agent's own bounds only cut a request that
+    /// makes no progress. A GET's answer is read under its own cap once its length is declared
+    /// (`read_body`); this one is the ceiling over request and answer together.
     fn capped<S: ureq::AsSendBody>(
         &self,
         request: http::Request<S>,
-        body_len: u64,
+        cap: Duration,
     ) -> http::Request<S> {
-        // A GET's answer is read under its own cap once its length is declared
-        // (`read_body`); this one is the ceiling over request and answer together.
-        let answer = if request.method() == http::Method::GET {
-            MAX_BODY
-        } else {
-            0
-        };
         self.agent
             .configure_request(request)
-            .timeout_global(Some(self.bounds.cap(body_len.saturating_add(answer))))
+            .timeout_global(Some(cap))
             .build()
     }
 
     /// The request as ureq takes it. The body is borrowed from `request`, not copied: a
     /// multipart part is megabytes, and an upload sends a batch of them at once.
     fn build(request: &HttpRequest) -> Result<http::Request<&[u8]>, TransportError> {
-        let mut builder = http::Request::builder()
-            .method(method_name(request.method()))
-            .uri(request.url().as_str());
-        for (name, value) in request.headers() {
-            // ureq frames the body from its length, which is the value that was signed.
-            if *name != "content-length" {
-                builder = builder.header(*name, value.as_str());
-            }
-        }
-        builder
+        // ureq frames the body from its length, which is the value that was signed.
+        head(request, false)
             .body(request.body())
             .map_err(|_malformed| TransportError::Io(io::ErrorKind::InvalidInput))
     }
+}
+
+/// The method, URL and headers of `request`, with its `content-length` or without.
+fn head(request: &HttpRequest, keep_length: bool) -> http::request::Builder {
+    request
+        .headers()
+        .iter()
+        .filter(|(name, _)| keep_length || *name != "content-length")
+        .fold(
+            http::Request::builder()
+                .method(request.method().as_str())
+                .uri(request.url().as_str()),
+            |builder, (name, value)| builder.header(*name, value.as_str()),
+        )
 }
 
 fn root_certs(roots: Roots) -> RootCerts {
@@ -192,33 +192,18 @@ fn head_of(response: &http::Response<ureq::Body>) -> Vec<(String, String)> {
         .collect()
 }
 
-fn method_name(method: Method) -> &'static str {
-    match method {
-        Method::Get => "GET",
-        Method::Head => "HEAD",
-        Method::Put => "PUT",
-        Method::Post => "POST",
-        Method::Delete => "DELETE",
-    }
-}
-
 /// Reads the response body, bounded by `MAX_BODY`, into a buffer sized to the `expected`
 /// length the server declared. Growing one from empty doubles it, so a 4 MiB ranged
 /// read would hold an 8 MiB allocation, and a restore keeps eight of them in flight.
 ///
 /// The body may take the time `expected` bytes need at the floor rate, from its first byte
 /// (`Bounds::cap`); a read that makes no progress ends sooner, at ureq's per-read bound.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "a socket timeout runs on the real clock, which no injected clock reaches"
-)]
 fn read_body(
     response: &mut http::Response<ureq::Body>,
     expected: u64,
     bounds: Bounds,
 ) -> Result<Vec<u8>, TransportError> {
-    let allowed = bounds.cap(expected);
-    let began = std::time::Instant::now();
+    let cap = BodyCap::start(bounds, expected);
     let mut body = Vec::with_capacity(usize::try_from(expected).unwrap_or(0));
     let mut reader = response.body_mut().with_config().limit(MAX_BODY).reader();
     let mut buf = [0_u8; CONN_BUFFER];
@@ -230,9 +215,7 @@ fn read_body(
             return Ok(body);
         };
         body.extend_from_slice(chunk);
-        if began.elapsed() > allowed {
-            return Err(TransportError::Timeout);
-        }
+        cap.check()?;
     }
 }
 
@@ -246,35 +229,31 @@ impl UreqTransport {
         let mut response = self.agent.run(request).map_err(|err| map_error(&err))?;
         let status = response.status().as_u16();
         let headers = head_of(&response);
-        let declared = headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-            .and_then(|(_, value)| value.trim().parse::<u64>().ok());
-        // A HEAD answer declares the length of a body it does not send.
-        let expected = declared
-            .filter(|_| !head_only)
-            .map_or(0, |n| n.min(MAX_BODY));
-        let body = read_body(&mut response, expected, self.bounds)?;
-        let complete = head_only || declared.is_none_or(|n| u64::try_from(body.len()) == Ok(n));
+        let declared = Declared::new(
+            headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, value)| value.trim().parse::<u64>().ok()),
+            head_only,
+        );
+        let body = read_body(&mut response, declared.expected(), self.bounds)?;
+        let complete = declared.complete(body.len());
         Ok(HttpResponse::new(status, headers, body, complete))
     }
 }
 
 /// A streamed GET's body: read from the connection as the caller asks, each socket read bounded
-/// by ureq's per-read stall bound, and the whole body by `allowed` from its head, the time its
+/// by ureq's per-read stall bound, and the whole body by `cap` from its head, the time its
 /// declared length needs at the floor rate (`Bounds::cap`). A 4 GiB body may take the stall
 /// bound plus about 73 hours; a body that stops moving fails at the stall bound.
 struct Streamed {
     reader: ureq::BodyReader<'static>,
-    began: std::time::Instant,
-    allowed: Duration,
+    cap: BodyCap,
 }
 
 impl crate::transport::Body for Streamed {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
-        if self.began.elapsed() > self.allowed {
-            return Err(TransportError::Timeout);
-        }
+        self.cap.check()?;
         self.reader
             .read(buf)
             .map_err(|err| map_error(&ureq::Error::from(err)))
@@ -282,10 +261,6 @@ impl crate::transport::Body for Streamed {
 }
 
 impl Transport for UreqTransport {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "a socket timeout runs on the real clock, which no injected clock reaches"
-    )]
     fn open(&self, request: HttpRequest) -> Result<Opened, TransportError> {
         // No ceiling over the whole exchange, which would cut a long body: connecting, sending
         // and the wait for the head each have the stall bound, and the body its own cap below.
@@ -302,19 +277,16 @@ impl Transport for UreqTransport {
             true,
         );
         let body = Streamed {
-            allowed: self
-                .bounds
-                .cap(response.body().content_length().unwrap_or(0)),
+            cap: BodyCap::start(self.bounds, response.body().content_length().unwrap_or(0)),
             reader: response.into_body().into_reader(),
-            began: std::time::Instant::now(),
         };
         Ok((head, Box::new(body)))
     }
 
     fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
         let head_only = request.method() == Method::Head;
-        let len = u64::try_from(request.body().len()).unwrap_or(u64::MAX);
-        self.exchange(self.capped(Self::build(&request)?, len), head_only)
+        let cap = self.bounds.for_request(&request);
+        self.exchange(self.capped(Self::build(&request)?, cap), head_only)
     }
 
     /// The body is read from the request's reader as it goes: the parts of an upload that
@@ -324,18 +296,13 @@ impl Transport for UreqTransport {
         &self,
         mut streamed: StreamedRequest<'_>,
     ) -> Result<HttpResponse, TransportError> {
-        let mut builder = http::Request::builder()
-            .method(method_name(streamed.request().method()))
-            .uri(streamed.request().url().as_str());
-        for (name, value) in streamed.request().headers() {
-            builder = builder.header(*name, value.as_str());
-        }
-        let len = streamed.len();
+        let cap = self.bounds.cap(streamed.len());
+        let builder = head(streamed.request(), true);
         let body: &mut dyn io::Read = streamed.body();
         let request = builder
             .body(ureq::SendBody::from_reader(body))
             .map_err(|_malformed| TransportError::Io(io::ErrorKind::InvalidInput))?;
-        self.exchange(self.capped(request, len), false)
+        self.exchange(self.capped(request, cap), false)
     }
 
     fn lanes(&self, most: NonZeroUsize) -> Arc<dyn Lanes> {

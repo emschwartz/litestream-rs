@@ -40,6 +40,8 @@ use thiserror::Error;
 
 use crate::lanes::{Inline, Lanes};
 use crate::request::HttpRequest;
+#[cfg(any(feature = "ureq", feature = "reqwest"))]
+use crate::request::Method;
 
 /// A write whose body is read while it is sent: a part, or a small object, that the upload
 /// did not keep and reads again from its source (`again.rs`). The request carries every
@@ -294,6 +296,83 @@ impl Bounds {
             u64::try_from(nanos).unwrap_or(u64::MAX),
         ))
     }
+
+    /// The most `request` may take in all: its body, plus for a GET the largest answer that
+    /// is held whole (an answer's own length is capped again once it is declared).
+    pub(crate) fn for_request(self, request: &HttpRequest) -> Duration {
+        let answer = if request.method() == Method::Get {
+            MAX_BODY
+        } else {
+            0
+        };
+        self.cap(
+            u64::try_from(request.body().len())
+                .unwrap_or(u64::MAX)
+                .saturating_add(answer),
+        )
+    }
+}
+
+/// The time a response body may take from its head, for the length it declares
+/// ([`Bounds::cap`]). Checked between reads: a body that stops moving fails at the client's
+/// own stall bound instead.
+#[cfg(any(feature = "ureq", feature = "reqwest"))]
+pub(crate) struct BodyCap {
+    began: std::time::Instant,
+    allowed: Duration,
+}
+
+#[cfg(any(feature = "ureq", feature = "reqwest"))]
+impl BodyCap {
+    /// Starts the clock for a body of `declared` bytes.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a socket timeout runs on the real clock, which no injected clock reaches"
+    )]
+    pub(crate) fn start(bounds: Bounds, declared: u64) -> Self {
+        Self {
+            began: std::time::Instant::now(),
+            allowed: bounds.cap(declared),
+        }
+    }
+
+    /// [`TransportError::Timeout`] once the body has taken longer than it may.
+    pub(crate) fn check(&self) -> Result<(), TransportError> {
+        if self.began.elapsed() > self.allowed {
+            Err(TransportError::Timeout)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// The length a response declares and whether it has a body at all, for a client that reads
+/// whole answers.
+#[cfg(any(feature = "ureq", feature = "reqwest"))]
+#[derive(Clone, Copy)]
+pub(crate) struct Declared {
+    len: Option<u64>,
+    /// A HEAD answer declares the length of a body it does not send.
+    head_only: bool,
+}
+
+#[cfg(any(feature = "ureq", feature = "reqwest"))]
+impl Declared {
+    pub(crate) const fn new(len: Option<u64>, head_only: bool) -> Self {
+        Self { len, head_only }
+    }
+
+    /// The bytes to expect, at most `MAX_BODY`.
+    pub(crate) fn expected(self) -> u64 {
+        self.len
+            .filter(|_| !self.head_only)
+            .map_or(0, |n| n.min(MAX_BODY))
+    }
+
+    /// Whether `body_len` bytes are all the answer declared.
+    pub(crate) fn complete(self, body_len: usize) -> bool {
+        self.head_only || self.len.is_none_or(|n| u64::try_from(body_len) == Ok(n))
+    }
 }
 
 /// The largest response body held whole: twice the largest ranged read (a test pins
@@ -385,6 +464,9 @@ pub trait Transport: Send + Sync + 'static {
     }
 }
 
+/// What a request whose send panicked ends as, whichever thread ran it.
+pub(crate) const PANICKED: TransportError = TransportError::Io(io::ErrorKind::Other);
+
 /// The stack of a batch worker thread: an HTTPS request through ureq and
 /// rustls needs 48 KiB (see `lsr-replica`'s `stack` module for how that was
 /// measured), and this is about five times that.
@@ -442,7 +524,7 @@ pub fn send_on_threads<T: Transport + ?Sized>(
             let next = queue.lock().unwrap_or_else(PoisonError::into_inner).next();
             let Some((at, request)) = next else { break };
             let sent = panic::catch_unwind(AssertUnwindSafe(|| send(request)));
-            let result = sent.unwrap_or(Err(TransportError::Io(io::ErrorKind::Other)));
+            let result = sent.unwrap_or(Err(PANICKED));
             if let Some(slot) = slots
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -468,7 +550,7 @@ pub fn send_on_threads<T: Transport + ?Sized>(
         .into_inner()
         .unwrap_or_else(PoisonError::into_inner)
         .into_iter()
-        .map(|slot| slot.unwrap_or(Err(TransportError::Io(io::ErrorKind::Other))))
+        .map(|slot| slot.unwrap_or(Err(PANICKED)))
         .collect()
 }
 
