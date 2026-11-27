@@ -557,9 +557,13 @@ async fn fill<R: Read + Seek, P: PageSource, U: FileSink>(
     while !filling.whole() {
         filling.encode(plan, wal, db, pages, false)?;
         let out = filling.out();
+        // A file not yet whole has bytes waiting after every step, and the buffer handed over is
+        // the one `whole` reads: either failing would spin this loop forever.
+        crate::invariant!(!out.is_empty(), BugSite::Encode);
         upload.write(out).await.map_err(|err| map_store(&err))?;
         bytes.add(out);
         out.clear();
+        crate::invariant!(filling.out().is_empty(), BugSite::Encode);
     }
     Ok(Filled {
         last: filling.last,
