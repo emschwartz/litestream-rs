@@ -108,8 +108,9 @@ impl Profile {
 /// Requests any tick may make on a store besides those for the files it puts: a boot's
 /// listings (ten levels, three times over) and its reads (a header and a body for the newest
 /// file of each level, and the upload lane's read-back), or a merge's first slice opening each
-/// of its inputs (at most `MAX_INPUTS`, 128, and ten listings), with room to spare.
-pub const BASE_REQUESTS: u64 = 256;
+/// of its inputs (at most `MAX_INPUTS`, 128, and the swarm's merge of 126 inputs from the
+/// replica made 263 requests, two an input) and ten listings, with room to spare.
+pub const BASE_REQUESTS: u64 = 320;
 
 /// Staging reads one part the S3 replica sends may make of its staged bytes, before the
 /// re-reads each cell is allowed (`s3_rereads`): room to spare.
