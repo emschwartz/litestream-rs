@@ -2192,6 +2192,7 @@ impl PageSource for SimPages {
         let mut state = lock(&self.state);
         state.app_call(Some(SourceOp::PageCount));
         state.faults.take(SourceOp::PageCount)?;
+        // As lsr-sqlite's `ensure_read_lock_held`: a lapsed read transaction is taken again.
         state.begin(Conn::Ours);
         if std::mem::take(&mut state.faults.empty_db) {
             return Ok(DbPages::EMPTY);

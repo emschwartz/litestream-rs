@@ -713,6 +713,7 @@ pub(super) fn short_level_zero(
         return Ok(nothing);
     };
     let anchor = now.min(newest_created_at);
+    // One run per level: `merged_ranges` folds each run in one ascending pass.
     let listed_levels: Vec<&[FileInfo]> = Level::COMPACTION
         .iter()
         .map(|level| listed.level(*level))

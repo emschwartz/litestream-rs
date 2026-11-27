@@ -1,9 +1,9 @@
 diff --git a/crates/store-s3/src/part_plan.rs b/crates/store-s3/src/part_plan.rs
 --- a/crates/store-s3/src/part_plan.rs
 +++ b/crates/store-s3/src/part_plan.rs
-@@ -38,7 +38,7 @@
- ///
- /// Never below `configured`, so an object that fit before is sent as before.
+@@ -56,7 +56,7 @@
+ /// in [`MAX_PARTS`] parts when `configured` does not. `None` past [`MAX_OBJECT`].
+ /// Never below `configured`.
  pub(crate) fn plan_part_size(configured: PartSize, len: u64) -> Option<PartSize> {
 -    if len > MAX_OBJECT {
 +    if len > MAX_OBJECT.saturating_mul(2) {

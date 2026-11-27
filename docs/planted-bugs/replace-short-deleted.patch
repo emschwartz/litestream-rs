@@ -1,11 +1,10 @@
 diff --git a/crates/core/src/publish.rs b/crates/core/src/publish.rs
-index dd397f64..29730d46 100644
 --- a/crates/core/src/publish.rs
 +++ b/crates/core/src/publish.rs
-@@ -306,7 +306,7 @@ where
-         // commit left would end the replica a transaction early with no error (seed 0x1dc); the
-         // object stays, a restore that meets it stops with a typed error, and the caller writes
-         // it again or removes it under a reason of its own (`Removal`).
+@@ -402,7 +402,7 @@
+         // A replace may land on a key that held an acknowledged object. Deleting would end the
+         // replica a transaction early with no error; the object stays and a restore that meets it
+         // stops with a typed error (see the module doc).
 -        WriteMode::Replace => false,
 +        WriteMode::Replace => delete().await.is_ok(),
      };
