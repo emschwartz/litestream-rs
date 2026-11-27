@@ -1,0 +1,11 @@
+# A slice of a level-9 snapshot takes a torn wal-index header read (a writer between its two
+# copies) as a fault: the snapshot ends and starts again from its first page, holding
+# checkpoints back for the whole first attempt as well.
+name = "snapshot-ends-on-a-torn-read"
+fix = "claude/snapshot-torn-read"
+package = "lsr-core"
+tests = [
+    "snapshot::tests::a_torn_wal_index_read_does_not_end_the_snapshot",
+    "snapshot::tests::torn_wal_index_reads_end_the_snapshot_only_past_the_bound",
+]
+unaided_miss = "a snapshot that fails starts again on its own schedule and every oracle accepts the retry: none judges a snapshot begun twice"
