@@ -237,7 +237,7 @@ impl Shared {
         self.update(|state| {
             let outcome = *state.outcome.get_or_insert(outcome);
             state.health.phase = match outcome {
-                StopOutcome::Drained { .. } | StopOutcome::DeadlineReached { .. } => {
+                StopOutcome::Drained { .. } | StopOutcome::DeadlineReached(_) => {
                     Phase::Stopped(StopCause::Shutdown)
                 }
                 StopOutcome::Stopped(cause) => Phase::Stopped(cause),
@@ -632,7 +632,7 @@ fn boot_answer(state: &State, died: bool) -> Option<Readiness> {
         Some(StopOutcome::Stopped(cause)) => return Some(Readiness::Stopped(cause)),
         // A drain before the first boot finished is answered by the phase below, which the
         // outcome set to `Stopped(Shutdown)` under the same lock.
-        Some(StopOutcome::Drained { .. } | StopOutcome::DeadlineReached { .. }) | None => {}
+        Some(StopOutcome::Drained { .. } | StopOutcome::DeadlineReached(_)) | None => {}
     }
     // Ready once the boot is judged too: until then writes are held (`Gate::Pending`), so an
     // application told it may go would meet "database is locked".
@@ -683,10 +683,10 @@ fn stop_answer(state: &State, died: bool, now: Timestamp, deadline: Timestamp) -
 /// the WAL file's length `wal_len` bounds the unsynced bytes from above, so they are counted
 /// high, never low.
 fn cut_off(left: Unfinished, wal_len: u64) -> StopOutcome {
-    StopOutcome::DeadlineReached {
+    StopOutcome::DeadlineReached(Unfinished {
         unsynced_wal_bytes: left.unsynced_wal_bytes.max(wal_len),
-        staged_not_uploaded: left.staged_not_uploaded,
-    }
+        ..left
+    })
 }
 
 /// [`stop_answer`], blocking the calling thread. The WAL is measured after the state's lock
@@ -967,18 +967,18 @@ mod tests {
         };
         assert_eq!(
             cut_off(left, 115_009_832),
-            StopOutcome::DeadlineReached {
+            StopOutcome::DeadlineReached(Unfinished {
                 unsynced_wal_bytes: 115_009_832,
                 staged_not_uploaded: 0,
-            }
+            })
         );
         // A WAL cut back below the measure (a checkpoint the tick ran) keeps the measure.
         assert_eq!(
             cut_off(left, 4_096),
-            StopOutcome::DeadlineReached {
+            StopOutcome::DeadlineReached(Unfinished {
                 unsynced_wal_bytes: 325_480,
                 staged_not_uploaded: 0,
-            }
+            })
         );
     }
 }

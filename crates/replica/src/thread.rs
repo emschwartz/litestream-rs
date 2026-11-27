@@ -447,7 +447,7 @@ impl Worker {
         if let Some(rebuilt) = self.rebuilt {
             // No engine runs to see the deadline pass: it ends here.
             if self.stop.is_some_and(|deadline| now >= deadline) {
-                return Turn::Done(deadline_reached(self.counted_high()));
+                return Turn::Done(StopOutcome::DeadlineReached(self.counted_high()));
             }
             if rebuilt.until > now {
                 return self.park_until(Some(rebuilt.until));
@@ -567,7 +567,7 @@ impl Worker {
         match tick {
             Tick::Ran { event, next } => self.ran(event, next, now),
             Tick::Drained { txid } => Turn::Done(StopOutcome::Drained { txid }),
-            Tick::DeadlineReached(left) => Turn::Done(deadline_reached(left)),
+            Tick::DeadlineReached(left) => Turn::Done(StopOutcome::DeadlineReached(left)),
             Tick::Stopped(cause) => self.stopped(cause),
         }
     }
@@ -1026,12 +1026,5 @@ fn emit_to(sink: &mut Option<Box<dyn EventSink>>, panics: &mut u64, event: &Even
     };
     if catch_unwind(AssertUnwindSafe(|| sink.event(event))).is_err() {
         *panics = panics.saturating_add(1);
-    }
-}
-
-const fn deadline_reached(left: Unfinished) -> StopOutcome {
-    StopOutcome::DeadlineReached {
-        unsynced_wal_bytes: left.unsynced_wal_bytes,
-        staged_not_uploaded: left.staged_not_uploaded,
     }
 }

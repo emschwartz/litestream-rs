@@ -173,7 +173,7 @@ pub use lsr_core::{
     InventoryError, L0Retention, Maintenance, MaxUnreplicatedAge, NoPlan, OtherWriter, PlanOutcome,
     Report, Response, Responses, RestoreError as EngineRestoreError, RestoreOptions, RestoreTarget,
     Restored, Severity, SinkOp, SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall, StopCause,
-    StoreError, Task, Trip, VerifyError, WhyBlocked, WorkCounts,
+    StoreError, Task, Trip, Unfinished, VerifyError, WhyBlocked, WorkCounts,
 };
 pub use lsr_ltx::{DbChecksum, Timestamp, Txid};
 pub use lsr_sqlite::{ConnectionSetup, Refusal, SetupError, ffi};
