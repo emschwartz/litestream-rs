@@ -381,6 +381,19 @@ impl Daemon {
                     ("endpoint", config.endpoint().url().as_str().into()),
                 ];
                 self.log.info("replicating to", &fields);
+                // A large part size or concurrency is visible here, where it is set.
+                let fields = [
+                    ("part_size", config.part_size().get().into()),
+                    (
+                        "concurrency",
+                        u64::try_from(config.concurrency().get())
+                            .unwrap_or(u64::MAX)
+                            .into(),
+                    ),
+                    ("max_buffered_bytes", config.max_buffered().into()),
+                ];
+                self.log
+                    .info("multipart upload may hold in memory", &fields);
             }
         }
     }
@@ -837,6 +850,43 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    /// An S3 replica logs the most memory one buffered upload may hold, so a large part size
+    /// or concurrency is visible when the daemon starts (`docs/decisions/D309.md`).
+    #[test]
+    fn an_s3_replica_logs_what_a_buffered_upload_may_hold() {
+        let lines = Lines::default();
+        let text = "dbs:\n  - path: /data/a.db\n    replica:\n      type: s3\n      bucket: b\n      path: p\n      \
+                    region: us-east-1\n      access-key-id: AKID\n      secret-access-key: SECRET\n      \
+                    part-size: 100MiB\n      concurrency: 10\n";
+        let loaded = GoConfig::parse(text, Expand::Off, &ProcessEnv).unwrap();
+        let plan = lsr_config::plan(&loaded.config, &ProcessEnv).unwrap();
+        let log = Arc::new(Logger::to(
+            lsr_config::LogLevel::Info,
+            lsr_config::LogFormat::Text,
+            Runtime::system().clock,
+            Box::new(lines.clone()),
+        ));
+        let empty = GoConfig::parse("dbs: []\n", Expand::Off, &ProcessEnv).unwrap();
+        let none = lsr_config::plan(&empty.config, &ProcessEnv).unwrap();
+        let daemon = Daemon::start(
+            &none,
+            false,
+            log,
+            Started::default(),
+            Board::default(),
+            Mode::Serving,
+        );
+        daemon.initialized(plan.dbs().first().unwrap());
+        let out = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            out.contains("msg=\"multipart upload may hold in memory\""),
+            "{out}"
+        );
+        assert!(out.contains("part_size=104857600"), "{out}");
+        assert!(out.contains("concurrency=10"), "{out}");
+        assert!(out.contains("max_buffered_bytes=1153433600"), "{out}");
     }
 
     /// A drain cut by its deadline says in words that the replica lacks the newest commits,

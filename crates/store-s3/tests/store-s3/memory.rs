@@ -10,8 +10,9 @@
 //!
 //! The laws, stated from the configuration:
 //!
-//! - An upload holds at most `concurrency` parts (the batch being sent), whatever its size:
-//!   the part buffers are the request bodies, so nothing copies them.
+//! - An upload holds at most `concurrency + 1` parts (the ones being sent and the one filling),
+//!   whatever its size and with no other cap: the part buffers are the request bodies, so
+//!   nothing copies them.
 //! - An upload allocates each part's buffer once, at the part's size: a buffer regrown by doubling
 //!   leaves a ladder of blocks of other sizes that macOS keeps mapped, so a long upload at a large
 //!   part size held about its own length (measured: 6 GB for four uploads of 1.5 GiB at 100 MiB

@@ -48,8 +48,13 @@ struct Rig {
 /// A store of 5 MiB parts, `width` in flight at most, whose waiting callers land the part
 /// `pick` names.
 fn rig(width: usize, pick: impl FnMut(usize) -> usize + Send + 'static) -> Rig {
+    rig_of(PartSize::MIN, width, pick)
+}
+
+/// The same with parts of `part` bytes.
+fn rig_of(part: PartSize, width: usize, pick: impl FnMut(usize) -> usize + Send + 'static) -> Rig {
     let config = config()
-        .with_part_size(PartSize::MIN)
+        .with_part_size(part)
         .with_concurrency(NonZeroUsize::new(width).unwrap());
     let wire = Arc::new(FaultTransport::new(FakeS3::new(
         &config,
@@ -485,4 +490,25 @@ fn an_upload_that_holds_its_parts_holds_those_in_flight_and_one_more() {
         assert_eq!(rig.parts_sent(), 8);
         assert!(rig.stored().as_deref() == Some(&bytes[..]));
     }
+}
+
+/// The setting is the count, whatever the part size: 100 MiB parts and a concurrency of 2 have
+/// two parts in flight, not one (`docs/decisions/D309.md`). The memory is the parts in flight
+/// and one more.
+#[test]
+fn large_parts_still_have_the_configured_number_in_flight() {
+    const MIB: usize = 1024 * 1024;
+    let part = 100 * MIB;
+    let rig = rig_of(PartSize::new(100 * 1024 * 1024).unwrap(), 2, oldest);
+    let bytes = vec![7_u8; 2 * part];
+    let mut upload = begin(&rig.store, &key(0, 1, 1));
+    block_on(async {
+        for piece in bytes.chunks(8 * MIB) {
+            upload.write(piece).await.unwrap();
+        }
+    });
+    assert_eq!((upload.in_flight(), rig.lanes.started()), (2, 2));
+    assert!(upload.buffer_capacity() <= 3 * part);
+    block_on(upload.commit()).unwrap();
+    assert_eq!(rig.parts_sent(), 2);
 }
