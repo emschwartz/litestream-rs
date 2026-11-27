@@ -125,7 +125,7 @@ pub struct Config {
     /// issue 315). `None` (the default, as Go) reads as fast as the disk allows. A slower read
     /// holds its read transaction for longer, so the WAL grows, and the replica gets nothing
     /// newer than the read's start until the snapshot lands, for about twice the database's size
-    /// over the limit (`docs/decisions/D309.md`).
+    /// over the limit (`docs/decisions/D311.md`).
     pub snapshot_read_limit: Option<NonZeroU64>,
     /// Whether the staged files this library writes are written by a thread of their own, one
     /// block behind the engine (`lsr_store_fs::FsStore::with_write_behind`). Default `false`: no
