@@ -74,7 +74,7 @@ pub(crate) struct Shared {
     pub(crate) park: Arc<dyn Park>,
     pub(crate) database: DatabaseFile,
     /// The WAL's path, for a stop cut off inside a tick: its length then bounds what is left.
-    wal: PathBuf,
+    pub(crate) wal: PathBuf,
     pub(crate) grace: Duration,
     pub(crate) readers: Arc<AtomicUsize>,
     pub(crate) meters: Arc<Meters>,

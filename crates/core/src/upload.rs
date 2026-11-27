@@ -774,14 +774,7 @@ async fn put_step<L: Role, S: Role>(
     (in_flight, budget): (&mut InFlight, &mut u64),
 ) -> Result<Option<Uploaded>, UploadFailed> {
     let token = sending.token;
-    let reached = match sending.advance(staging, remote, budget).await {
-        Ok(Reached::End) => sending
-            .landed::<L, S>()
-            .await
-            .map(|landed| if landed { Reached::End } else { Reached::Full }),
-        reached => reached,
-    };
-    let outcome = match reached {
+    let outcome = match sending.advance(staging, remote, budget).await {
         Ok(stopped @ (Reached::Budget | Reached::Full)) => {
             sending.waits = matches!(stopped, Reached::Full);
             in_flight.0 = Some(sending);
@@ -1025,7 +1018,7 @@ enum Reached {
     /// The upload has a whole part waiting for one in flight to end: reading on would wait
     /// with it.
     Full,
-    /// The staged file ended, and verified whole.
+    /// The staged file ended, verified whole, and every part of its upload was answered.
     End,
 }
 
@@ -1142,17 +1135,17 @@ impl Sending {
                 self.ended = true;
             }
         }
-        Ok(if self.ended {
-            Reached::End
-        } else {
-            Reached::Budget
-        })
+        if self.ended {
+            return self.landed::<L, S>().await;
+        }
+        Ok(Reached::Budget)
     }
 
     /// The staged file ended and verified: tells the upload no byte follows, so it starts
-    /// its last part, and says whether every part it started has been answered. The commit
-    /// waits for that across ticks, never inside one.
-    async fn landed<L: Role, S: Role>(&mut self) -> Result<bool, PutError> {
+    /// its last part, and says whether every part it started has been answered
+    /// ([`Reached::End`]) or not ([`Reached::Full`]). The commit waits for that across
+    /// ticks, never inside one.
+    async fn landed<L: Role, S: Role>(&mut self) -> Result<Reached, PutError> {
         let Some(open) = self.open.as_mut() else {
             return Err(PutError::Before(BugSite::UploadNeverOpened.hit()));
         };
@@ -1160,7 +1153,11 @@ impl Sending {
             .flight(Rest::None)
             .await
             .map_err(|err| PutError::Before(self.notes.fault::<L, S>(&err)))?;
-        Ok(flight == Flight::Idle)
+        Ok(if flight == Flight::Idle {
+            Reached::End
+        } else {
+            Reached::Full
+        })
     }
 
     /// Commits the upload of a file that ended, verified, with every part answered. A file

@@ -271,10 +271,10 @@ pub enum CheckpointOutcome {
     Busy,
     /// The checkpoint finished or stopped short without a restart.
     NotRestarted,
-    /// A PASSIVE ran, and another connection held the write lock when the sequence bump was
-    /// due: that writer's commit, not a frame of ours, moves the WAL on, in this generation
-    /// or a new one. The position is pinned as after any PASSIVE, so the next sync follows
-    /// either.
+    /// A PASSIVE (or the PASSIVE ahead of a TRUNCATE) ran, and another connection held the
+    /// write lock when the sequence bump was due: that writer's commit, not a frame of ours,
+    /// moves the WAL on, in this generation or a new one. The position is pinned as after
+    /// any PASSIVE, so the next sync follows either.
     Overtaken,
     /// A PASSIVE that moved the WAL to a new generation.
     Restarted,
@@ -308,8 +308,8 @@ pub fn lock_busy_wait(skips: NonZeroU32, cap: Duration) -> Duration {
 ///   bump frame every tick. Here the minimum waits for the next write, and the
 ///   interval for one more interval.
 /// - A write lock that was busy at the barrier changes nothing and is asked again
-///   ([`CheckpointOutcome::LockBusy`]). A PASSIVE overtaken at its bump counts as one that
-///   did not restart the WAL at the truncate threshold, and otherwise as finished.
+///   ([`CheckpointOutcome::LockBusy`]). A checkpoint overtaken at its bump counts as a
+///   PASSIVE that did not restart the WAL at the truncate threshold, and otherwise as finished.
 /// - Every other finished checkpoint is `Idle`; it expects a bump frame unless the
 ///   protocol already synced it (a restart or a truncate does) or wrote none (an overtaken
 ///   bump).
@@ -515,10 +515,7 @@ struct Protocol<'a, W, P, C, L> {
     cfg: SyncConfig,
     /// Read after each step's committed read for that step's file.
     clock: &'a dyn Clock,
-    good: Reached,
-    files: Vec<FileInfo>,
-    witnesses: Vec<Witnessed>,
-    quiet: Vec<FileKey>,
+    staged: Staged,
     run: Option<CheckpointRun>,
 }
 
@@ -538,18 +535,19 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
 
     /// The last position that is true.
     const fn position(&self) -> Position {
-        self.good.position()
+        self.staged.reached.position()
     }
 
     fn release_read_lock(&mut self) {
-        self.good = Reached::Short(self.position().with_continuity(Continuity::Broken));
+        self.staged.reached = Reached::Short(self.position().with_continuity(Continuity::Broken));
     }
 
     /// Pinned again, but not through: the proof was consumed by the checkpoint, and our bump
     /// frame may come after the position.
     fn take_read_lock(&mut self, epoch: ReadLockHold) {
         if self.wal.epoch() == epoch {
-            self.good = Reached::Short(self.position().with_continuity(Continuity::Held(epoch)));
+            self.staged.reached =
+                Reached::Short(self.position().with_continuity(Continuity::Held(epoch)));
         }
     }
 
@@ -595,10 +593,10 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
                 ..
             } => {
                 if !changes {
-                    self.quiet.push(file.key);
+                    self.staged.quiet.push(file.key);
                 }
-                self.files.push(file);
-                self.witnesses.push(witness);
+                self.staged.files.push(file);
+                self.staged.witnesses.push(witness);
                 through
             }
             Synced::Wrote {
@@ -606,7 +604,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
                 ..
             } => return Err(BugSite::CappedCheckpointStep.hit()),
         };
-        self.good = match through.confirm(&*self.wal) {
+        self.staged.reached = match through.confirm(&*self.wal) {
             Ok(through) => Reached::Through(through),
             Err(position) => Reached::Short(position),
         };
@@ -729,7 +727,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
     /// unpinned and that restart cost a snapshot of the whole database.
     async fn seal_and_checkpoint(&mut self) -> Result<CheckpointRun, Fault> {
         self.step(Step::Incremental(self.position())).await?;
-        let sealed = matches!(self.good, Reached::Through(_));
+        let sealed = matches!(self.staged.reached, Reached::Through(_));
         let run = self.ck.checkpoint(CheckpointMode::Passive);
         self.release_read_lock();
         if sealed && run != Err(SourceError::ReadTxLost) {
@@ -786,10 +784,12 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
         staging: &staging,
         cfg: *cfg,
         clock,
-        good: Reached::Through(proof),
-        files: Vec::new(),
-        witnesses: Vec::new(),
-        quiet: Vec::new(),
+        staged: Staged {
+            reached: Reached::Through(proof),
+            files: Vec::new(),
+            witnesses: Vec::new(),
+            quiet: Vec::new(),
+        },
         run: None,
     };
     let result = match mode {
@@ -799,12 +799,7 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
         // outside the protocol.
         CheckpointMode::Full => Err(BugSite::FullCheckpointInProtocol.hit()),
     };
-    let staged = Staged {
-        reached: protocol.good,
-        files: protocol.files,
-        witnesses: protocol.witnesses,
-        quiet: protocol.quiet,
-    };
+    let staged = protocol.staged;
     match result {
         Ok(outcome) => Ok(Checkpointed {
             staged,
