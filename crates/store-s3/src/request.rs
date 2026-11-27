@@ -88,8 +88,7 @@ impl HttpRequest {
         }
     }
 
-    /// A request as a test server read it off a socket, to hand to [`FakeS3`](crate::FakeS3)
-    /// behind a real HTTP listener.
+    /// A request as a test server read it off a socket, for [`FakeS3`](crate::FakeS3).
     #[cfg(feature = "testing")]
     #[must_use]
     pub fn from_wire(
@@ -101,7 +100,7 @@ impl HttpRequest {
         Self::new(method, url, headers, body)
     }
 
-    /// A request to `url` with these headers and no body, for transport tests.
+    /// A bodiless request to `url`, for transport tests.
     #[cfg(test)]
     pub(crate) fn for_test(method: Method, url: Url, headers: Vec<(&'static str, String)>) -> Self {
         Self {
@@ -563,9 +562,8 @@ impl RequestBuilder {
         self.bare(now, (Method::Get, Some(&object)), &[], extra)
     }
 
-    /// A single PUT with `Content-Length` (also when 0), the body's SHA-256 and the
-    /// created-at time. The created-at time is millisecond RFC 3339 with `Z`: the same instant Go's
-    /// RFC3339Nano writes (rc.go:892-898), and Go's parser reads it.
+    /// A single PUT with `Content-Length` (also when 0), the body's SHA-256 and the created-at
+    /// time, millisecond RFC 3339 with `Z`, which Go's RFC3339Nano parser reads (rc.go:892-898).
     ///
     /// # Errors
     /// [`RequestError::ClockOutOfRange`].
@@ -843,7 +841,6 @@ mod tests {
         UploadId::new("abc".to_owned())
     }
 
-    /// One request from every builder.
     fn every_request(b: &RequestBuilder) -> Vec<HttpRequest> {
         let k = key(1, 1, 5);
         let etags = vec!["\"d41d8cd98f00b204e9800998ecf8427e\"".to_owned()];
@@ -878,7 +875,6 @@ mod tests {
 
     #[test]
     fn object_key_matches_go() {
-        // Go: c.Path + "/" + fmt.Sprintf("%04x/%s", level, filename), rc.go:702.
         let prefix = Prefix::new("db/one").unwrap();
         let cases = [
             (0, 1, 1, "db/one/0000/0000000000000001-0000000000000001.ltx"),
@@ -1085,7 +1081,6 @@ mod tests {
             auth,
             "signed in name order"
         );
-        // The same headers named in another order sign another request.
         signed.reverse();
         let mut url = sent.url().clone();
         url.set_query(None);
@@ -1137,7 +1132,6 @@ mod tests {
                 auth.rsplit_once("Signature=").map(|(_, s)| s.len()),
                 Some(64)
             );
-            // Nothing of the signature rides in the URL.
             assert!(
                 req.url()
                     .query_pairs()

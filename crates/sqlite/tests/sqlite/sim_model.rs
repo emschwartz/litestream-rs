@@ -186,7 +186,6 @@ mod diff {
         }
     }
 
-    /// This crate on real files.
     struct Real {
         _dir: TempDir,
         path: std::path::PathBuf,
@@ -287,7 +286,6 @@ mod diff {
         }
     }
 
-    /// The simulator's model.
     struct Sim {
         sim: SimSqlite,
         src: SimSource,

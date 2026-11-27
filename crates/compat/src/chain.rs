@@ -431,7 +431,6 @@ impl Chain {
         self.settle_with(|_, _| Ok(()))
     }
 
-    /// One actor tick at the virtual time now.
     fn tick_once(&mut self) -> Tick {
         let (mut wal, mut db, mut ck) = (self.live.clone(), self.live.clone(), self.live.clone());
         let now = Timestamp::from_unix_millis(self.clock);
@@ -519,7 +518,6 @@ impl Chain {
         self.archive_new()
     }
 
-    /// The newest staged transaction.
     fn newest_staged(&self) -> Result<Txid, CompatError> {
         replica::list(&self.fixture.meta)?
             .files
@@ -705,8 +703,6 @@ impl Chain {
                         archive,
                     });
                 }
-                // One process writes the whole chain: the record it asks for before dropping
-                // staged files needs no file to outlive it.
                 Tick::Ran {
                     event: Event::TakeoverWanted(record),
                     ..

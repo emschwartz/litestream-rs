@@ -132,7 +132,6 @@ impl DbView {
     }
 }
 
-/// A phase's name.
 #[must_use]
 pub(crate) const fn phase_name(phase: Phase) -> &'static str {
     match phase {
@@ -145,7 +144,6 @@ pub(crate) const fn phase_name(phase: Phase) -> &'static str {
     }
 }
 
-/// A task's name.
 #[must_use]
 pub(crate) const fn task_name(task: Task) -> &'static str {
     match task {
@@ -222,13 +220,11 @@ pub(crate) const fn stop_name(cause: StopCause) -> &'static str {
     }
 }
 
-/// A snapshot cause's name.
 #[must_use]
 pub(crate) fn snapshot_name(cause: SnapshotCause) -> &'static str {
     snapshot_kind_name(SnapshotCauseKind::from(&cause))
 }
 
-/// A snapshot cause's name, without its payload.
 #[must_use]
 pub(crate) const fn snapshot_kind_name(kind: SnapshotCauseKind) -> &'static str {
     match kind {
@@ -246,7 +242,6 @@ pub(crate) const fn snapshot_kind_name(kind: SnapshotCauseKind) -> &'static str 
     }
 }
 
-/// An application notice's kind.
 #[must_use]
 pub(crate) const fn notice_name(notice: AppNotice) -> &'static str {
     match notice {

@@ -4,11 +4,11 @@
 //! today, so a new draw anywhere in the generator silently gives it another history, one that
 //! may no longer reach the bug it was written for. A recorded history cannot drift: it is the
 //! operations themselves, written out as a `const` array that [`crate::run::run_ops`] runs, to
-//! be shrunk into an explicit scenario (`docs/decisions/D165.md`). This module writes that source: each operation as a fully
-//! qualified constructor expression. Every match is exhaustive, so a new operation, fault shape
-//! or field does not compile until it says how it is written; a shape no recorded history has
-//! needed yet (most [`StoreError`] variants) is refused with [`Unprintable`] instead of written
-//! wrongly.
+//! be shrunk into an explicit scenario (`docs/decisions/D165.md`). Each operation is written as a
+//! fully qualified constructor expression. Every match is exhaustive, so a new operation, fault
+//! shape or field does not compile until it says how it is written; a shape no recorded history
+//! has needed yet (most [`StoreError`] variants) is refused with [`Unprintable`] instead of
+//! written wrongly.
 
 use std::io::ErrorKind;
 use std::time::Duration;
@@ -60,8 +60,7 @@ pub fn module(doc: &[&str], ops: &[Op]) -> Result<String, Unprintable> {
     Ok(out)
 }
 
-/// What a recorded history may name, by the path it is imported from: a file imports only
-/// those its operations use.
+/// What a recorded history may name, by import path: a file imports only those its operations use.
 const IMPORTS: &[(&str, &[&str])] = &[
     ("std::io", &["ErrorKind"]),
     ("std::time", &["Duration"]),
@@ -390,8 +389,7 @@ fn source_error(err: SourceError) -> Result<String, Unprintable> {
     })
 }
 
-/// A page number as a const expression, under the page size the error domain draws it with.
-/// A number that is not a page there (the lock page) is refused.
+/// A page number as a const expression; the lock page, which is no page there, is refused.
 fn short(pgno: PageNo) -> Result<String, Unprintable> {
     let page = pgno.get();
     if PageSize::new(4096).and_then(|size| PageNo::new(page, size)) != Some(pgno) {

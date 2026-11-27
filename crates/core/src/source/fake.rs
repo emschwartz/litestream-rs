@@ -61,11 +61,11 @@ pub enum SourceOp {
     Checkpoint,
     /// `Checkpointer::bump_seq`.
     BumpSeq,
-    /// The write lock Go takes for a TRUNCATE (`db.go:2759-2771`). Nothing calls it: the
-    /// engine's copy after a TRUNCATE takes no lock (docs/decisions/D190.md), and the
-    /// `Checkpointer` trait no longer has the method. Kept so recorded histories still read.
+    /// The write lock Go takes for a TRUNCATE (`db.go:2759-2771`). No longer called, since the
+    /// engine takes no lock after a TRUNCATE (docs/decisions/D190.md); kept so recorded histories
+    /// still read.
     BeginWriteLock,
-    /// The release of that write lock (Go `db.go:2795`). Nothing calls it either.
+    /// The release of that write lock (Go `db.go:2795`).
     EndWriteLock,
     /// `WalSource::sync`.
     Sync,

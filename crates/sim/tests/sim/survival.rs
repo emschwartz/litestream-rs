@@ -142,7 +142,7 @@ fn an_engine_booting_through_lying_reads_leaves_the_replica_restorable() {
     assert!(report.reach.get("hold.LyingReads.engine_reads_flipped") > 0);
 }
 
-/// Swarm seed 0x13, shrunk: the prefix holds 512-byte pages, the app vacuums to 2048, the
+/// The prefix holds 512-byte pages, the app vacuums to 2048, the
 /// operator removes another writer's level-0 file after it was compacted upward, and the
 /// engine boots while every read of the replica lies. The boot read the newest file's header,
 /// could not decode it, took that as no page size at all, and snapshotted 2048-byte pages onto

@@ -57,7 +57,6 @@ pub(super) fn reader(bytes: Vec<u8>) -> WalReader<Cursor<Vec<u8>>> {
     WalReader::open(Cursor::new(bytes)).unwrap()
 }
 
-/// The end of the last commit in `bytes`: its cursor, commit frame and database size.
 fn end_of(bytes: Vec<u8>) -> Option<(FrameCursor, FrameRef, u32)> {
     let mut wal = WalReader::open(Cursor::new(bytes)).ok()?;
     let mut at = wal.cursor_at_start();

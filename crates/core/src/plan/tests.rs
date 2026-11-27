@@ -14,7 +14,6 @@ fn key(level: u8, min: u64, max: u64) -> FileKey {
     FileKey::new(Level::new(level).unwrap(), range)
 }
 
-/// A file created at [`created`] milliseconds.
 fn file(level: u8, min: u64, max: u64, created: i64) -> FileInfo {
     FileInfo {
         key: key(level, min, max),

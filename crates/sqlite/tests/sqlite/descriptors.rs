@@ -40,7 +40,6 @@ fn suffixed(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Every descriptor of this process on `file`, by number.
 fn descriptors_on(file: &Path) -> BTreeMap<String, PathBuf> {
     fs::read_dir("/proc/self/fd")
         .unwrap()
@@ -52,10 +51,8 @@ fn descriptors_on(file: &Path) -> BTreeMap<String, PathBuf> {
         .collect()
 }
 
-/// How many listings in a row must add nothing before [`posix_locks_on`] answers.
 const QUIET_READS: usize = 32;
 
-/// The most listings [`posix_locks_on`] reads before it gives up.
 const MAX_READS: usize = 10_000;
 
 /// This process's POSIX record locks on `path`'s inode, from `/proc/locks` (no descriptor on it).

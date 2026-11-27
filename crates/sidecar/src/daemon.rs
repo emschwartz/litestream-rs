@@ -566,7 +566,6 @@ impl Daemon {
         self.stop_app
     }
 
-    /// The daemon's clock, read now.
     #[must_use]
     pub(crate) fn now(&self) -> lsr_ltx::Timestamp {
         self.clock.now()
@@ -642,7 +641,6 @@ impl Daemon {
         }
     }
 
-    /// The log.
     #[must_use]
     pub(crate) fn log(&self) -> &Logger {
         &self.log
@@ -988,7 +986,7 @@ mod tests {
     }
 
     /// Under `-once` no waiter runs, so a start that meets the application writing, or a
-    /// locked meta directory, is a failed start: not clean, as before either was retried.
+    /// locked meta directory, is a failed start: not clean.
     #[test]
     fn without_a_waiter_a_transient_start_failure_is_a_failed_start() {
         let dir = tempfile::tempdir().unwrap();

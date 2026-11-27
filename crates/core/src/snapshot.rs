@@ -9,9 +9,9 @@
 //! The page sources are the sync step's snapshot step ([`scan_whole`],
 //! [`plan_pages`], the shared `stage`): frames of the current generation up to
 //! the synced end win, the database file supplies the rest, and the page count is
-//! the proof's last commit. The read transaction pins the WAL at our mark, so a
-//! other process may copy frames at or below the mark into the database file while the
-//! file is read. Every such frame is at or below the synced end, so it is in the
+//! the proof's last commit. The read transaction pins the WAL at our mark, so
+//! another process may copy frames at or below the mark into the database file
+//! while the file is read. Every such frame is at or below the synced end, so it is in the
 //! page map and the map wins: a page torn by a concurrent backfill is never read.
 //! That argument needs the synced end to be at or above the wal-index's
 //! `nBackfill`; a proof below it cannot be a proof from this read transaction and
@@ -99,9 +99,8 @@ struct Whole {
     page_size: PageSize,
 }
 
-/// The checks a whole-database read makes before it reads a page, and its plan: the WAL
-/// frames of the current generation up to the synced end win, the database file supplies
-/// the rest, and the page count is the proof's last commit.
+/// The checks a whole-database read makes before it reads a page, and its plan (see the module
+/// doc for which source wins).
 fn whole<W: WalSource>(proof: &SyncedThrough, wal: &mut W) -> Result<Whole, Fault> {
     let position = proof.position();
     let mut reader = open_wal(wal)?;
@@ -265,7 +264,6 @@ impl Snapshotting {
                 .encode(&plan, &mut reader, db, pages, self.pinned)?;
             let sent = self.handoff.send(open, self.filling.out(), room);
             left = sent.await.map_err(|err| S::fault(&err))?;
-            // A pass hands over a byte, and all that waits while room is left: else the loop spins.
             let drained = left.is_none() || self.filling.out().is_empty();
             crate::invariant!(left != Some(room) && drained, BugSite::Encode);
         }
@@ -371,7 +369,6 @@ pub(crate) fn read_live<W: WalSource, P: PageSource>(
     ))
 }
 
-/// The WAL opened and its header read.
 fn open_wal<W: WalSource>(wal: &mut W) -> Result<WalReader<W::Wal>, Fault> {
     let file = wal
         .open()

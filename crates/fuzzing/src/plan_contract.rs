@@ -87,7 +87,6 @@ fn store_of(files: &[ArbFile]) -> MemStore {
     store
 }
 
-/// One file of the lazy listing, exact if the input says so.
 fn relisted(files: &[ArbFile], info: &FileInfo) -> FileInfo {
     match files.iter().find(|file| file.key == info.key) {
         Some(file) if file.listed_exact => file.exact(),
@@ -108,7 +107,6 @@ fn mixed(store: &MemStore, files: &[ArbFile]) -> Inventory {
     inventory
 }
 
-/// What a lazy run decided, and how it asked.
 struct Run {
     outcome: PlanOutcome,
     asked: Vec<FileInfo>,

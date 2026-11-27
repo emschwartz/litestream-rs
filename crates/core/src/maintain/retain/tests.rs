@@ -21,7 +21,6 @@ use crate::plan::RestoreTarget;
 use crate::store::WriteMode;
 use crate::store::{ObjectStore, Upload};
 
-/// `retention` from a fresh state.
 fn set_created_at(file: &mut FileInfo, at: Timestamp) {
     file.listed = ListedTime::Created(CreatedAt::mtime(at));
 }
@@ -264,8 +263,7 @@ fn level_zero_files_the_levels_do_not_cover_stay() {
 
 #[test]
 fn level_zero_skips_an_uncovered_file_and_deletes_the_covered_ones_above_it() {
-    // 27 is uncovered and stays; 28 and 29 are covered and go (the
-    // scan used to stop at 27 and keep them).
+    // 27 is uncovered and stays; 28 and 29 are covered and go.
     let mut files = ladder();
     files.retain(|f| f.key != key(1, 21, 30));
     files.push(file(1, 21, 26, created_at_of(26)));
@@ -1258,12 +1256,10 @@ fn check_listing(
         Retention::Wait { until } => wake(inventory, cfg, published, *until, now),
         Retention::Held(_) => {}
     }
-    // The level 0 scan stops at the first young file on the promise that
-    // the files after it are young (see "Rules" in the module docs). Later
-    // snapshot created-at times move the floor, which changes which files the scan
-    // reads at all, so with level 0 created-at times running backwards the rewrite can
-    // unblock a delete the true created-at times never reached. That is not a promise
-    // of the design.
+    // The level 0 scan stops at the first young file on the promise that the files after it
+    // are young (see "Rules" in the module docs). Later snapshot created-at times move the
+    // floor, so with level 0 created-at times running backwards the rewrite can unblock a
+    // delete the true times never reached. The design does not promise otherwise.
     if !matches!(first, Retention::Held(_)) && level_zero_created_at_follow_keys(inventory) {
         later_created_at(inventory, now, cfg, published, &first, noise);
     }

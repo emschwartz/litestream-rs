@@ -2,13 +2,12 @@
 //!
 //! S3 takes at most 10000 parts in one upload, so a part of the configured
 //! size carries at most `10000 * part` bytes: 48.8 GiB at the default 5 MiB. An
-//! object longer than that used to upload every part it could, be refused at
-//! part 10001, wait, and send the same bytes again for ever. The staged file's
-//! length is known before the upload starts ([`ObjectStore::begin_sized_upload`]),
-//! so the part size is chosen then: the configured size, or the smallest one
-//! that fits the object in 10000 parts when the configured size does not.
-//! Go's uploader sizes parts from the configured size alone and has the same
-//! ceiling, but Go does not retry the object for ever with it.
+//! object longer than that would upload every part it could, be refused at part 10001, wait,
+//! and send the same bytes again for ever. The staged file's length is known before the
+//! upload starts ([`ObjectStore::begin_sized_upload`]), so the part size is chosen then: the
+//! configured size, or the smallest one that fits the object in 10000 parts when it does not.
+//! Go's uploader sizes parts from the configured size alone and has the same ceiling, but Go
+//! does not retry the object for ever with it.
 //!
 //! The limits are S3's: 10000 parts, 5 GiB a part and 5 TiB an object. The last
 //! is the one that can bind: at 5 TiB the part is about 524 MB, within 5 GiB. An
@@ -34,10 +33,10 @@ use crate::config::PartSize;
 /// more that fills or waits (`upload.rs`, `docs/decisions/D232.md`).
 pub(crate) const HELD_BUDGET: u64 = 256 * 1024 * 1024;
 
-/// How many parts of `part` bytes that hold their bytes one upload has in flight at once:
-/// `concurrency`, or as many as leave room in [`HELD_BUDGET`] for one more part that fills
-/// or waits, and never fewer than one. With one in flight the upload holds two parts, which
-/// passes the budget only for a part larger than half of it.
+/// How many parts of `part` bytes one upload has in flight: `concurrency`, or as many as
+/// leave room in [`HELD_BUDGET`] for one more part that fills, and never fewer than one. With
+/// one in flight the upload holds two parts, which passes the budget only for a part larger
+/// than half of it.
 pub(crate) fn held_width(concurrency: NonZeroUsize, part: u64) -> NonZeroUsize {
     let fit = HELD_BUDGET
         .checked_div(part)
@@ -53,11 +52,9 @@ pub(crate) const MAX_PARTS: u64 = 10_000;
 /// The largest object S3 holds: 5 TiB.
 pub(crate) const MAX_OBJECT: u64 = 5 * 1024 * 1024 * 1024 * 1024;
 
-/// The part size to upload an object of `len` bytes with: `configured`, or
-/// the smallest size that fits it in [`MAX_PARTS`] parts when `configured`
-/// does not. `None` when no part size can carry it ([`MAX_OBJECT`]).
-///
-/// Never below `configured`, so an object that fit before is sent as before.
+/// The part size for an object of `len` bytes: `configured`, or the smallest size that fits it
+/// in [`MAX_PARTS`] parts when `configured` does not. `None` past [`MAX_OBJECT`].
+/// Never below `configured`.
 pub(crate) fn plan_part_size(configured: PartSize, len: u64) -> Option<PartSize> {
     if len > MAX_OBJECT {
         return None;

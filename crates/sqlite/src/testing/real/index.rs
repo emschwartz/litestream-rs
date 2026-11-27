@@ -11,7 +11,6 @@ use lsr_wal::{Salts, WalOffset};
 
 use super::state::Real;
 
-/// What the wal-index says now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Index {
     pub(super) mx_frame: u32,
@@ -52,7 +51,6 @@ impl Index {
         }
     }
 
-    /// The committed end.
     pub(super) fn end(self, page_size: PageSize) -> WalOffset {
         WalOffset::from_frame_index(self.mx_frame, page_size)
     }

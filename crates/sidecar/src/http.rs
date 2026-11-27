@@ -163,7 +163,6 @@ impl Drop for Slot {
 }
 
 impl Slot {
-    /// A place among `count`'s [`MAX_CONNECTIONS`], if one is free.
     fn take(count: &Arc<AtomicUsize>) -> Option<Self> {
         if count.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
             count.fetch_sub(1, Ordering::SeqCst);

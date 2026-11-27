@@ -98,7 +98,6 @@ impl fmt::Debug for ReadLockHold {
     }
 }
 
-/// The holders handed out so far in this process.
 static HOLDERS: AtomicU64 = AtomicU64::new(0);
 
 impl ReadLockHold {

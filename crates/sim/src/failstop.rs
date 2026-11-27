@@ -84,16 +84,12 @@ pub struct FailStopJudge {
     /// commit included. When the newest appears twice (a commit that changed nothing, a vacuum
     /// at the same size), a restore that shows it cannot tell which commit the replica holds.
     images: Vec<lsr_history::Digest>,
-    /// The latest tick on which an attempt failed, on both clocks.
     failed: Option<(Timestamp, i64)>,
-    /// A store refusal fired since the last start.
     refused: bool,
-    /// The latest tick on which the engine read the WAL successfully, on its clock.
     wal_read: Option<Timestamp>,
     /// When this life booted with a cause that broke continuity, on the engine's clock; cleared
     /// by the engine's first believed upload after it, and by a restart.
     unvouched: Option<Timestamp>,
-    /// Age trips excused, by exemption.
     excused: Excused,
     /// How many ticks have passed since the replica was last seen whole: an accepted trip may
     /// take [`CLEAR_TICKS`] to clear after the catch-up (the engine learns of it at its next sync).
@@ -107,9 +103,7 @@ pub struct FailStopJudge {
     /// it cannot do while it still dates them, whatever the replica holds (the engine cannot
     /// tell a vacuum that rewrote identical pages from a lost commit).
     engine_since: Option<Timestamp>,
-    /// Whether the tick before the last one ran while every read of the replica lied.
     lied_before: bool,
-    /// Whether the last tick ran while every read of the replica lied.
     lied_last: bool,
     /// The header stamp of a pending staged file an earlier life left that the boot cannot
     /// place against the replica (`Self::unplaced`).
@@ -306,7 +300,6 @@ impl FailStopJudge {
         self.unvouched.is_some_and(|booted| since >= booted)
     }
 
-    /// The age of the first unreplicated commit at `tick`: the larger of the two clocks.
     fn age(&self, tick: TickSeen) -> Option<Duration> {
         let (wall, true_since) = self.since?;
         let on_wall = tick.at.saturating_duration_since(wall);
@@ -627,7 +620,6 @@ mod tests {
         );
     }
 
-    /// A judge that has seen the replica hold every commit: any age trip is false to it.
     fn caught_up() -> FailStopJudge {
         let image = lsr_history::Digest::genesis();
         let mut judge = FailStopJudge::starting(ts(0), image);

@@ -130,8 +130,7 @@ impl S3Code {
         }
     }
 
-    /// The code in an error body, `None` when the body has no `<Code>`
-    /// (HEAD responses have no body).
+    /// The code in an error body, `None` when it has no `<Code>` (a HEAD has no body).
     #[must_use]
     pub fn from_body(body: &[u8]) -> Option<Self> {
         let text = std::str::from_utf8(body).ok()?;
@@ -140,8 +139,8 @@ impl S3Code {
         Some(Self::from_name(name.trim()))
     }
 
-    /// The access refusal a code names, whatever status it came with: S3
-    /// sends `ExpiredToken` as 400 or 403 depending on the provider.
+    /// The access refusal a code names, whatever the status: `ExpiredToken` is 400 or 403 by
+    /// provider.
     const fn denied(self) -> Option<Denied> {
         match self {
             Self::InvalidAccessKeyId
@@ -177,8 +176,8 @@ fn retry_after(r: &HttpResponse) -> Option<Duration> {
 }
 
 /// Whether an `AccessDenied` body says the signature's time is outside its window: AWS and
-/// Tigris answer a signed URL that is past its expiry or dated ahead with `AccessDenied` and one
-/// of these messages, and nothing in the code says it is the clock.
+/// Tigris answer an expired or future-dated signed URL with `AccessDenied` and one of these
+/// messages, and nothing in the code says it is the clock.
 fn signing_time_outside_window(body: &[u8]) -> bool {
     let text = String::from_utf8_lossy(body);
     [
@@ -190,15 +189,14 @@ fn signing_time_outside_window(body: &[u8]) -> bool {
     .any(|message| text.contains(message))
 }
 
-/// Whether a response is S3 saying the range starts at or past the end
-/// (status 416, as MinIO answers; docs/spikes.md). A read treats it as zero bytes.
+/// Whether the range starts at or past the end (416, as MinIO answers; docs/spikes.md). A read
+/// treats it as zero bytes.
 #[must_use]
 pub fn is_range_past_end(r: &HttpResponse) -> bool {
     r.status() == 416
 }
 
-/// Judges a response. `key` is the object a keyed request named and `part`
-/// the multipart part, when there was one.
+/// Judges a response. `key` is the object a keyed request named, `part` the multipart part.
 ///
 /// # Errors
 /// The [`StoreError`] the status and code map to; see the table in the tests.
@@ -242,8 +240,7 @@ pub fn classify(
             why: Denied::Credentials,
         }),
         403 if code == Some(S3Code::InvalidObjectState) => Err(StoreError::Refused { op, status }),
-        // A 403 with no code (a HEAD has no body) or one not listed: the
-        // store says forbidden without saying why; a credentials failure
+        // A 403 with no code (a HEAD has no body) or an unlisted one: a credentials failure
         // shows its own code on the next request that carries a body.
         403 => Err(StoreError::Denied {
             op,
@@ -297,19 +294,17 @@ fn not_found(op: StoreOp, key: Option<&FileKey>, code: Option<S3Code>, status: u
     }
 }
 
-/// Whether the provider refused a header it does not implement (501, or the
-/// `NotImplemented` code under any status): for a conditional write, a
-/// provider without conditional writes.
+/// Whether the provider refused a header it does not implement (501, or the `NotImplemented`
+/// code under any status): for a conditional write, no conditional writes.
 #[must_use]
 pub fn is_not_implemented(r: &HttpResponse) -> bool {
     r.status() == 501 || S3Code::from_body(r.body()) == Some(S3Code::NotImplemented)
 }
 
-/// The error a 2xx answer carries in its body, as S3 can send for a
-/// CompleteMultipartUpload that failed after the status line went out; `None`
-/// when the body is no error document. A taken key (`PreconditionFailed`)
-/// is [`StoreError::AlreadyExists`], `SlowDown` a throttle, `NoSuchUpload`
-/// what a 404 with that code is, and any other code is worth asking again.
+/// The error a 2xx answer carries in its body, as S3 can send for a CompleteMultipartUpload
+/// that failed after the status line went out; `None` when the body is no error document.
+/// `PreconditionFailed` is [`StoreError::AlreadyExists`], `SlowDown` a throttle,
+/// `NoSuchUpload` what a 404 with that code is, and any other code is worth asking again.
 #[must_use]
 pub fn error_in_ok_body(op: StoreOp, key: &FileKey, r: &HttpResponse) -> Option<StoreError> {
     if !(200..300).contains(&r.status()) {
@@ -347,11 +342,10 @@ pub fn error_in_ok_body(op: StoreOp, key: &FileKey, r: &HttpResponse) -> Option<
     Some(err)
 }
 
-/// Judges the per-key failures of a DeleteObjects result that otherwise
-/// succeeded (`codes`, from `parse_delete_failure_codes`). A key the store
-/// refuses access to names that refusal, as the same code on a whole response
-/// would: object lock refusing a delete is a permission, not a transient
-/// failure. Any other failed entry may pass on retry.
+/// Judges the per-key failures (`codes`, from `parse_delete_failure_codes`) of a DeleteObjects
+/// result that otherwise succeeded. An access refusal is named as on a whole response: object
+/// lock refusing a delete is a permission, not a transient failure. Any other failed entry may
+/// pass on retry.
 ///
 /// # Errors
 /// [`StoreError::Denied`] when an entry names an access refusal, else

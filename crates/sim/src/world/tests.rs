@@ -277,7 +277,7 @@ fn pick_crash_is_seeded_and_in_range() {
 }
 
 /// A power loss does not touch the replica, so the acknowledgements stand: a `Latest` older
-/// than one after the loss is the engine's doing. The world used to forget them all.
+/// than one after the loss is the engine's doing.
 #[test]
 fn a_power_loss_keeps_the_acknowledgements() {
     let mut w = world();

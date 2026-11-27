@@ -37,7 +37,6 @@ impl Walk<'_> {
         self.file.get(range)
     }
 
-    /// Pushes `block` as two spans, before and after its last token.
     fn push_block(&self, block: Range<usize>, out: &mut Vec<Range<usize>>) -> Option<()> {
         let last = block
             .start
@@ -92,7 +91,6 @@ fn skip_len(block: &[u8], nibble: u8, mut pos: usize) -> Option<(usize, usize)> 
     Some((len, pos))
 }
 
-/// The offset of the token whose literals reach the end of `block`.
 fn last_token(block: &[u8]) -> Option<usize> {
     let mut pos = 0_usize;
     loop {

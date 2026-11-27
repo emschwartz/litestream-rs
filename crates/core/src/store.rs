@@ -56,7 +56,7 @@ pub struct PageLimit(NonZeroU16);
 impl PageLimit {
     /// The largest page.
     pub const MAX_RAW: u16 = 1000;
-    /// The largest page as a limit; equals [`Self::MAX_RAW`] (pinned by a test).
+    /// The largest page as a limit; equals [`Self::MAX_RAW`].
     pub const MAX: Self = Self(NonZeroU16::MIN.saturating_add(999));
 
     /// A page of one entry.
@@ -88,7 +88,7 @@ impl ReadLen {
     pub const MAX_RAW: u32 = 16_777_216;
 
     /// One mebibyte: the chunk a file is read in when nothing calls for
-    /// another size (pinned by a test).
+    /// another size.
     pub const CHUNK: Self = Self(NonZeroU32::MIN.saturating_add(1_048_575));
 
     /// Returns `None` for zero or above [`Self::MAX_RAW`].
@@ -101,9 +101,7 @@ impl ReadLen {
     }
 
     /// `raw` as a length, or [`Self::CHUNK`] when it is not one. For a
-    /// module's own constant, so that a read size is a value fixed when the
-    /// crate is built and no call site has a failure to handle; a test pins
-    /// each such constant to the size it names.
+    /// module's own constant, so that no call site has a failure to handle.
     #[must_use]
     pub const fn or_chunk(raw: u32) -> Self {
         match Self::new(raw) {
@@ -388,8 +386,8 @@ pub enum StoreError {
 
 /// Why a store refuses access. Each kind asks a different person to fix a
 /// different thing, so they are told apart all the way to the health report:
-/// the classes were one (`credentials`) until clock skew, a missing bucket and
-/// a failed certificate check each sent operators to rotate keys that were fine.
+/// clock skew, a missing bucket or a failed certificate check must not send
+/// operators to rotate keys that are fine.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Error)]
 pub enum Denied {
     /// The store does not accept the credentials: an unknown access key, a
@@ -1010,8 +1008,8 @@ impl Upload for Box<dyn DynUpload> {
     }
 }
 
-/// Whether the store holds an object under `key`, by a one-byte read. Used where one key is
-/// named without a listing: a boot's refused staged file.
+/// Whether the store holds an object under `key`, by a one-byte read, for a key named
+/// without a listing.
 ///
 /// # Errors
 /// The store's error for a read that fails other than as not found.

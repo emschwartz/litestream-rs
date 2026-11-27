@@ -740,7 +740,6 @@ struct DeleteRefuser(SizeLiar);
 impl ObjectStore for DeleteRefuser {
     type Upload = LyingUpload;
 
-    /// Leaves no scratch.
     async fn remove_scratch(&self) -> Result<u64, StoreError> {
         Ok(0)
     }

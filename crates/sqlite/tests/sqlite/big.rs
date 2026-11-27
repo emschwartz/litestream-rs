@@ -128,7 +128,6 @@ fn a_16k_page_database_past_1_gib_crosses_the_lock_page() {
 #[ignore = "large; just sqlite-big"]
 fn a_database_past_4_gib_replicates_and_restores() {
     let dir = TempDir::new().unwrap();
-    // Fails below 20 GB free; `LSR_SKIP=disk` opts out.
     let enough = need(Resource::Disk, || {
         let free = free_bytes(dir.path());
         if free < 20_000_000_000 {

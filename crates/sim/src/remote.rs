@@ -136,7 +136,6 @@ struct Lands {
 }
 
 impl Lands {
-    /// One of `started`, counted from zero.
     fn one_of(&self, started: usize) -> usize {
         let upper = u64::try_from(started).unwrap_or(u64::MAX).max(1);
         usize::try_from(self.chance.below(upper)).unwrap_or(0)
@@ -253,7 +252,6 @@ impl Landing {
         }
     }
 
-    /// What the upload answered the question with.
     fn answered(&self, flight: Result<Flight, &StoreError>) {
         let left = self.started() > 0;
         self.lands.count(|counts| {
@@ -294,11 +292,8 @@ impl Clock for SharedClock {
     }
 }
 
-/// The key prefix the replica lives under in the bucket.
 const PREFIX: &str = "db";
 
-/// The bucket, its address and the prefix, as the store is configured; with `parts`, their
-/// size and how many go at once.
 fn config(parts: Option<Parts>) -> Option<S3Config> {
     let config = S3Config::new(
         Endpoint::new("http://sim.invalid:9000").ok()?,
@@ -496,7 +491,6 @@ pub fn provider_fault(fault: HttpFault) -> Option<Fault> {
     })
 }
 
-/// The status and S3 error code a provider answers a refusal with.
 const fn denial_answer(code: DenialCode) -> (u16, Option<&'static str>) {
     match code {
         DenialCode::AccessDenied => (403, Some("AccessDenied")),
@@ -586,7 +580,6 @@ const fn shape(on: HttpShape) -> Shape {
     }
 }
 
-/// The replica key a bucket key names, when it is one.
 fn replica_key(object: &str) -> Option<FileKey> {
     let rest = object.strip_prefix(PREFIX)?.strip_prefix('/')?;
     let (level, name) = rest.split_once('/')?;
@@ -598,12 +591,10 @@ fn replica_key(object: &str) -> Option<FileKey> {
     Some(FileKey::new(level, range))
 }
 
-/// The bucket key of a replica key.
 fn object_key(key: &FileKey) -> String {
     format!("{PREFIX}/{:04x}/{}", key.level().get(), key.file_name())
 }
 
-/// The metadata name the replica's writers store a created-at time under.
 const CREATED_AT: &str = "x-amz-meta-litestream-timestamp";
 
 /// A replica object as the bucket stores it: its key, length and times. An object whose
@@ -659,7 +650,6 @@ fn list_bucket(fake: &FakeS3, level: Level, after: Option<TxidRange>, limit: Pag
     lsr_core::build_listing(files, &unrecognized, after, limit)
 }
 
-/// Bytes `[offset, offset + len)` of the object under `key`, as `MemStore` reads them.
 fn read_bucket(
     fake: &FakeS3,
     key: &FileKey,
@@ -788,7 +778,6 @@ impl Bucket {
     }
 }
 
-/// The whole object under `key` in `store`, `None` when it holds none.
 async fn read_whole(store: &MemStore, key: &FileKey) -> Option<Vec<u8>> {
     let len = ReadLen::new(ReadLen::MAX_RAW)?;
     store.read(key, 0, len).await.ok()

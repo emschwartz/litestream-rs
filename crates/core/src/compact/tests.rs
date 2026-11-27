@@ -67,7 +67,6 @@ fn checksum(ps: PageSize, state: &BTreeMap<u32, u8>) -> DbChecksum {
     })
 }
 
-/// One LTX file to encode.
 #[derive(Clone)]
 struct Spec {
     tracked: bool,
@@ -276,7 +275,6 @@ impl SpyUpload {
 impl ObjectStore for Spy {
     type Upload = SpyUpload;
 
-    /// Forwards to the store it wraps.
     async fn remove_scratch(&self) -> Result<u64, StoreError> {
         self.inner.remove_scratch().await
     }
@@ -764,7 +762,6 @@ fn a_broken_checksum_link_is_refused_and_nothing_is_published() {
 
 // Faults, each at each point.
 
-/// A four-file chain and the store holding it.
 fn four(source: &MemStore) -> Vec<FileInfo> {
     let specs = [
         Spec::plain(512, 3, 1, 1, &[(1, 1), (2, 2), (3, 3)]),
@@ -1546,7 +1543,6 @@ fn one_input(source: &MemStore, pages: u32, noise: bool) -> Vec<FileInfo> {
     vec![put(source, 0, &spec)]
 }
 
-/// Begins a merge of `infos` from `source` into `dest` under `budget`.
 fn begun(source: &MemStore, dest: &Spy, infos: &[FileInfo], budget: Budget) -> Compacting {
     let staging = Staging(source);
     let mut slots = Slots::new();

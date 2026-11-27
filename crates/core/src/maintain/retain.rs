@@ -49,8 +49,6 @@
 //!   file a higher one keeps. A level-0 file straddling the high anchor's
 //!   floor stays (not under it, not covered), but at a lower anchor the level
 //!   1 file below that floor is kept, covers it, and the level-0 file goes.
-//!   The test `a_lower_anchor_can_delete_a_level_zero_file_a_higher_one_keeps`
-//!   pins the example.
 //!
 //! The cost of a clock that steps back is a snapshot kept after an earlier job
 //! cut the level-0 chain behind it; a restore goes through the newer snapshot
@@ -120,8 +118,7 @@ thread_local! {
     /// Test hook: level 0 deletes ignore coverage, so the self-check has
     /// something to catch.
     static BREAK_L0_COVERAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Test hook: every file anchors the clock, as main's exact created-at time over
-    /// the whole listing did, so R' can be compared with it.
+    /// Test hook: every file anchors the clock, to compare with the lazy anchor.
     static ANCHOR_FROM_EVERY_FILE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -287,7 +284,6 @@ fn listing_behind(inventory: &Inventory, published: Option<Txid>) -> Option<Rete
     (listed < Some(published)).then_some(RetentionHold::ListingBehind { listed, published })
 }
 
-/// The level-9 files a restore can start from, ascending.
 fn snapshots(inventory: &Inventory) -> Vec<&FileInfo> {
     inventory
         .level(Level::SNAPSHOT)
@@ -426,7 +422,7 @@ fn not_before(created_at: NonZeroCreatedAt, anchor: Timestamp, age: Duration) ->
         .is_none_or(|cutoff| created_at.at() >= cutoff)
 }
 
-/// Whether `created_at` is after `anchor - age`: too young to age out.
+/// Whether `created_at` is too young to age out.
 fn after(created_at: NonZeroCreatedAt, anchor: Timestamp, age: Duration) -> bool {
     anchor
         .checked_sub(age)
@@ -546,7 +542,6 @@ fn levels_one_to_eight<'a>(
     kept
 }
 
-/// What the level 0 rule measures against.
 struct LevelZero {
     floor: Option<Txid>,
     anchor: Timestamp,
@@ -718,7 +713,6 @@ pub(super) fn short_level_zero(
         return Ok(nothing);
     };
     let anchor = now.min(newest_created_at);
-    // One run per level: `merged_ranges` folds each run in one ascending pass.
     let listed_levels: Vec<&[FileInfo]> = Level::COMPACTION
         .iter()
         .map(|level| listed.level(*level))

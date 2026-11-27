@@ -16,8 +16,8 @@
 //! `N` ahead for the life of the process. A step forward is followed at once:
 //! timers that pass early is the only reading of a clock that says time passed.
 //!
-//! The wake the engine asks its host for is wall time ([`EngineClock::wall_at`]),
-//! since the host sleeps on the wall clock; event times are engine time.
+//! The wake the engine asks its host for is wall time ([`EngineClock::wall_at`]), since the
+//! host sleeps on the wall clock; event times are engine time.
 //!
 //! Stamps are not engine time. A staged or snapshot file is stamped with the
 //! wall clock, never earlier than the highest reading so far
@@ -90,7 +90,7 @@ impl EngineClock {
         (read, false)
     }
 
-    /// Engine time now.
+    /// Engine time at the last reading.
     pub(super) const fn now(self) -> Timestamp {
         Timestamp::from_unix_millis(self.engine)
     }
@@ -101,7 +101,6 @@ impl EngineClock {
         Timestamp::from_unix_millis(self.high)
     }
 
-    /// Engine time at the wall reading `wall`, at or after the anchor.
     fn engine_at(self, wall: i64) -> i64 {
         let elapsed = wall.saturating_sub(self.anchor_wall);
         let slewed = self.anchor_engine.saturating_add(elapsed.div_euclid(2));

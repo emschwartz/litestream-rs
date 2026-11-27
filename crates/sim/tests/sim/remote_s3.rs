@@ -87,7 +87,6 @@ fn a_refused_upload_is_reported_as_what_the_operator_must_fix() {
 #[test]
 fn a_dropped_read_ahead_refusal_is_not_owed_a_report_beside_a_standing_wal_fault() {
     let ops = [
-        // A long run of ticks over a growing replica, with the WAL regrown under the engine.
         Op::Hold {
             hold: Hold::Wal(WalOp::RegrowSameSalts(11_888_806_653_224_795_474)),
             ticks: 102,

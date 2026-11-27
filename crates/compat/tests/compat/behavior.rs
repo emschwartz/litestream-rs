@@ -98,7 +98,6 @@ impl Row {
     }
 }
 
-/// One citation: its kind (`sim`, `core`, `plant`, ...) and its name.
 type Citation = (String, String);
 
 /// Every citation in a cell, or the text that is not one.
@@ -332,7 +331,6 @@ fn backs(bug: &Bug, kind: &str, name: &str) -> bool {
             .any(|f| name.contains(f.as_str()) || f.contains(name))
 }
 
-/// The test citations of a row.
 fn tests_of(row: &Row) -> Vec<Citation> {
     row.evidence()
         .iter()

@@ -27,8 +27,8 @@ pub enum ConfigError {
     #[error("unsupported url scheme")]
     UnsupportedScheme,
     /// The prefix has a leading or trailing slash, an empty segment, a `.` or `..` segment or a
-    /// control character. The `url` type cannot carry a dot segment: it and the HTTP clients built on it
-    /// drop it, so the request would name another object than the key says.
+    /// control character. The `url` type and the HTTP clients built on it drop a dot segment,
+    /// so the request would name another object than the key says.
     #[error("the replica prefix is not a clean path")]
     BadPrefix,
     /// The part size is below S3's 5 MiB minimum.
@@ -98,8 +98,8 @@ const OTHER_CLOUDS: [&str; 5] = [
 ];
 
 impl Provider {
-    /// Decides from a host name and whether the endpoint names a port
-    /// (rc.go:275-289, replica_url.go).
+    /// Decides from a host name and whether the endpoint names a port (Go: rc.go:275-289,
+    /// replica_url.go).
     #[must_use]
     pub fn from_host(host: &str, has_port: bool) -> Self {
         if host == "fly.storage.tigris.dev" || host == "t3.storage.dev" {
@@ -331,13 +331,11 @@ const DEFAULT_DEADLINE: Duration = Duration::from_secs(60);
 /// Multipart parts in flight unless told otherwise (Go: `DefaultConcurrency`).
 pub(crate) const DEFAULT_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(4);
 
-/// Multipart parts in flight on Cloudflare R2 unless told otherwise. Go forces
-/// 2 there; here a configured value wins, because the cap behind it (about 2
-/// parts per upload ID, acknowledged by Cloudflare in 2022 and never documented
-/// as lifted) is a default's worth of caution, not a rule the user may not test.
-/// Tigris has no special case: it documents no limit and its own docs use 8
-/// concurrent parts, so it gets `DEFAULT_CONCURRENCY` (Go's 2 there was a
-/// conservative default with no measured limit).
+/// Multipart parts in flight on Cloudflare R2 unless told otherwise. Go forces 2 there; here a
+/// configured value wins, because the cap behind it (about 2 parts per upload ID, acknowledged
+/// by Cloudflare in 2022 and never documented as lifted) is a default's worth of caution, not a
+/// rule the user may not test. Tigris has no special case: it documents no limit and its own
+/// docs use 8 concurrent parts, so it gets `DEFAULT_CONCURRENCY`.
 pub(crate) const R2_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(1);
 
 /// Creation-time HEADs in flight at once. Go allows 50 (`MetadataConcurrency`),
@@ -351,8 +349,7 @@ pub const CREATION_TIME_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating
 /// one GET, never side by side.
 pub const READ_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(7);
 
-/// A count as bytes, for the memory bounds below; a `usize` fits a `u64` on every target
-/// (`lsr-ltx` refuses to build elsewhere).
+/// A count as bytes for the memory bounds below; a `usize` fits a `u64` on every target.
 #[expect(
     clippy::as_conversions,
     reason = "const context has no From for usize; usize is at most 64 bits"
@@ -361,11 +358,9 @@ const fn widen(n: usize) -> u64 {
     n as u64
 }
 
-// What a multipart upload and its batches may hold, stated where the constants are.
 // S3 refuses a part under 5 MiB (EntityTooSmall) except the last.
 const _: () = assert!(PartSize::MIN.get() >= 5 * 1024 * 1024);
 const _: () = assert!(PartSize::TIGRIS.get() >= PartSize::MIN.get());
-// R2's default is the cautious one.
 const _: () = assert!(R2_CONCURRENCY.get() <= DEFAULT_CONCURRENCY.get());
 // One batch of read-ahead HEADs never asks for more than a decision names ahead.
 const _: () = assert!(CREATION_TIME_CONCURRENCY.get() <= lsr_core::MAX_AHEAD);
@@ -376,10 +371,9 @@ const _: () = assert!(CREATION_TIME_CONCURRENCY.get() <= lsr_core::MAX_AHEAD);
 const _: () = assert!(widen(DEFAULT_CONCURRENCY.get() + 1) * PartSize::TIGRIS.get() <= 128 << 20);
 
 impl S3Config {
-    /// A configuration with the defaults the endpoint's provider gets:
-    /// region `us-east-1`, path style for MinIO, bare addresses and
-    /// `localhost` (virtual-host style cannot name them), virtual-host style
-    /// otherwise, 16 MiB parts on Tigris and 5 MiB elsewhere.
+    /// A configuration with the endpoint's provider defaults: region `us-east-1`, path style
+    /// for MinIO, bare addresses and `localhost` (virtual-host style cannot name them),
+    /// virtual-host style otherwise, 16 MiB parts on Tigris and 5 MiB elsewhere.
     #[must_use]
     pub fn new(endpoint: Endpoint, bucket: BucketName, prefix: Prefix) -> Self {
         let provider = Provider::from_host(
@@ -423,8 +417,7 @@ impl S3Config {
         self
     }
 
-    /// Replaces the provider the host decided; the provider only changes the
-    /// headers sent.
+    /// Replaces the provider the host decided; it only changes the headers sent.
     #[must_use]
     pub fn with_provider(mut self, provider: Provider) -> Self {
         self.provider = provider;
@@ -447,15 +440,13 @@ impl S3Config {
         self
     }
 
-    /// Replaces how many parts of one multipart upload may be in flight at
-    /// once, Go's `concurrency`. It governs nothing else: reads, listings and
-    /// HEADs have their own fixed limits. One sends every part after the one
-    /// before it.
+    /// Replaces how many parts of one multipart upload may be in flight, Go's `concurrency`.
+    /// It governs nothing else: reads, listings and HEADs have fixed limits. One sends every
+    /// part after the one before it.
     ///
-    /// Memory: an upload of a staged file holds no part, each is read from the
-    /// file as it is sent. An upload with no file behind it holds the parts in
-    /// flight and one more, and has fewer in flight than this when that many
-    /// would pass 256 MiB (`part_plan.rs`, `docs/decisions/D232.md`).
+    /// Memory: a staged file's upload holds no part; one with no file behind it holds the parts
+    /// in flight and one more, and has fewer in flight than this when that many would pass
+    /// 256 MiB (`part_plan.rs`, `docs/decisions/D232.md`).
     #[must_use]
     pub fn with_concurrency(mut self, concurrency: NonZeroUsize) -> Self {
         self.concurrency = Some(concurrency);
@@ -509,10 +500,8 @@ impl S3Config {
         self.cell
     }
 
-    /// How many parts of one multipart upload may be in flight: the
-    /// configured value, else `R2_CONCURRENCY` on R2, else
-    /// `DEFAULT_CONCURRENCY`. Decided here, not when set, so the provider
-    /// may change after.
+    /// Parts in flight: the configured value, else `R2_CONCURRENCY` on R2, else
+    /// `DEFAULT_CONCURRENCY`. Decided here, not when set, so the provider may change after.
     #[must_use]
     pub fn concurrency(&self) -> NonZeroUsize {
         match (self.concurrency, self.provider) {

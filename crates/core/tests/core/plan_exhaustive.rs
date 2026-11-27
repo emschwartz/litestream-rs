@@ -13,10 +13,8 @@
 //!
 //! Two scopes. The gate (`just check`) runs the small one, a few CPU-seconds in debug; the
 //! large one (`just plan-exhaustive`, the nightly `plan-exhaustive` job) is a strict superset of it
-//! and takes minutes. Before the split the gate swept every inventory of up to four files over
-//! transactions 1..=5 with levels {0,1,8,9} (523,686 inventories, 3.67 million cases, about
-//! 50 CPU-seconds and 124 s of wall time under load) and the as-of sweep over D=4 (about 19
-//! CPU-seconds); under load they outran nextest's 180 s limit.
+//! and takes minutes. The old single gate (four files over
+//! transactions 1..=5, 3.67 million cases) outran nextest's 180 s limit under load.
 //!
 //! The spec must decide every case (an empty judgement fails); the tally
 //! printed with `--no-capture` counts the cases per outcome and deciding
@@ -194,7 +192,7 @@ mod exhaustive {
     }
 
     /// The large sweep (`just plan-exhaustive`, nightly): five files, and a wider range. It
-    /// includes everything the gate runs and the old gate's four files over 1..=5.
+    /// includes everything the gate runs.
     #[test]
     #[ignore = "the large sweep: minutes in debug; run with `just plan-exhaustive`"]
     fn every_larger_inventory_plans_as_the_contract_says() {

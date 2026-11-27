@@ -19,8 +19,7 @@
 //! settle is a node, never goes back on a branch unless a recorded rewind explains it, and is the
 //! database itself (lag 0); two `AsOf` instants per cycle are nodes committed before the instant;
 //! at the end of a run, every transaction a level-0 file on the replica ends at restores to a
-//! node, in an order that climbs the tree (added after the first campaign, in which only the
-//! simulator's oracle, judging the same restores against its own model, flagged runs), and then
+//! node, in an order that climbs the tree, and then
 //! the simulator's oracle judges every transaction. A `Latest` that holds commits the database
 //! lost is counted, not failed (`lsr_history::AheadMode::Count`).
 //!
@@ -96,7 +95,6 @@ const AFTER_REBOOT: [(AfterReboot, u64); 3] = [
 /// What the application does after a reboot, before the frozen workload's own commits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AfterReboot {
-    /// Nothing.
     Nothing,
     /// Replays its last `K` writes (1 to [`REDO_MAX`], drawn per reboot), oldest first: each
     /// one's rows with the values it wrote, as upserts and deletes, so a replay that reaches
@@ -106,12 +104,10 @@ enum AfterReboot {
     Busy,
 }
 
-/// One write in the application's log: what it does to each row it touches.
 struct Logged {
     changes: Vec<(i64, Option<Vec<u8>>)>,
 }
 
-/// The application's after-reboot behaviour, its stream and its log.
 struct App {
     behaviour: AfterReboot,
     rng: Rng,
@@ -140,7 +136,6 @@ impl App {
         }
     }
 
-    /// A draw below `upper`.
     fn draw(&mut self, upper: u64) -> usize {
         usize::try_from(self.rng.below(upper)).unwrap()
     }
@@ -168,7 +163,6 @@ impl App {
     }
 }
 
-/// The SQL of a replayed write: an upsert or a delete per row, in one transaction.
 fn redo_sql(changes: &[(i64, Option<Vec<u8>>)]) -> String {
     let body: String = changes
         .iter()
@@ -226,7 +220,6 @@ impl Rng {
 
 type Rows = BTreeMap<i64, Vec<u8>>;
 
-/// A digest of a table's content: each row's id and value, in id order.
 fn digest(rows: &Rows) -> Digest {
     let parts: Vec<Vec<u8>> = rows
         .iter()
@@ -314,7 +307,6 @@ impl History {
     }
 }
 
-/// One run's state.
 struct Run {
     rig: Rig<Sqlite>,
     rng: Rng,
@@ -335,7 +327,6 @@ struct Run {
     held: [u64; 3],
 }
 
-/// Where a restore judged while the fault holds is made.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Held {
     /// During the segment: faults fire everywhere and the loss is armed.
@@ -346,7 +337,6 @@ enum Held {
     Rebooted,
 }
 
-/// The value of row `id` at `version`: the workload's own bytes.
 fn value(id: i64, version: u64, len: u64) -> Vec<u8> {
     let mut rng = Rng(version.wrapping_mul(0x1000_0001) ^ id.unsigned_abs());
     (0..len).map(|_| rng.next().to_le_bytes()[0]).collect()
@@ -360,7 +350,6 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
-/// The table's content as SQLite reads it through `conn`.
 fn read_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Rows> {
     let mut stmt = conn.prepare("SELECT id, v FROM t ORDER BY id")?;
     let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
@@ -406,7 +395,6 @@ impl Run {
         }
     }
 
-    /// One write of the workload: the SQL and the state it leaves.
     fn write(&mut self, rows: &mut Rows) -> String {
         self.version += 1;
         let len = self.len();
@@ -439,7 +427,6 @@ impl Run {
         format!("DELETE FROM t WHERE id = {id};")
     }
 
-    /// Runs one commit; the state is acknowledged when SQLite says so.
     fn commit(&mut self, step: Step) -> Result<(), RigError> {
         let mut next = self.rows.clone();
         let sql = match step {
@@ -477,7 +464,6 @@ impl Run {
         }
     }
 
-    /// One step; `Err` only for what is not a power loss's doing.
     fn step(&mut self, step: Step) -> Result<(), Anomaly> {
         let done = match step {
             Step::Insert | Step::Update | Step::Delete | Step::MultiRow => self.commit(step),
@@ -559,7 +545,6 @@ impl Run {
         true
     }
 
-    /// A segment, then the loss.
     fn segment(&mut self) -> Result<(), Anomaly> {
         self.rig.vfs().reset_calls();
         self.arm_loss();
@@ -650,7 +635,6 @@ impl Run {
             .map_or(acked.len(), |at| acked.len() - at - 1)
     }
 
-    /// The application's behaviour after a reboot, before the frozen workload's commits.
     fn after_reboot(&mut self, lost: usize) -> Result<(), Anomaly> {
         match self.app.behaviour {
             AfterReboot::Nothing => Ok(()),
@@ -710,7 +694,6 @@ impl Run {
         (id, value(id, version, len))
     }
 
-    /// One write of the after-reboot behaviour; the power stays on until the cycle's segment.
     fn replayed(&mut self, sql: String, next: Rows) -> Result<(), Anomaly> {
         self.exec(&sql, next)
             .map_err(|err| self.engine("after reboot", &err))
@@ -762,7 +745,6 @@ impl Run {
             .map_err(|err| Anomaly::RestoredCorrupt(err.to_string()))
     }
 
-    /// The cycle's judgment, after the reboot's settle.
     fn judge(&mut self) -> Result<(), Anomaly> {
         if let Err(err) = self.settle() {
             return Err(self.engine("settle", &err));

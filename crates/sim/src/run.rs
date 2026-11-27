@@ -216,34 +216,30 @@ pub struct Opts {
     pub switch_retention: Option<(u32, RetentionMode)>,
     /// The operations were drawn, not written: a step with nothing to act on
     /// is skipped, and the model is checked against SQLite's rules before
-    /// every step. [`run_with`] sets it.
+    /// every step.
     pub drawn: bool,
     /// With `drawn`, a power loss keeps the block law's draw instead of a
-    /// drawn prefix ([`Weights::block_crash_law`]). [`run_with`] sets it.
+    /// drawn prefix ([`Weights::block_crash_law`]).
     pub block_crash_law: bool,
     /// With `drawn`, the disk lies about the engine's fsync of the WAL from
-    /// the start ([`Weights::lying_wal_sync`]). [`run_with`] sets it.
+    /// the start ([`Weights::lying_wal_sync`]).
     pub lying_wal_sync: bool,
     /// What the app does after each restart ([`Weights::after_restart`]).
-    /// [`run_with`] sets it.
     pub after_restart: AfterRestart,
     /// How the clock moves between reads inside a tick
-    /// ([`Weights::clock_law`]). [`run_with`] sets it.
+    /// ([`Weights::clock_law`]).
     pub clock_law: ClockLaw,
-    /// Holds run a drawn sub-history and span restarts ([`Weights::overlap`]). [`run_with`]
-    /// sets it.
+    /// Holds run a drawn sub-history and span restarts ([`Weights::overlap`]).
     pub overlap: bool,
     /// One-shot store faults drawn inside an overlapping hold come from the whole error domain
-    /// ([`Weights::error_domain`]). [`run_with`] sets it.
+    /// ([`Weights::error_domain`]).
     pub error_domain: bool,
     /// Staging is the directory store on the in-memory filesystem ([`Weights::staging_fs`]).
-    /// [`run_with`] sets it.
     pub staging_fs: bool,
     /// The engine's TRUNCATE threshold, when not the usual ([`Weights::truncate_pages`]).
-    /// [`run_with`] sets it.
     pub truncate_pages: Option<NonZeroU32>,
     /// The bytes of staged files the engine sends in one tick, when not its own
-    /// ([`Weights::slice_bytes`]). [`run_with`] sets it.
+    /// ([`Weights::slice_bytes`]).
     pub slice_bytes: Option<NonZeroU64>,
     /// The database's pages when the run begins, when not the usual eight: the large
     /// profile's tens of thousands, so a snapshot or a compaction input is many slices.
@@ -254,23 +250,20 @@ pub struct Opts {
     /// the healthy tail at the end of every run is always charged.
     pub cost: Option<crate::cost::Profile>,
     /// The process dies right after every tick in which an injected fault fired
-    /// ([`Weights::kill_after_fault`]). [`run_with`] sets it.
+    /// ([`Weights::kill_after_fault`]).
     pub kill_after_fault: bool,
     /// The replica is the S3 store over its in-memory bucket ([`Weights::remote_s3`]).
-    /// [`run_with`] sets it.
     pub remote_s3: bool,
-    /// With `remote_s3`, the store sends in parts ([`Weights::remote_parts`]). [`run_with`]
-    /// sets it.
+    /// With `remote_s3`, the store sends in parts ([`Weights::remote_parts`]).
     pub remote_parts: Option<crate::remote::Parts>,
     /// The replica's store has no conditional writes ([`Weights::no_create_only`]).
-    /// [`run_with`] sets it.
     pub no_create_only: bool,
     /// Which judges run: the oracle, the history judge, or both (the default).
     pub judges: Judges,
     /// Which SQLite the engine runs against: the rule model by default.
     pub sqlite: crate::side::SideMaker,
     /// Each replica request's latency is drawn from a heavy tail and the run is charged for its
-    /// I/O ([`Weights::latency_tail`]). [`run_with`] sets it.
+    /// I/O ([`Weights::latency_tail`]).
     pub latency_tail: bool,
     /// The replicator holds the application's writes under this fail-stop setting
     /// (`run/write_gate.rs`); `None`, the default, runs no write gate.
@@ -319,7 +312,6 @@ pub fn actor_config() -> ActorConfig {
     }
 }
 
-/// How long `maintenance` keeps snapshots and level-0 files.
 fn windows(maintenance: &Maintenance) -> Windows {
     Windows {
         snapshots: maintenance.snapshot_retention(),
@@ -442,7 +434,6 @@ struct Runner {
     expected: Vec<StopCause>,
     /// A drawn step that has nothing to act on is skipped, not a failure.
     lenient: bool,
-    /// The process dies right after a tick in which an injected fault fired.
     kill_after_fault: bool,
     /// A fault operation was applied since the last kill: the law kills once per operation, so
     /// a fault that keeps firing (a rate) does not keep the engine from ever running.
@@ -450,7 +441,6 @@ struct Runner {
     /// Page sizes the database had before a drawn resize: an engine that
     /// remembers one may stop on the change.
     expected_sizes: Vec<PageSize>,
-    /// The engine incarnation running now has booted.
     booted: bool,
     /// The fail-stop judge (`crate::failstop`).
     fail_stop: FailStopJudge,
@@ -1205,7 +1195,6 @@ impl Runner {
         Step::Stopped(cause)
     }
 
-    /// Judges what the tick put on the replica and left staged.
     fn judge_stores(&mut self) -> Result<(), Violation> {
         self.judge_staging_kept()?;
         self.judge_puts()?;
@@ -1213,7 +1202,6 @@ impl Runner {
         self.judge_staged_durable()
     }
 
-    /// Shows the forcing checks the WAL before a tick.
     fn forcings_before_tick(&mut self) {
         self.forcings.see_wal(
             self.w.sqlite.wal_header_salts(),
@@ -1308,8 +1296,7 @@ impl Runner {
             Event::Resnapshot(cause) => (cause, false),
             // A busy answer from SQLite is no excuse for a later snapshot: a sync step it
             // fails moves nothing, and a PASSIVE keeps its position pinned through one
-            // (`docs/decisions/D225.md`). Before, every retry excused the snapshots that
-            // followed it, and a busy sequence bump followed by a restart passed unseen.
+            // (`docs/decisions/D225.md`).
             Event::Retrying {
                 fault: Fault::SqliteBusy,
                 ..
@@ -1342,8 +1329,6 @@ impl Runner {
         Ok(())
     }
 
-    /// Counts what an event shows: its kind, and the fault, cause or
-    /// snapshot it names.
     fn note_event(&mut self, event: &Event) {
         let reach = &mut self.report.reach;
         reach.bump(format!("event.{}", variant(event)));
@@ -1431,7 +1416,6 @@ impl Runner {
         )
     }
 
-    /// Scheduled faults that hit a call on either store, summed.
     fn fault_hits(&self) -> (u64, u64) {
         let sum = |faults: &crate::FaultHandle| {
             faults.hits().iter().fold(0_u64, |sum, (_, _, hits)| {
@@ -1512,7 +1496,6 @@ impl Runner {
         }
     }
 
-    /// Records each task the tick took out of its degraded state.
     fn note_recovered(&mut self) {
         for (was, task) in self.degraded.iter_mut().zip(Task::ALL) {
             let now = self.actor.degraded(task).is_some();
@@ -1523,7 +1506,6 @@ impl Runner {
         }
     }
 
-    /// Runs a hold and marks its end in the trace.
     fn hold_marked(&mut self, hold: crate::generate::Hold, ticks: u8) -> Result<(), Violation> {
         let held = self.hold(hold, ticks);
         if self.trace {
@@ -1748,7 +1730,6 @@ impl Runner {
         }
     }
 
-    /// The application's commit of [`Op::Structured`].
     fn structured(&mut self, seq: u32, data: u8) {
         let size = self.w.sqlite.page_size();
         let before = self.w.sqlite.db_size();
@@ -1844,7 +1825,6 @@ impl Runner {
                 .any(|want| std::mem::discriminant(want) == std::mem::discriminant(&cause))
     }
 
-    /// Makes `cause` legitimate for the rest of the run.
     fn expect(&mut self, cause: StopCause) {
         if !self.expected.contains(&cause) {
             self.expected.push(cause);
@@ -2059,7 +2039,6 @@ impl Runner {
         Ok(())
     }
 
-    /// How many replica reads a scheduled fault has failed or changed so far.
     fn remote_read_faults(&self) -> u32 {
         let object = self
             .w
@@ -2336,7 +2315,6 @@ impl Runner {
         Ok(())
     }
 
-    /// The history judge over the raw replica now.
     fn judge_history(&mut self, ask: crate::history::Ask) -> Result<(), Violation> {
         if !self.judges.history {
             return Ok(());
@@ -2909,7 +2887,6 @@ impl Runner {
         }
     }
 
-    /// The model no longer matches SQLite's rules.
     fn model_diverged(&self) -> Violation {
         bug_fault(crate::oracle::MODEL_DIVERGED)
     }

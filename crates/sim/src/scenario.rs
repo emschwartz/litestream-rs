@@ -396,8 +396,8 @@ fn last_boot_continues(report: &RunReport) -> Result<(), String> {
 /// TRUNCATE and a commit restart the WAL. The WAL cannot vouch for the replica's newest file and
 /// the meta directory is brand new, so the boot asks whether the database is the replica's
 /// state: it is that state plus the commit, written after the replica's newest file, so the boot
-/// snapshots above it (`AheadOfReplica`). It used to stop here, until the operator trusted the
-/// local database (`docs/decisions/D194.md`).
+/// snapshots above it (`AheadOfReplica`), with no stop for the operator to clear
+/// (`docs/decisions/D194.md`).
 #[must_use]
 pub fn meta_wiped_wal_restarted() -> Scenario {
     let restarted = vec![

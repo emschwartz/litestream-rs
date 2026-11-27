@@ -705,8 +705,7 @@ struct Seen {
 /// a second client (its own connections) lists and reads right after each.
 /// Every stale answer is counted and printed as an `OBS consistency` table;
 /// nothing is asserted about the provider beyond the rounds running, since
-/// the table is the measurement (kk-review section 4e). A provider that
-/// keeps a listing stale shows here before the engine's boot meets it.
+/// the table is the measurement.
 pub fn consistency_probe(h: &RealHarness) {
     let reader = h.next_process();
     let one = ReadLen::new(1).unwrap();

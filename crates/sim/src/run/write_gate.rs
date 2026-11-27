@@ -79,7 +79,6 @@ impl Runner {
         }
     }
 
-    /// Whether the runner holds the application's writes now, by its own record.
     pub(super) const fn holding_writes(&self) -> bool {
         self.write_gate.held
     }

@@ -4,11 +4,11 @@
 //! [Finding]s, each with a [Severity]. [Depth::Names] makes list calls only:
 //! unrecognized names, level-9 files that cannot start a chain, and holes in the
 //! history. A chain may start at any file that begins at transaction 1, so
-//! [Finding::NoSnapshot] means no such file exists. For every valid level-9 snapshot in turn the planner is asked for the next
-//! snapshot's last transaction (with the newer snapshots hidden, so the older
-//! one is the base), and for the newest snapshot it is asked for the latest
-//! state; each [PlanOutcome::Gap] is one finding, so a hole in older history
-//! is reported, not only the one at the newest staged file.
+//! [Finding::NoSnapshot] means no such file exists. For every valid level-9
+//! snapshot the planner is asked for the next snapshot's last transaction (newer
+//! snapshots hidden, so the older one is the base), and for the newest one for
+//! the latest state; each [PlanOutcome::Gap] is one finding, so a hole in older
+//! history is reported too.
 //!
 //! [Depth::Names] never reads contents, so a clean report there cannot vouch
 //! that a restore would succeed; only [Depth::Contents] can.
@@ -27,14 +27,14 @@
 //! The per-file findings are graded by use: a damaged file the latest plan
 //! reads is [Severity::Unrestorable] (and restore fails on it, so it is not
 //! reported a second time), any other is [Severity::Degraded], older history.
-//! The files of the latest plan are read twice, once by the walk and once by
-//! the dry run; skipping the second read would need a second code path that
-//! feeds restore from the walk's decoder, which is the drift this design
-//! removes. The dry run plans over the walk's listing, not a second one: a file
-//! that went missing meanwhile makes restore list afresh, as it always does.
-//! A file is one read when it fits one chunk, since a short chunk is the end of
-//! the object; a longer one takes one read per chunk. [Report::files_read] and
-//! [Report::bytes_read] count both walks. Memory is one decoder and one chunk, plus 8 bytes a page for the dry run's sink.
+//! The files of the latest plan are read twice, by the walk and by the dry run:
+//! skipping the second read would need a second code path feeding restore from
+//! the walk's decoder, which is the drift this design removes. The dry run plans
+//! over the walk's listing; a file that went missing meanwhile makes restore
+//! list afresh, as it always does. A file that fits one chunk is one read (a
+//! short chunk is the end of the object); a longer one takes one read per chunk.
+//! [Report::files_read] and [Report::bytes_read] count both walks. Memory is one
+//! decoder and one chunk, plus 8 bytes a page for the dry run's sink.
 //!
 //! Only what stops the walk is an error ([VerifyError]): a failed listing or a
 //! failed read. A damaged file is a finding, never an error, and a file that
@@ -558,10 +558,9 @@ fn name_findings(inventory: &Inventory, findings: &mut Findings) -> PlanOutcome 
     for key in inventory.malformed_snapshots() {
         findings.push(Finding::MalformedSnapshot { key });
     }
-    // Every level-9 file that starts a chain is a restore point of its own, so
-    // each gets a window. A lower-level file from transaction 1 can also be the
-    // base, but it is no restore point: a stray one beside a newer snapshot
-    // would only report history nobody needs.
+    // Every level-9 file that starts a chain is a restore point, so each gets a
+    // window. A stray lower-level file from transaction 1 is no restore point:
+    // it would only report history nobody needs.
     let snapshots: Vec<FileInfo> = inventory
         .files()
         .iter()
@@ -594,9 +593,8 @@ fn name_findings(inventory: &Inventory, findings: &mut Findings) -> PlanOutcome 
                 });
             }
         }
-        // None of these is a damage finding of its own: the first two are not
-        // possible for the latest state, the rest are already findings or a
-        // healthy plan.
+        // Not damage findings of their own: the first two cannot happen for the
+        // latest state, the rest are already findings or a healthy plan.
         PlanOutcome::Plan(_)
         | PlanOutcome::EmptyReplica
         | PlanOutcome::BeyondNewest { .. }

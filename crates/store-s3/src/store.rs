@@ -613,7 +613,6 @@ impl<T: Transport> Inner<T> {
         add(&mut self.stats.lock().unwrap_or_else(PoisonError::into_inner));
     }
 
-    /// Counts how one created-at time read ended: found by metadata or by fallback, or the file was gone.
     fn tally_created_at(&self, result: &Result<CreatedAt, StoreError>) {
         self.tally(|stats| match result {
             Ok(created_at) => match created_at.origin() {
@@ -685,7 +684,6 @@ impl<T: Transport> Inner<T> {
         Self::judge_head(file, &response)
     }
 
-    /// What one HEAD's answer says about `file`'s created-at time.
     fn judge_head(file: &FileInfo, response: &HttpResponse) -> Result<CreatedAt, StoreError> {
         let op = StoreOp::Read;
         let key = file.key;
@@ -698,8 +696,6 @@ impl<T: Transport> Inner<T> {
         created_at_from_head(op, &head, file.size, listed)
     }
 
-    /// One HEAD per file as one batch, each judged and counted as
-    /// [`Self::created_at`] does.
     fn created_at_many(&self, files: &[FileInfo]) -> Vec<Result<CreatedAt, StoreError>> {
         let op = StoreOp::Read;
         let results = self.batch(
@@ -726,7 +722,7 @@ impl<T: Transport> Inner<T> {
         let key = file.key;
         let response = self.call(op, |b, now| b.get_range(now, &key, 0, len))?;
         // The metadata is read before the body is taken out of the response, and judged after
-        // the body's own errors, as it was when the body was copied.
+        // the body's own errors.
         let carried = match response.status() {
             200 | 206 => Some(parse_created_at_header(&response)),
             _ => None,

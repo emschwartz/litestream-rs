@@ -47,7 +47,6 @@ fn parsed(header: &RawHeader) -> Header {
     Header::decode(&header.bytes()).unwrap()
 }
 
-/// The index entry for page `pgno` of the two-page snapshot.
 fn entry(pgno: u32) -> IndexEntry {
     let mut region = index_for(&snapshot_frames());
     region.extend_from_slice(&u64::try_from(region.len()).unwrap().to_be_bytes());

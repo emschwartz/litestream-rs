@@ -238,7 +238,6 @@ fn build(base: &Path, case: &Case) -> PathBuf {
     root
 }
 
-/// A YAML double-quoted scalar.
 fn quoted(text: &str) -> String {
     let mut out = String::from("\"");
     for c in text.chars() {
@@ -342,7 +341,6 @@ fn listing(root: &Path) -> String {
     out
 }
 
-/// Both answers for one case, with the config and the tree for the report.
 fn answers(go: &Path, case: &Case) -> (Dump, Dump, String) {
     let base = tempfile::tempdir().unwrap();
     let base = base.path().canonicalize().unwrap();

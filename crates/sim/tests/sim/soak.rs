@@ -121,7 +121,6 @@ fn rotating_seeds() {
     );
 }
 
-/// The large profile's replay line: the soak's laws and sizes, so a replay draws the same run.
 fn replay_long(seed: Seed) -> String {
     format!("LSR_SIM_LARGE=1 {}", replay(seed, LONG_STEPS))
 }

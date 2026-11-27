@@ -223,7 +223,6 @@ fn the_usage_text_lists_exactly_the_flags_the_parser_defines() {
     have.sort_unstable();
     want.sort_unstable();
     assert_eq!(have, want);
-    // The two flags the help once called refused work, and the text says what they do.
     assert!(!USAGE.contains("Not in this build"));
 }
 

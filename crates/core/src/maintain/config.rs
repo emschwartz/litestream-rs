@@ -318,8 +318,7 @@ impl Maintenance {
 
     /// Go's defaults: levels of 30 s, 5 min and 1 h, snapshots every 24 h
     /// kept 24 h, level 0 kept 5 min once covered and checked every 15 s,
-    /// retention enforced. A test feeds the same numbers through
-    /// [`Maintenance::new`].
+    /// retention enforced.
     #[must_use]
     pub fn go_default() -> Self {
         Self {
@@ -335,11 +334,9 @@ impl Maintenance {
     }
 
     /// The same settings for a `replicate -once` run: the engine plans no compaction, no
-    /// snapshot and no retention pass of its own. Go switches every background monitor off
-    /// before it opens the store under `-once` (`cmd/litestream/replicate.go:374-383`:
-    /// `CompactionMonitorEnabled = false`, `L0RetentionCheckInterval = 0`, `MonitorInterval = 0`),
-    /// and its one-off run only syncs, uploads and then snapshots and enforces retention when
-    /// asked. The settings stay for that retention pass (`docs/decisions/D221.md`).
+    /// snapshot and no retention pass of its own, as Go switches every background monitor off
+    /// under `-once` (`cmd/litestream/replicate.go:374-383`). The settings stay for the one
+    /// retention pass the run may end with (`docs/decisions/D221.md`).
     #[must_use]
     pub const fn one_off(mut self) -> Self {
         self.run = Run::OneOff;
@@ -385,8 +382,7 @@ impl Maintenance {
     }
 
     /// How often level-0 retention is checked while uploads continue (Go's
-    /// `l0-retention-check-interval`, 15 s unless set). [`Self::retention_check_every`] is how
-    /// often the check runs: the set value, or 120 s when unset.
+    /// `l0-retention-check-interval`, 15 s unless set); see [`Self::retention_check_every`].
     #[must_use]
     pub const fn l0_check_interval(&self) -> Interval {
         match self.l0_check {

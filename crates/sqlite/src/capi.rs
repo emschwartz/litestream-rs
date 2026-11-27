@@ -3,11 +3,9 @@
 //! The engine's own connections are opened here on the raw C API (libsqlite3-sys), not through a
 //! binding crate, so the library places no bound of its own on which libsqlite3-sys an application
 //! links (the `version` module decides which builds are accepted). Every call into SQLite's C API
-//! goes through this module, each at one `unsafe` site with its invariant stated: open and close,
-//! a statement run (prepare, step, column reads, finalize), the transaction state, the busy
-//! timeout and busy handler, the file controls, the checkpoint, and the library's identity. The
-//! VFS method calls and private-layout reads that need the file handle these hand out stay in the
-//! modules that explain them (`pages`, `shm`, `identity`).
+//! goes through this module, each at one `unsafe` site with its invariant stated. The VFS method
+//! calls and private-layout reads that need the file handle stay in the modules that explain them
+//! (`pages`, `shm`, `identity`).
 //!
 //! [`Connection`] owns a handle it opened and closes it on drop. [`Handle`] is a borrowed
 //! view of an open handle, the engine's or an application's, that cannot outlive its lifetime;
@@ -166,7 +164,7 @@ impl Connection {
     pub(crate) fn close(self) -> Result<(), SqliteError> {
         let db = std::mem::ManuallyDrop::new(self).db;
         // SAFETY: `db` is open and owned by the value whose drop was just suppressed, so nothing
-        // uses or closes it again; every statement this module prepares is finalized before its call returns.
+        // uses or closes it again.
         let rc = unsafe { ffi::sqlite3_close(db.as_ptr()) };
         if rc == ffi::SQLITE_OK {
             Ok(())
@@ -219,7 +217,6 @@ pub(crate) struct Handle<'a> {
     life: PhantomData<&'a ffi::sqlite3>,
 }
 
-/// A prepared statement, finalized when dropped.
 struct Statement<'a> {
     stmt: NonNull<ffi::sqlite3_stmt>,
     conn: Handle<'a>,
@@ -248,7 +245,6 @@ impl Statement<'_> {
         }
     }
 
-    /// Column 0 of the current row as an integer.
     #[expect(unsafe_code, reason = "column reads are C calls")]
     fn int(&self) -> Result<i64, SqliteError> {
         // SAFETY: a live statement on a row (the caller stepped to one); column 0 exists in
@@ -263,7 +259,6 @@ impl Statement<'_> {
         Ok(unsafe { ffi::sqlite3_column_int64(self.stmt.as_ptr(), 0) })
     }
 
-    /// Column 0 of the current row as text.
     #[expect(unsafe_code, reason = "column reads are C calls")]
     fn text(&self) -> Result<String, SqliteError> {
         let wrong = SqliteError::Type { wanted: "text" };
@@ -325,7 +320,6 @@ impl<'a> Handle<'a> {
             .ok_or_else(SqliteError::misuse)
     }
 
-    /// The raw pointer, for tests that lend the handle to rusqlite.
     #[cfg(test)]
     pub(crate) const fn as_ptr(self) -> *mut ffi::sqlite3 {
         self.db.as_ptr()
@@ -613,7 +607,6 @@ pub(crate) trait BusyState: Send + Sync + 'static {
     fn retry(&self, count: c_int) -> bool;
 }
 
-/// The busy handler SQLite calls through its C function pointer.
 #[expect(
     unsafe_code,
     reason = "SQLite calls this through a C function pointer with the argument it was given"
@@ -625,7 +618,6 @@ extern "C" fn on_busy<T: BusyState>(arg: *mut c_void, count: c_int) -> c_int {
     c_int::from(state.retry(count))
 }
 
-/// The client data's destructor.
 #[expect(
     unsafe_code,
     reason = "SQLite calls this through a C function pointer when it drops the client data"

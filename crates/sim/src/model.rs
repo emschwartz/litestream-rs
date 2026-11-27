@@ -83,7 +83,6 @@ impl PageImage {
         self.db_size
     }
 
-    /// A page the image holds explicitly, found along the chain.
     fn explicit(&self, pgno: u32) -> Option<Rc<Vec<u8>>> {
         let mut node = self;
         loop {

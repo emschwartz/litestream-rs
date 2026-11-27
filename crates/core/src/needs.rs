@@ -65,7 +65,6 @@ impl Resource {
         }
     }
 
-    /// How to get it, for the failure message.
     const fn how(self) -> &'static str {
         match self {
             Self::Minio => "start MinIO and run through `just test-s3` or `just compat-s3`",

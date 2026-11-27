@@ -606,7 +606,6 @@ pub async fn run(command: Command) -> Result<Done, CliError> {
     }
 }
 
-/// The store behind a replica.
 enum Opened {
     Dir(FsStore),
     S3(Remote),

@@ -55,8 +55,6 @@ pub enum StagedEditError {
     NoCreatedAt(FileKey),
 }
 
-/// The exact created-at time the listing carried, so a rewrite keeps the file's
-/// creation time.
 fn listed_at(info: &FileInfo) -> Result<Timestamp, StagedEditError> {
     info.created_at()
         .map(|created_at| created_at.at())
@@ -81,18 +79,14 @@ fn is_full_image(bytes: &[u8]) -> bool {
         .is_ok_and(|done| done.page_count() == u64::from(done.header().commit()))
 }
 
-/// The same file with no WAL origin in its header.
 fn without_origin(bytes: &[u8]) -> Option<Vec<u8>> {
     rewritten(bytes, |fields| fields.wal = None)
 }
 
-/// The same pages under a header `edit` changed.
 fn rewritten(bytes: &[u8], edit: impl FnOnce(&mut lsr_ltx::HeaderFields)) -> Option<Vec<u8>> {
     reencoded(bytes, edit, |_| {})
 }
 
-/// The file re-encoded, with its header through `edit` and each page's
-/// bytes, in order, through `page`.
 fn reencoded(
     bytes: &[u8],
     edit: impl FnOnce(&mut lsr_ltx::HeaderFields),
@@ -147,7 +141,6 @@ fn flip_byte_from(bytes: &mut [u8], from: usize) {
     }
 }
 
-/// Every byte of `key`.
 fn read_all(store: &impl lsr_core::ObjectStore, key: &FileKey) -> Result<Vec<u8>, StoreError> {
     use lsr_core::ReadLen;
     let Some(chunk) = ReadLen::new(1 << 20) else {
@@ -542,7 +535,6 @@ impl World {
         Some(self.committed(pages, db_size, app))
     }
 
-    /// Takes a commit SQLite made into the model and the history.
     fn committed(
         &mut self,
         pages: &[(PageNo, Vec<u8>)],
@@ -568,7 +560,6 @@ impl World {
         id
     }
 
-    /// Logs the model's new commits in the history, at the clock's time.
     fn log_history(&mut self) {
         let now = lsr_core::Clock::now(self.clock.as_ref());
         self.history.log_commits(&self.model, now);
@@ -611,8 +602,6 @@ impl World {
         self.in_tick.take()
     }
 
-    /// Records the armed commit in the model if the tick made it, and
-    /// disarms it.
     fn record_commit_in_tick(&mut self) -> Option<CommittedInTick> {
         let done = self.sqlite.take_commit_in_tick()?;
         let (remote_at, staged_from) = done.created_at;
@@ -685,7 +674,6 @@ impl World {
         Some(id)
     }
 
-    /// Page 1 as the rules hold it now.
     fn first_page(&self) -> Vec<(PageNo, Vec<u8>)> {
         let size = self.sqlite.page_size();
         let image = self.sqlite.image();
@@ -763,7 +751,6 @@ impl World {
         }
     }
 
-    /// Whether the model's newest commit is the one `commit` names.
     fn newest_ends_at(&self, commit: AppCommit) -> bool {
         self.model
             .newest_commit()
@@ -1285,7 +1272,6 @@ impl World {
         Ok(None)
     }
 
-    /// Every (key, digest) the staging recorder took a put of since event `since`.
     fn engine_puts(&self, since: usize) -> BTreeSet<(FileKey, u64)> {
         self.staging_recorder
             .events()

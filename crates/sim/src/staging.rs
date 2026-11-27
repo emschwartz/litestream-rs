@@ -37,7 +37,6 @@ use crate::memfs::{MemFs, PowerLoss};
 use crate::store::{Faults, Lost, Recorder, Volatile, VolatileHandle, YieldEachCall};
 use crate::world::World;
 
-/// Where the directory store keeps the staging directory on the in-memory filesystem.
 const ROOT: &str = "/meta/staging";
 
 /// How a staged file broke the store's contract across a power loss.
@@ -97,7 +96,6 @@ pub enum StagingUpload {
     Fs(FsUpload<MemFs>),
 }
 
-/// A file's listing and bytes, as the store returns them.
 type Namespace = BTreeMap<FileKey, (FileInfo, Vec<u8>)>;
 
 impl StagingRaw {
@@ -193,7 +191,6 @@ fn judge(
     (lost, reverted)
 }
 
-/// Every staged file, with its listing and bytes.
 fn namespace(store: &FsStore<MemFs>) -> Result<Namespace, StoreError> {
     let mut out = BTreeMap::new();
     let chunk = ReadLen::new(1 << 20).ok_or(StoreError::Transient {

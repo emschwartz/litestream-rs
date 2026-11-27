@@ -1,6 +1,5 @@
 use super::*;
 
-/// A checkpointer that grants every barrier.
 struct Grants;
 
 impl Checkpointer for Grants {

@@ -112,7 +112,6 @@ mod diff {
         }
     }
 
-    /// One call's answer, as text: equal answers print equally.
     fn apply<S: ObjectStore>(store: &S, op: &Op) -> String {
         fn show<T: Debug>(value: T) -> String {
             format!("{value:?}")

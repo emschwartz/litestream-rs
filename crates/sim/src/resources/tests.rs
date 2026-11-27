@@ -203,8 +203,7 @@ fn nine_slices_in_a_row_after_a_commit_break_the_bound() {
 }
 
 /// A tick that published a file and began the next is a slice too: nine in a row after a
-/// commit, with no turn for the WAL step, break the bound. Before, each published file reset the
-/// count, and an engine that sent a backlog this way ahead of a waiting commit passed.
+/// commit, with no turn for the WAL step, break the bound.
 #[test]
 fn nine_ticks_that_publish_a_file_each_after_a_commit_break_the_bound() {
     let mut reach = Reach::default();

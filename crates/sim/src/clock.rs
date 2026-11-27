@@ -5,9 +5,9 @@
 //! under test reads goes through [`SimClock`], under a [`ClockLaw`]:
 //!
 //! - [`ClockLaw::PerTick`]: every read inside a tick returns the driver's clock, which does not
-//!   move until the tick ends (and what the tick has stalled, below). One reading per tick, as the simulator always had: a stamp taken
-//!   before a commit and one taken after it are equal, so no ordering of clock reads against
-//!   commits can be wrong. Every recorded history keeps this law.
+//!   move until the tick ends (and what the tick has stalled, below). A stamp taken before a
+//!   commit and one taken after it are equal, so no ordering of clock reads against commits can
+//!   be wrong. Every recorded history keeps this law.
 //! - [`ClockLaw::EachRead`]: every read returns a later time than the read before it, by a step
 //!   of 1 to [`MAX_STEP_MS`] ms drawn from the run's own stream, so code that reads its clock
 //!   at the wrong moment stamps a time the history can tell from the right one. When the tick

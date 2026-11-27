@@ -79,8 +79,7 @@ pub enum Forcing {
     /// The WAL changed generation while our read transaction was not held.
     /// A change under a hold on read mark zero is no reason: the hold blocks
     /// every backfill, so no commit can go with the old generation and the
-    /// engine follows it (`lsr_core::recover_traced`, rule 6; seeds 0xe and
-    /// 0xf4846 snapshotted there before). That holds for a position that reached the
+    /// engine follows it (`lsr_core::recover_traced`, rule 6). That holds for a position that reached the
     /// committed end in the hold; one still behind it is [`Self::PositionUnproven`].
     ReadLockLapsed,
     /// The operator asked for a snapshot.
@@ -400,14 +399,13 @@ impl Forcings {
         self.uploaded.extend(world.replica_level_zero());
         // The replica holds everything staging does only once no staged file is one it never
         // took: a file left behind it (a backup put back, a file damaged in place) is still to be
-        // dropped, and the fault that left it must be in the window when it is (seed 0xf42e9).
+        // dropped, and the fault that left it must be in the window when it is.
         let staged_keys = world.staged_level_zero();
         let left_behind = staged_keys.iter().any(|key| !self.uploaded.contains(key));
         // Nor while the newest staged file is gone from staging: an upload that reaches the
         // engine's newest file proves nothing about a staging directory wiped under its send
         // (its bytes were read before the wipe), and a boot over what is left finds no file to
-        // continue from (seed 0x126d69380a38: the wipe was forgotten and the boot's snapshot
-        // above the replica was called needless).
+        // continue from.
         let newest_kept = newest_staged.is_some_and(|newest| {
             staged_keys
                 .iter()
@@ -592,9 +590,7 @@ impl TickWorld for crate::World {
 
 /// The stores as the engine sees them: its newest staged transaction may be
 /// one an outside edit removed from staging (a backup put back), and an
-/// upload has caught up only when it reaches that one too (seed 0xf43fb: the
-/// replica took the restored files, the engine then missed its own newest
-/// and dropped from it, with the staging edit forgotten).
+/// upload has caught up only when it reaches that one too.
 #[derive(Debug)]
 pub struct WithEngine<'a, W> {
     /// The stores.
@@ -702,7 +698,7 @@ mod tests {
 
     /// An upload that reaches staging's newest file has not caught up while
     /// the engine's own newest staged file is past it: the staging edit that
-    /// removed that file stays in the window (seed 0xf43fb).
+    /// removed that file stays in the window.
     #[test]
     fn an_upload_short_of_the_engines_newest_staged_file_keeps_a_staging_edit() {
         let mut forcings = Forcings::new();
@@ -744,7 +740,7 @@ mod tests {
     /// Staging wiped under the send of the engine's newest file, 26: the replica takes it, and
     /// staging holds nothing. The upload reaches the engine's newest file but vouches for no
     /// staging left to continue from, so the wipe stays in the window for the boot that finds
-    /// the empty directory and snapshots above the replica (seed 0x126d69380a38).
+    /// the empty directory and snapshots above the replica.
     #[test]
     fn an_upload_that_leaves_staging_empty_keeps_the_staging_edit() {
         let mut forcings = Forcings::new();
@@ -813,7 +809,7 @@ mod tests {
 
     /// An upload that reaches the newest staged file has not caught up while staging still
     /// holds a file the replica never took: the edit that left it there stays in the window,
-    /// so the prune that later drops it is justified (seed 0xf42e9).
+    /// so the prune that later drops it is justified.
     #[test]
     fn an_upload_past_a_file_left_behind_keeps_the_staging_edit() {
         let mut forcings = Forcings::new();
@@ -964,7 +960,7 @@ mod tests {
 
     /// A boot that snapshots above a replica that passed staging gives up
     /// the staged files the replica never took then, once, with its window;
-    /// the prune that deletes them later loses nothing new (seed 0xf4cf9).
+    /// the prune that deletes them later loses nothing new.
     #[test]
     fn a_replica_that_passed_staging_gives_up_its_files_at_the_boot() {
         let mut forcings = Forcings::new();

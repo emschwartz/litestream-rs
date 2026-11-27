@@ -287,7 +287,7 @@ const fn unlinked_cell(op: SourceOp) -> Cell {
     match op {
         // The draw would be the world fault EnvFault::UnlinkWal, after which these calls report
         // it. Drawn in histories, it showed the model losing track of the database after an
-        // unlinked WAL and a later power loss (seeds 0x79, 0x94 and 0x7fb of the mixed set).
+        // unlinked WAL and a later power loss.
         SourceOp::Open | SourceOp::Len | SourceOp::Committed => Cell::Unmodelled(UNLINK_UNMODELLED),
         SourceOp::PageCount
         | SourceOp::ReadPage
@@ -568,8 +568,7 @@ pub const fn store_cell(target: Target, op: StoreOp, class: StoreClass) -> Cell 
 
 const fn denied_cell(target: Target, why: Denied) -> Cell {
     match (target, why) {
-        // A staging read refused during level-1 compaction was classified as the replica's
-        // until #145 (compaction routes its local reads through `Fault::from_staging`).
+        // Compaction routes its local reads through `Fault::from_staging`.
         (Target::Staging, Denied::Permission) | (Target::Remote, _) => Cell::Drawn,
         (
             Target::Staging,

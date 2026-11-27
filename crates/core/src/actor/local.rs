@@ -77,7 +77,6 @@ pub(super) enum LocalTry {
     Spent,
 }
 
-/// `env` with staging as a local course sees it.
 fn lend<'e, W, P, C, L, R>(
     env: &'e mut Env<'_, W, P, C, L, R>,
     staging: &'e Apart<'e, L>,
@@ -123,7 +122,7 @@ impl LocalAt {
         self.tail
     }
 
-    /// The course after one of its steps left it at `position`.
+    /// The course after a step left it at `position`.
     pub(super) const fn moved(self, position: Position, tail: Tail) -> Self {
         Self {
             position,
@@ -284,7 +283,7 @@ impl Actor {
             ..Engine::fresh()
         };
         self.kept.tasks.hand(Task::Sync, Task::Upload);
-        // The WAL may hold frames past the position already.
+        // The WAL may already hold frames past the position.
         Tick::Ran {
             event,
             next: Next::Now,
@@ -358,10 +357,9 @@ impl Actor {
         Ok(())
     }
 
-    /// `tick`, the end of a boot attempt, which leaves a local course as it was. One that
-    /// deleted staged files before it failed (a
-    /// drop takes the newest first) left a local course at a position whose file is gone:
-    /// the course ends, where carrying on would stage the next file across the hole.
+    /// `tick`, the end of a boot attempt. One that deleted staged files before it failed (a
+    /// drop takes the newest first) left the course at a position whose file is gone: the
+    /// course ends, as carrying on would stage the next file across the hole.
     pub(super) async fn keep_local<W, P, C, L, R>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,

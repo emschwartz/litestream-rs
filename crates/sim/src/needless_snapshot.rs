@@ -134,7 +134,6 @@ pub const fn forced_by(cause: SnapshotCauseKind, at_boot: bool) -> Option<&'stat
 /// The check's state over one run.
 #[derive(Clone, Debug, Default)]
 pub struct NeedlessSnapshot {
-    /// The engine's counter as the last tick of this incarnation left it.
     counted: SnapshotCounts,
     /// A forced snapshot was announced and is not staged yet: a crash
     /// before it is staged makes the next boot announce it again.

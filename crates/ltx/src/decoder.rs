@@ -247,7 +247,6 @@ enum Stage {
     Trailer,
 }
 
-/// Everything after the header.
 #[derive(Debug)]
 struct Body {
     header: Header,

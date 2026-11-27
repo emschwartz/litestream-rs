@@ -47,9 +47,8 @@
 //! [`CredentialError::NotBuilt`] where the SDK would use it, rather than skipped, so the
 //! chain never signs with credentials Go would not have chosen.
 //!
-//! The process environment is read only by [`CredentialChain::from_process`];
-//! tests hand the resolver an environment of their own, so they never mutate
-//! the process's and can run in parallel.
+//! The process environment is read only by [`CredentialChain::from_process`]; tests hand
+//! the resolver their own, so none mutates the process's.
 
 mod ini;
 mod process;
@@ -286,9 +285,8 @@ impl CredentialChain {
     }
 
     /// The container credentials, then the instance metadata service, as Go tries them
-    /// last; without an HTTP client, neither.
-    /// The last sources. The instance metadata service is the one the chain reaches when
-    /// nothing is configured, so its failure is reported with every other source tried.
+    /// last; without an HTTP client, neither. The metadata service is what the chain reaches
+    /// when nothing is configured, so its failure is reported with every other source tried.
     fn host_source(&self, mut tried: Tried) -> Result<Resolved, CredentialError> {
         let Some(http) = self.http.clone() else {
             tried.instance_metadata = MetadataLook::NoClient;

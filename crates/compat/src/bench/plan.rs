@@ -71,8 +71,6 @@ pub(super) const NAPKIN: &str = "napkin (written before timing):
     page cache at about 2 GB/s (0.5 s), one GET per file at about 1 ms each: floor about 1.5 s;
     peak memory: a streaming decoder needs a few MiB, one buffered file needs its size";
 
-// ---- snapshot-impact (issue 315): what a full copy does to an application beside it ----
-
 /// The database: 16 GiB, twice the 8 GiB box's memory (4,194,304 pages, 16,777,216 rows).
 pub(super) const IMPACT_DB_MIB: u64 = 16 * 1024;
 /// The hot set: 1 GiB of leaf pages, one row each (262,144 pages), a seventh of the memory.

@@ -396,7 +396,6 @@ pub enum Tick {
 }
 
 impl Tick {
-    /// The tick with its wake rewritten by `f`; a tick that stopped has none.
     fn map_next(self, f: impl FnOnce(Next) -> Next) -> Self {
         match self {
             Self::Ran { event, next } => Self::Ran {
@@ -626,7 +625,6 @@ impl Actor {
         self.kept.stop.phase(self.booted())
     }
 
-    /// Counts the event a recovery verdict names, and hands on its decision.
     fn noted(&mut self, verdict: Verdict) -> Recovered {
         match verdict.event {
             Some(RecoverEvent::ReadLockViolated { .. }) => {
@@ -998,7 +996,6 @@ impl Actor {
         Ok(clock.now())
     }
 
-    /// The drain's deadline in engine time.
     fn drain_deadline(&self) -> Option<Timestamp> {
         match self.kept.stop {
             Stop::Draining { deadline } => Some(self.on_engine_clock(deadline)),
@@ -1714,7 +1711,6 @@ impl Actor {
         self.staged().max(self.engine.upload.confirmed())
     }
 
-    /// Takes the upload state a step left.
     fn set_upload(&mut self, state: UploadState) {
         self.engine.upload = state;
         self.engine.witnesses.confirmed(state.confirmed());
@@ -1807,7 +1803,6 @@ impl Actor {
         (self.running() && now < due).then_some(due)
     }
 
-    /// Whether everything staged is on the replica.
     fn caught_up(&self) -> bool {
         self.staged().is_some() && self.staged() == self.engine.upload.confirmed()
     }
@@ -1882,7 +1877,6 @@ impl Actor {
             .sync_step(fault, took, from.as_ref(), to.as_ref());
     }
 
-    /// One sync step from what recovery says about the WAL now.
     async fn step<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
@@ -2843,7 +2837,6 @@ impl Actor {
         }
     }
 
-    /// A snapshot the store took.
     fn snapshot_written(&mut self, info: FileInfo, now: Timestamp, created_at_read: u64) -> Tick {
         self.maintained(now);
         self.engine.known.put(info);
@@ -3014,7 +3007,6 @@ impl Actor {
         Some(self.ran(Event::Sending { bytes }, now))
     }
 
-    /// Ends the job part-way, if any, and aborts its upload.
     async fn end_sliced(&mut self) {
         if let Some((_, sliced)) = self.engine.sliced.take() {
             if sliced.is_snapshot() {
@@ -3143,7 +3135,6 @@ impl Actor {
         tick
     }
 
-    /// The transaction the prune task may delete through, when it may run.
     fn prune_ready(&self, now: Timestamp) -> Option<Txid> {
         // A merge part-way may read staged copies at or below the bound (a hole's repair):
         // they stay until it ends.
@@ -3167,7 +3158,6 @@ impl Actor {
             && maintain.wants_listing(now)
     }
 
-    /// Whether prune and maintenance take the next unit ahead of uploads.
     const fn fair_turn(&self) -> bool {
         self.engine.maintain.passed_over >= state::FAIR_SHARE
     }
@@ -3211,7 +3201,6 @@ impl Actor {
     }
 }
 
-/// What a boot found.
 struct Booted {
     /// The newest staged file, or the replica's newest level-0 file.
     newest_staged: Option<NewestStagedFile>,
@@ -3365,7 +3354,6 @@ async fn remove_scratch<L: Role, R: Role>(
 /// What boot's listing and sweep deleted from staging, from which transaction on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Dropped {
-    /// Nothing.
     Nothing,
     /// A staged file that failed verification twice, and every one after it.
     Unreadable(Txid),
@@ -3412,9 +3400,7 @@ async fn boot_listing<L: Role, R: Role>(
     })
 }
 
-/// What boot's listing leaves for the rest of the boot.
 struct Listed {
-    /// The upload state to start from.
     upload: UploadState,
     /// The staged files from this transaction on hold other content than the replica's
     /// newest level-0 file.
@@ -3425,9 +3411,7 @@ struct Listed {
     empty: EmptyLevels,
 }
 
-/// What a boot makes of the staged files once the replica is listed.
 struct BootStaged {
-    /// The upload state to start from.
     upload: UploadState,
     /// What was deleted from staging for diverging or failing verification.
     dropped: Dropped,
@@ -3552,7 +3536,6 @@ fn boot_wal_of<R>(
     reader.map(|reader| BootWal { reader, committed })
 }
 
-/// What the boot's judges found: what was made of the staged files, and recovery.
 struct Judged {
     staged: BootStaged,
     booted: Booted,

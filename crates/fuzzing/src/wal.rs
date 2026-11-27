@@ -44,7 +44,6 @@ const CHECKSUMMED_FRAME_HEADER: usize = 8;
 /// Where the stored checksum starts in a frame header.
 const FRAME_CHECKSUM_AT: usize = 16;
 
-/// The parameter bytes, in input order.
 #[derive(Clone, Copy, Debug)]
 struct Params {
     mode: u8,
@@ -190,7 +189,6 @@ impl Wal {
         self.frames.saturating_add(1)
     }
 
-    /// The index of the boundary at frame index `frame`, if it is one.
     fn bound_at(&self, frame: u32) -> Option<usize> {
         self.bounds
             .iter()
@@ -314,7 +312,6 @@ fn whole_scan(reader: &mut WalReader<Probe>, shared: &Shared, frames: u32) -> Sc
     whole
 }
 
-/// The whole scan's transactions that end at or before frame index `frame`.
 fn ending_by(whole: &Scan, frame: u32) -> Vec<&CommittedTx> {
     whole
         .txs
@@ -560,7 +557,6 @@ fn check_page_map(wal: &Wal, whole: &Scan) {
     }
 }
 
-/// Every scanned page reads back to its digest.
 fn check_pages(reader: &mut WalReader<Probe>, frames: &[FrameRef], buf: &mut [u8]) {
     for frame in frames {
         if let Err(error) = reader.read_page(frame, buf) {

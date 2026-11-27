@@ -34,7 +34,6 @@ fn run_with(ops: &[Op], slice: u64, s3: bool) -> RunReport {
         .unwrap()
 }
 
-/// The events of the run's ticks, in order.
 fn events(report: &RunReport) -> Vec<&Event> {
     report
         .seen
@@ -77,7 +76,6 @@ fn ticks(n: usize) -> impl Iterator<Item = Op> {
     std::iter::repeat_n(Op::Tick, n)
 }
 
-/// Every slice of the first file, to the tick that publishes it.
 fn whole_file() -> Vec<u64> {
     (1..=22_u64)
         .map(|n| n.saturating_mul(SLICE))
@@ -213,7 +211,7 @@ fn a_drain_finishes_the_file_in_flight() {
 /// of the upload met the damage, so the upload does not put the edit behind the engine. The
 /// next process finds its newest staged file unreadable and drops it, which leaves staging
 /// behind the replica, and snapshots above the replica's copy: that snapshot has the edit for
-/// its cause. Before, the judge forgot the edit at the upload and called the snapshot needless.
+/// its cause.
 #[test]
 fn a_staged_file_damaged_after_its_last_read_is_published_whole_and_costs_a_snapshot() {
     // A tick's bytes are the size of the file the first checkpoint's frame makes, the second

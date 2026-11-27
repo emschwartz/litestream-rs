@@ -168,8 +168,7 @@ fn no_more_parts_are_in_flight_than_the_setting_and_one_waits() {
 
 /// A buffered upload (a level-9 snapshot's) asked before each write says it is full before the
 /// write that would fill a part with every lane taken, so no write it let through waits for a
-/// part. Such a write used to wait for one on the engine's thread, and the engine synced and
-/// uploaded nothing of its database until the part ended.
+/// part (a wait on the engine's thread stalls its sync and upload).
 #[test]
 fn a_buffered_write_let_through_never_waits_for_a_part() {
     let rig = rig(1, oldest);
@@ -215,7 +214,7 @@ fn parts_that_end_out_of_order_make_the_same_object() {
 
 /// A part fails while three others are in flight. The call that collects its answer fails
 /// with it, the others are not sent, and an abort then returns with nothing in flight and
-/// leaves the id to the orphan list, as a failed upload always did.
+/// leaves the id to the orphan list.
 #[test]
 fn a_part_that_fails_with_others_in_flight_ends_the_upload_and_the_rest_are_not_sent() {
     let rig = rig(4, oldest);

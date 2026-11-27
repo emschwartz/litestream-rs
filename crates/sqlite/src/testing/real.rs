@@ -43,8 +43,7 @@
 //! reason above), a power loss's tear counts are zero (the block law still tears the database
 //! file a partial backfill left unsynced, as the fault VFS's own test shows; it is not counted
 //! here), and the commit images of a regrown WAL are never asked for, since no regrowth is
-//! drawn here. No recovery disagreement is ever reported: SQLite's own recovery is the only one
-//! here, so there is nothing to disagree with.
+//! drawn. No recovery disagreement is reported: SQLite's own recovery is the only one.
 
 mod doors;
 mod in_tick;
@@ -88,8 +87,6 @@ impl fmt::Debug for RealSide {
     }
 }
 
-/// Creates the database at `db` with `pages` rows of zeros and returns the application's
-/// connection to it.
 fn create(
     db: &Path,
     vfs: super::vfs::FaultVfs,
@@ -195,10 +192,9 @@ impl RealSide {
 }
 
 impl Real {
-    /// A crash: the engine's process, or with a power loss every connection, goes away.
     fn crash(&mut self, kind: CrashKind) {
-        // What the application did inside the crashed tick stays for the world to take up,
-        // as the model keeps it: a reader it began outlives our process.
+        // What the application did inside the crashed tick stays for the world to take up, as in
+        // the model: a reader it began outlives our process.
         self.engine = None;
         if kind == CrashKind::Process {
             return;

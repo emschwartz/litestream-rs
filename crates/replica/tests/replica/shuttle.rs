@@ -166,7 +166,6 @@ fn worker(shared: &Shared) {
         if taken.snapshot {
             snapshots += 1;
         }
-        // The tick: sync whatever the application has committed so far.
         shared.update(|_| ());
         if let Some(deadline) = taken.stop {
             // The drain: one more look, so a commit that landed during the tick is synced.

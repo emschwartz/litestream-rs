@@ -212,10 +212,9 @@ impl Rig {
     }
 }
 
-/// One open for the file however many chunks it is read in, and one read a chunk. Opening
-/// the file again for every chunk cost a stat of the path, an open, a stat of the file and a
-/// close a chunk beside the read, and gave the kernel a new file to learn the read pattern
-/// of each time.
+/// One open for the file however many chunks it is read in, and one read a chunk. A reopen per
+/// chunk costs two stats, an open and a close beside the read, and hides the read pattern from
+/// the kernel.
 #[test]
 fn a_send_opens_its_staged_file_once_however_many_chunks_it_reads() {
     let rig = rig();

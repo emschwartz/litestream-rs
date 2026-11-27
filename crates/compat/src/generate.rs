@@ -28,7 +28,6 @@ const MAX_TAIL: u32 = 400;
 const ATTEMPTS: u32 = 4;
 const GAP_TOUCHES: u32 = 6;
 
-/// The two salts of a WAL file header.
 fn wal_salts(wal: &Path) -> Option<(u32, u32)> {
     let mut head = [0u8; 32];
     fs::File::open(wal).ok()?.read_exact(&mut head).ok()?;
@@ -114,7 +113,6 @@ impl Run {
     }
 }
 
-/// The keys above level 0.
 fn self_keys(replica: &Path) -> Result<Vec<FileKey>, CompatError> {
     Ok(replica::list(replica)?
         .files
@@ -172,7 +170,6 @@ fn find_hole(files: &[ReplicaFile]) -> Result<Option<u64>, CompatError> {
     Ok(None)
 }
 
-/// The files with every non-snapshot file covering `txid` removed.
 fn without(files: &[ReplicaFile], txid: u64) -> Vec<ReplicaFile> {
     files
         .iter()

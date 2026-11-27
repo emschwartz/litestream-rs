@@ -110,7 +110,6 @@ fn go_platform<'a>(os: &'a str, arch: &'a str) -> (&'a str, &'a str) {
     (os, arch)
 }
 
-/// `lsr trust-local`'s line.
 fn trusted_local_text(through: Option<Txid>, meta: &Path) -> String {
     match through {
         Some(txid) => format!(
@@ -403,7 +402,6 @@ fn path_array(paths: &[PathBuf]) -> Value {
         .collect()
 }
 
-/// Appends a key to a JSON object.
 fn add(object: &mut Value, key: &str, value: impl Into<Value>) {
     if let Value::Object(map) = object {
         map.insert(key.to_owned(), value.into());
@@ -938,7 +936,6 @@ fn indented(objects: Vec<Value>) -> String {
     out
 }
 
-/// Go's `databases`, as text.
 fn databases_text(rows: &[(String, &'static str)]) -> String {
     let mut table = vec![["path".to_owned(), "replica".to_owned()]];
     table.extend(
@@ -948,7 +945,6 @@ fn databases_text(rows: &[(String, &'static str)]) -> String {
     columns(&table)
 }
 
-/// Go's `databases -json`.
 fn databases_json(rows: &[(String, &'static str)]) -> String {
     indented(
         rows.iter()
@@ -969,7 +965,6 @@ fn ltx_row(info: &FileInfo) -> [String; 5] {
     ]
 }
 
-/// Go's `ltx`, as text.
 fn ltx_text(files: &[FileInfo]) -> String {
     let mut table = vec![[
         "level".to_owned(),
@@ -982,7 +977,6 @@ fn ltx_text(files: &[FileInfo]) -> String {
     columns(&table)
 }
 
-/// Go's `ltx -json`.
 fn ltx_json(files: &[FileInfo]) -> String {
     indented(
         files

@@ -7,7 +7,6 @@ use lsr_core::{FinalSnapshot, StoreError, StoreOp};
 use lsr_sim::run::run_ops;
 use lsr_sim::{FaultShape, Op, Opts, RunReport, Seed, Target};
 
-/// The run's report, or its violation as text.
 fn run(ops: &[Op]) -> Result<RunReport, String> {
     run_ops(Seed::new(1), ops, &Opts::default()).map_err(|failure| failure.violation.to_string())
 }

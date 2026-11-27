@@ -56,7 +56,6 @@ fn an_idle_database_under_a_reset_index_settles_with_no_checkpoint() {
     assert_eq!(rig.ck.calls().len(), checkpoints, "{seen:?}");
     let last = seen.last().unwrap();
     assert_eq!(next_of(last), Some(Next::OnWalChange), "{seen:?}");
-    // Polled again with nothing new, the actor does nothing.
     let (staging, remote, _) = rig.io();
     assert_eq!(
         event(&rig.tick(&mut actor, T0 + 70_000)),

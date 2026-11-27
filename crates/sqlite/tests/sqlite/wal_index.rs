@@ -26,7 +26,6 @@ fn connect(path: &Path) -> Connection {
     conn
 }
 
-/// A WAL database with Go's tables and a user table, every connection closed.
 fn fresh_db() -> (TempDir, PathBuf) {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("db");

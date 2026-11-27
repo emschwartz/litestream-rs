@@ -153,8 +153,8 @@ fn oracle_catches_a_reused_transaction_id() {
     );
 }
 
-/// A power loss that cut no commit a file covers does not license reusing an id: the run-wide
-/// exemption the oracle used to grant after any power loss hid exactly this.
+/// A power loss that cut no commit a file covers does not license reusing an id: no run-wide
+/// exemption follows any power loss.
 #[test]
 fn a_power_loss_that_cut_nothing_covered_does_not_excuse_a_reused_id() {
     let mut f = fixture();
@@ -277,8 +277,6 @@ fn acked_reads_a_step_result() {
 
 /// The judges' listing is the store's own contents, not the engine's listing code: a listing
 /// fault queued for the engine neither stops it nor is spent by it, and it finds every file.
-/// Before, the oracle listed through `Inventory::load`, so the fault failed the check as
-/// "listing the replica" and was gone before the engine met it.
 #[test]
 fn the_judges_list_the_replica_without_the_engines_listing() {
     let f = fixture();
