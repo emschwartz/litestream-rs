@@ -2,6 +2,8 @@ name = "staged-window-one-mebibyte-s3"
 fix = "52b7ff1ea"
 package = "lsr-store-s3"
 tests = [
-    "memory::a_compaction_into_s3_holds_its_inputs_and_its_parts",
+    # Only a merge of four inputs or fewer has a share of the staging budget over 128 KiB, so
+    # only a merge that small shows a window grown past it.
+    "memory::a_compaction_of_few_staged_files_into_s3_reads_each_in_a_staging_window",
 ]
 patch = "staged-window-one-mebibyte"

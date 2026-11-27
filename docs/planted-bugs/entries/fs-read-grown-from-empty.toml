@@ -4,5 +4,5 @@ fix = "8bf156d6b"
 package = "lsr-store-fs"
 tests = [
     "memory::a_compaction_holds_its_share_of_the_budget_per_replica_input",
-    "memory::a_level_one_compaction_holds_a_staging_window_per_input",
+    "memory::a_full_level_one_compaction_holds_the_staging_budget",
 ]

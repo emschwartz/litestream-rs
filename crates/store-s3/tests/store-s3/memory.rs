@@ -604,6 +604,23 @@ fn a_compaction_into_s3_holds_its_inputs_and_its_parts() {
     assert_compaction_holds_its_parts(PartSize::MIN.get().try_into().unwrap(), 5);
 }
 
+/// A merge of four staged files reads each in 128 KiB, the most a staging window is (the
+/// budget would allow a mebibyte each): the files are over a mebibyte, so a window that grew
+/// to it would show. The output is under one part, so the output it holds is its size.
+#[test]
+fn a_compaction_of_few_staged_files_into_s3_reads_each_in_a_staging_window() {
+    let (done, peak) = staged_compaction_peak(4, 300, PartSize::MIN.get().try_into().unwrap(), 5);
+    let output = usize::try_from(done.info().size).unwrap();
+    assert!(output < 5 * MIB, "one part holds the output: {output}");
+    let bound = 4 * (128 * KIB + PAGE) + FLUSH + output + MIB;
+    eprintln!(
+        "compaction of 4 files into s3: {} KiB (bound {} KiB)",
+        peak >> 10,
+        bound >> 10
+    );
+    assert!(peak <= bound, "held {peak} bytes, over {bound}");
+}
+
 /// The same at a part size above the default and a concurrency below it: the output is four
 /// parts, two batches, so a part held past its batch shows.
 #[test]
@@ -612,14 +629,40 @@ fn a_compaction_into_s3_at_a_large_part_size_holds_its_parts() {
 }
 
 fn assert_compaction_holds_its_parts(part: usize, concurrency: usize) {
+    let (done, peak) = staged_compaction_peak(MAX_INPUTS, INPUT_PAGES, part, concurrency);
+    assert!(done.info().size > u64::try_from(concurrency * part).unwrap());
+    // One batch of parts: a compaction hands each part to the upload as it fills, so measured
+    // it never holds the part after the batch (37.6 MiB at 16 MiB x 2, where 3 parts were
+    // allowed), and a body copied for the request shows (54 MiB).
+    let bound = MAX_INPUTS * (STAGED_WINDOW + PAGE) + FLUSH + concurrency * part + MARGIN;
+    eprintln!(
+        "compaction into s3: {} KiB (bound {} KiB)",
+        peak >> 10,
+        bound >> 10
+    );
+    assert!(
+        peak <= bound,
+        "compaction held {peak} bytes, over {bound} ({MAX_INPUTS} inputs x ({STAGED_WINDOW} + {PAGE}) + {FLUSH} + {concurrency} parts in flight x {part} + {MARGIN})"
+    );
+}
+
+/// Compacts `inputs` staged level-0 files of `pages` distinct pages each into level 1 of a
+/// store that uploads `concurrency` parts of `part` bytes at once, and returns what it wrote
+/// and the peak live heap above the start.
+fn staged_compaction_peak(
+    inputs: usize,
+    pages: u32,
+    part: usize,
+    concurrency: usize,
+) -> (lsr_core::Compacted, usize) {
     let from = tempfile::tempdir().unwrap();
     let staging = FsStore::new(from.path());
-    let commit = INPUT_PAGES * u32::try_from(MAX_INPUTS).unwrap();
+    let commit = pages * u32::try_from(inputs).unwrap();
     // From transaction 2: a file that starts at transaction 1 is a snapshot, and must hold
     // every page.
-    for n in 2..=u64::try_from(MAX_INPUTS).unwrap() + 1 {
-        let first = INPUT_PAGES * u32::try_from(n - 2).unwrap() + 1;
-        let bytes = ltx_bytes(n, commit, first..=first + INPUT_PAGES - 1);
+    for n in 2..=u64::try_from(inputs).unwrap() + 1 {
+        let first = pages * u32::try_from(n - 2).unwrap() + 1;
+        let bytes = ltx_bytes(n, commit, first..=first + pages - 1);
         let key = FileKey::new(Level::ZERO, TxidRange::new(txid(n), txid(n)).unwrap());
         block_on(async {
             let stamp = Timestamp::from_unix_millis(1_700_000_000_000);
@@ -649,18 +692,7 @@ fn assert_compaction_holds_its_parts(part: usize, concurrency: usize) {
 
     let done = done.unwrap();
     assert_eq!(done.pages(), commit);
-    assert!(done.info().size > u64::try_from(concurrency * part).unwrap());
-    let bound = MAX_INPUTS * (STAGED_WINDOW + PAGE) + FLUSH + (concurrency + 1) * part + MARGIN;
-    eprintln!(
-        "compaction into s3: {} KiB (bound {} KiB)",
-        peak.extra >> 10,
-        bound >> 10
-    );
-    assert!(
-        peak.extra <= bound,
-        "compaction held {} bytes, over {bound} ({MAX_INPUTS} inputs x ({STAGED_WINDOW} + {PAGE}) + {FLUSH} + {concurrency} parts in flight and one more x {part} + {MARGIN})",
-        peak.extra
-    );
+    (done, peak.extra)
 }
 
 /// Pages each replica input of [`compaction_from_s3_peak`] holds: about 400 KiB, more than

@@ -26,7 +26,9 @@ fn lists_at(rig: &Rig, from: usize, level: u8) -> usize {
 
 /// A first start lists each level above the top once, at boot, where its three whole listings
 /// (the boot's, the snapshot's pass and the pass after it) used to list them three times:
-/// fifteen LISTs Go does not send became five.
+/// fifteen LISTs Go does not send became five. The snapshot is planned from the boot's listing
+/// (`docs/decisions/D287.md`), so only two whole listings remain, the boot's and the one after
+/// the snapshot: the levels it lists (0 to 3 and 9) twice.
 #[test]
 fn a_first_start_lists_the_levels_above_the_top_once() {
     let mut rig = super::first_start::quiet();
@@ -35,7 +37,7 @@ fn a_first_start_lists_the_levels_above_the_top_once() {
     rig.settle(&mut actor, T0);
     assert_eq!(Rig::files(&rig.remote, Level::SNAPSHOT).len(), 1);
     for level in [0, 1, 2, 3, 9] {
-        assert_eq!(lists_at(&rig, 0, level), 3, "level {level}");
+        assert_eq!(lists_at(&rig, 0, level), 2, "level {level}");
     }
     for level in 4..=8 {
         assert_eq!(lists_at(&rig, 0, level), 1, "level {level}");
