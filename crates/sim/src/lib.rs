@@ -12,7 +12,7 @@
 //! all of it for one run; [`seed`] names a run. [`generate`] draws a history from
 //! a seed, [`resources`] holds the resource bounds, [`forcing`] notes what can force
 //! the engine's hand and [`needless_snapshot`] judges each snapshot against it, and [`run`] applies a
-//! history to the actor, judges it, and shrinks a failure. [`staging`] puts the real directory
+//! history to the actor, judges it, and [`shrink`] cuts a failure down to the operations that matter. [`staging`] puts the real directory
 //! store (`lsr-store-fs`) under the staging wrappers in a share of runs, on [`memfs`], an
 //! in-memory filesystem under the same crash law, so a power loss acts on the store's own syncs.
 //!
@@ -45,6 +45,7 @@ pub mod resources;
 pub mod run;
 pub mod scenario;
 pub mod seed;
+pub mod shrink;
 pub mod side;
 pub mod slot;
 pub mod sqlite;
@@ -63,8 +64,12 @@ pub use oracle::{
     Acked, Bound, Checked, Ground, Violation, Windows, bug_fault, check, check_with, within,
 };
 pub use reach::Reach;
-pub use run::{Failure, Judges, Opts, RunReport, run, run_with, shrink};
-pub use seed::{ParseDayError, ParseSeedError, SEEDS_PER_NIGHT, Seed, nightly_base, replay_line};
+pub use run::{Failure, Judges, Opts, RunReport, run, run_with};
+pub use seed::{
+    ParseDayError, ParseSeedError, ParseShardError, SEEDS_PER_NIGHT, Seed, Shard, long_base,
+    nightly_base, replay_line,
+};
+pub use shrink::{Class, MAX_RUNS, Shrunk, scenario_source, shrink, shrink_ops};
 pub use sqlite::{
     AppCommit, AutoTally, CheckpointNumbers, CrashKind, CreatedAt, InTickAt, InTickCommit,
     InTickDone, InTickOp, InTickRan, InTickSite, OtherProcessMode, ReaderId, SimCheckpointer,

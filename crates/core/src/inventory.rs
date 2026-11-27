@@ -6,12 +6,13 @@
 //! built, which keeps "the history looks shorter than it is" out of every
 //! later decision.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use lsr_ltx::Txid;
 use thiserror::Error;
 
 use crate::layout::{FileInfo, FileKey, Level, ListedTime};
+use crate::plan::touches;
 use crate::store::{BatchKind, ListAt, ListingStalled, ObjectStore, PageLimit, StoreError};
 
 /// [`SCAN_PAGE`] as a count. Checked at build time: `PageLimit::new` would refuse
@@ -61,6 +62,41 @@ pub fn is_snapshot_start(info: &FileInfo) -> bool {
     info.key.range().min() == Txid::MIN
 }
 
+/// The levels 1 to 8 that the last listing of each found empty: no file and no unrecognized
+/// name. Only an earlier configuration or another process puts a file at a level above the
+/// configured top, so once a listing of every level (the boot's) has found one empty, a whole
+/// maintenance listing leaves it out ([`Self::whole`]) and pays its LIST once per boot, not
+/// on every whole listing (`docs/decisions/D294.md`).
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub(crate) struct EmptyLevels(BTreeSet<Level>);
+
+impl EmptyLevels {
+    /// Learns from `inventory`, a listing of `listed`, which of those levels are empty; the
+    /// levels it did not list stay as they were known.
+    pub(crate) fn learn(&mut self, inventory: &Inventory, listed: &[ListAt]) {
+        for at in listed
+            .iter()
+            .filter(|at| Level::COMPACTION.contains(&at.level))
+        {
+            if inventory.level(at.level).is_empty() && inventory.skipped(at.level) == 0 {
+                self.0.insert(at.level);
+            } else {
+                self.0.remove(&at.level);
+            }
+        }
+    }
+
+    /// What a whole maintenance listing reads: every level from its first page, but the ones
+    /// above `top` known empty. Levels 0 to `top` and the snapshots are always listed.
+    pub(crate) fn whole(&self, top: Level) -> Vec<ListAt> {
+        Level::ALL
+            .iter()
+            .filter(|level| **level <= top || !self.0.contains(level))
+            .map(|&level| ListAt::first(level))
+            .collect()
+    }
+}
+
 /// Every file of a replica, ascending by key, plus the count of unrecognized names
 /// each level held.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -78,11 +114,11 @@ impl Inventory {
     /// end, then level 1, as one loop would do it.
     ///
     /// Every level is listed, the ones the configuration does not compact into too (4 to 8
-    /// by default): one LIST each that Go's maintenance does not send. Go lists only its
-    /// configured levels, so its retention (`store.go:871-879`, `EnforceSnapshotRetention`)
-    /// never deletes a file an earlier configuration left at another level, which stays
-    /// billed and stays in the chain Go's restore builds. A restore and a plan here see the
-    /// whole replica.
+    /// by default): one LIST each that Go does not send. Go lists only its configured levels,
+    /// so its retention (`store.go:871-879`, `EnforceSnapshotRetention`) never deletes a file
+    /// an earlier configuration left at another level, which stays billed and stays in the
+    /// chain Go's restore builds. A restore and a boot here see the whole replica; maintenance
+    /// lists again only the levels above the top that held something ([`EmptyLevels`]).
     ///
     /// # Errors
     /// The first failed page in level order, or a cursor that does not
@@ -97,9 +133,9 @@ impl Inventory {
 
     /// Lists each of `starts` to the end and returns what was listed: an inventory of those
     /// listings only, which is **not** a picture of the replica unless `starts` holds every
-    /// level from its first page. Only the maintenance tail view
-    /// ([`crate::maintain`]'s `Tail`) builds one on purpose, and says what it may decide
-    /// from it.
+    /// level from its first page, or every level but ones known empty ([`EmptyLevels::whole`]).
+    /// Only the maintenance tail view ([`crate::maintain`]'s `Tail`) builds a narrower one on
+    /// purpose, and says what it may decide from it.
     ///
     /// # Errors
     /// As [`Self::load`].
@@ -107,25 +143,11 @@ impl Inventory {
         store: &S,
         starts: &[ListAt],
     ) -> Result<Self, InventoryError> {
-        let mut files = Vec::new();
-        let mut skipped = BTreeMap::new();
-        let width = store.batch_width(BatchKind::Lists).get();
-        let mut going: Vec<ListAt> = starts.to_vec();
-        while !going.is_empty() {
-            let round: Vec<ListAt> = going.iter().take(width).copied().collect();
-            let pages = store.list_many(&round, SCAN_PAGE).await;
-            let mut next = Vec::with_capacity(going.len());
-            for (at, page) in round.iter().zip(pages) {
-                let page = page?;
-                let seen: &mut usize = skipped.entry(at.level).or_default();
-                *seen = seen.saturating_add(page.skipped);
-                files.extend(page.files);
-                next.extend(at.following(page.next)?);
-            }
-            next.extend(going.into_iter().skip(round.len()));
-            going = next;
+        let mut listing = Listing::new(starts);
+        while !listing.is_complete() {
+            listing.advance(store, Scope::All).await?;
         }
-        Self::from_parts(files, skipped)
+        listing.inventory()
     }
 
     /// An inventory of exactly these files, for tests and callers that
@@ -266,6 +288,131 @@ impl Inventory {
             .filter(|info| info.key.level().is_snapshot() && !is_snapshot_start(info))
             .map(|info| info.key)
             .collect()
+    }
+}
+
+/// Which of a [`Listing`]'s unfinished levels one round pages.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Scope {
+    /// Every one.
+    All,
+    /// A replica's first look: level 9 to the end (every snapshot is a candidate base, and Go
+    /// lists them all too) and the first page of every other level.
+    Start,
+    /// The levels whose last listed file still touches a chain ending at this transaction,
+    /// or that have none listed: a chain stops looking at the first file past it (Go's
+    /// `restoreLevelCursor.refresh`).
+    Past(Txid),
+}
+
+/// Pages of a replica's levels listed so far, a prefix of each level in key order. A restore
+/// to an instant lists no further than its chain's end ([`Scope::Past`]), as Go does, and
+/// plans over what it has ([`Self::inventory`]).
+#[derive(Clone, Debug)]
+pub(crate) struct Listing {
+    files: Vec<FileInfo>,
+    skipped: BTreeMap<Level, usize>,
+    /// The cursor of every level with more pages.
+    going: Vec<ListAt>,
+}
+
+impl Listing {
+    fn new(starts: &[ListAt]) -> Self {
+        Self {
+            files: Vec::new(),
+            skipped: BTreeMap::new(),
+            going: starts.to_vec(),
+        }
+    }
+
+    /// Nothing is left to page: the listing is the whole of what it was started on.
+    pub(crate) fn is_complete(&self) -> bool {
+        self.going.is_empty()
+    }
+
+    /// The first look at every level, as [`Scope::Start`] describes.
+    ///
+    /// # Errors
+    /// As [`Inventory::load`].
+    pub(crate) async fn begin<S: ObjectStore>(store: &S) -> Result<Self, InventoryError> {
+        let all: Vec<ListAt> = Level::ALL
+            .iter()
+            .map(|&level| ListAt::first(level))
+            .collect();
+        let mut listing = Self::new(&all);
+        while listing
+            .going
+            .iter()
+            .any(|at| Self::wants(&listing.files, Scope::Start, at))
+        {
+            listing.advance(store, Scope::Start).await?;
+        }
+        Ok(listing)
+    }
+
+    /// Whether a chain ending at `reach` needs nothing more from the listing: every level
+    /// still paging has listed a file that starts past `reach` and one, so no later file
+    /// can touch the chain.
+    pub(crate) fn is_past(&self, reach: Txid) -> bool {
+        !self
+            .going
+            .iter()
+            .any(|at| Self::wants(&self.files, Scope::Past(reach), at))
+    }
+
+    fn wants(files: &[FileInfo], scope: Scope, at: &ListAt) -> bool {
+        match scope {
+            Scope::All => true,
+            Scope::Start => at.level.is_snapshot() || at.after.is_none(),
+            Scope::Past(reach) => {
+                let last = files
+                    .iter()
+                    .filter(|info| info.key.level() == at.level)
+                    .map(|info| info.key.range().min())
+                    .max();
+                last.is_none_or(|min| touches(min, reach))
+            }
+        }
+    }
+
+    /// Lists the next page of the first `width` levels in `scope`, one round of requests.
+    ///
+    /// # Errors
+    /// The first failed page in level order, or a cursor that does not advance.
+    pub(crate) async fn advance<S: ObjectStore>(
+        &mut self,
+        store: &S,
+        scope: Scope,
+    ) -> Result<(), InventoryError> {
+        let width = store.batch_width(BatchKind::Lists).get();
+        let mut round: Vec<ListAt> = Vec::new();
+        let mut rest: Vec<ListAt> = Vec::new();
+        for at in std::mem::take(&mut self.going) {
+            if round.len() < width && Self::wants(&self.files, scope, &at) {
+                round.push(at);
+            } else {
+                rest.push(at);
+            }
+        }
+        let pages = store.list_many(&round, SCAN_PAGE).await;
+        for (at, page) in round.iter().zip(pages) {
+            let page = page?;
+            let seen: &mut usize = self.skipped.entry(at.level).or_default();
+            *seen = seen.saturating_add(page.skipped);
+            self.files.extend(page.files);
+            self.going.extend(at.following(page.next)?);
+        }
+        self.going.extend(rest);
+        Ok(())
+    }
+
+    /// An inventory of what was listed. It is the replica only where [`Self::is_past`] says
+    /// the chain it will be asked for is covered.
+    ///
+    /// # Errors
+    /// [`InventoryError::ConflictingDuplicate`], as [`Inventory::from_files`].
+    pub(crate) fn inventory(&self) -> Result<Inventory, InventoryError> {
+        Inventory::from_parts(self.files.clone(), self.skipped.clone())
     }
 }
 
@@ -451,6 +598,49 @@ mod tests {
         assert!(Inventory::default().level(Level::ZERO).is_empty());
     }
 
+    /// The levels each whole listing reads, from a listing of every level of `store`.
+    fn whole_after(store: &MemStore, top: u8) -> Vec<u8> {
+        let all: Vec<ListAt> = Level::ALL.iter().map(|&l| ListAt::first(l)).collect();
+        let mut empty = EmptyLevels::default();
+        empty.learn(&block_on(Inventory::load(store)).unwrap(), &all);
+        let levels = empty.whole(Level::new(top).unwrap());
+        levels.iter().map(|at| at.level.get()).collect()
+    }
+
+    /// Nothing learned: every level is listed. Then the empty levels above the top drop out,
+    /// and a level above it that holds a file or only an unrecognized name stays.
+    #[test]
+    fn a_whole_listing_leaves_out_only_the_empty_levels_above_the_top() {
+        let none = EmptyLevels::default().whole(Level::new(3).unwrap());
+        assert_eq!(none.len(), 10);
+        let store = MemStore::new();
+        assert_eq!(whole_after(&store, 3), [0, 1, 2, 3, 9]);
+        block_on(put(&store, key(5, 1, 8)));
+        store.plant_unrecognized(Level::new(7).unwrap(), "junk.tmp");
+        assert_eq!(whole_after(&store, 3), [0, 1, 2, 3, 5, 7, 9]);
+        assert_eq!(whole_after(&store, 1), [0, 1, 5, 7, 9]);
+    }
+
+    /// A listing of some levels changes what is known of those alone: a level found empty
+    /// drops out, one found holding a file comes back, an unlisted one stays as it was.
+    #[test]
+    fn a_partial_listing_teaches_only_the_levels_it_read() {
+        let store = MemStore::new();
+        let all: Vec<ListAt> = Level::ALL.iter().map(|&l| ListAt::first(l)).collect();
+        let mut empty = EmptyLevels::default();
+        empty.learn(&block_on(Inventory::load(&store)).unwrap(), &all);
+        block_on(put(&store, key(5, 1, 8)));
+        block_on(put(&store, key(6, 1, 8)));
+        let five = [ListAt::first(Level::new(5).unwrap())];
+        empty.learn(
+            &block_on(Inventory::load_from(&store, &five)).unwrap(),
+            &five,
+        );
+        let top = Level::new(3).unwrap();
+        let read: Vec<u8> = empty.whole(top).iter().map(|at| at.level.get()).collect();
+        assert_eq!(read, [0, 1, 2, 3, 5, 9]);
+    }
+
     #[test]
     fn malformed_snapshots_are_level_nine_not_starting_at_one() {
         let inv = Inventory::from_files([info(9, 1, 4), info(9, 2, 6), info(1, 2, 6)]).unwrap();
@@ -585,6 +775,92 @@ mod tests {
         fn delete(&self, _keys: &[FileKey]) -> impl Future<Output = Result<(), StoreError>> + Send {
             ready(Ok(()))
         }
+    }
+
+    /// A store holding level 9 files, `l0` level-0 files and one level-1 file starting far past them
+    /// all, behind a store that runs `width` pages of a batch at once.
+    fn listed_store(l9: u64, l0: u64, width: usize) -> crate::mem::wrapped::Wrapped {
+        let store = MemStore::new();
+        block_on(async {
+            for n in 1..=l9 {
+                put(&store, key(9, 1, n)).await;
+            }
+            for n in 1..=l0 {
+                put(&store, key(0, n, n)).await;
+            }
+            put(&store, key(1, 9000, 9000)).await;
+        });
+        let mut wrapped = crate::mem::wrapped::Wrapped::new(store);
+        wrapped.width = width;
+        wrapped
+    }
+
+    #[test]
+    fn a_round_lists_no_more_levels_than_the_store_runs_at_once() {
+        let store = listed_store(3, 5, 3);
+        for level in 2..=7 {
+            block_on(put_into(&store, key(level, 1, 2)));
+        }
+        let inv = block_on(Inventory::load(&store)).unwrap();
+        assert_eq!(inv.files().len(), 3 + 5 + 1 + 6);
+        let batches = store.batches.lock().unwrap().clone();
+        assert!(batches.iter().all(|&len| len <= 3), "{batches:?}");
+        assert_eq!(batches.iter().sum::<usize>(), 10);
+    }
+
+    async fn put_into(store: &crate::mem::wrapped::Wrapped, k: FileKey) {
+        let at = Timestamp::from_unix_millis(7);
+        let mut up = store
+            .begin_upload(&k, at, WriteMode::Replace)
+            .await
+            .unwrap();
+        up.write(b"x").await.unwrap();
+        up.commit().await.unwrap();
+    }
+
+    #[test]
+    fn a_first_look_lists_level_nine_whole_and_one_page_of_every_other_level() {
+        // Two pages of snapshots and of level 0.
+        let store = listed_store(1500, 1500, 1);
+        let mut listing = block_on(super::Listing::begin(&store)).unwrap();
+        let held = listing.inventory().unwrap();
+        assert_eq!(held.level(Level::SNAPSHOT).len(), 1500);
+        let first_page = held.level(Level::ZERO).len();
+        assert!(first_page > 0 && first_page < 1500, "{first_page}");
+        assert_eq!(held.level(Level::new(1).unwrap()).len(), 1);
+        assert!(!listing.is_complete());
+        // Level 0 is listed to its first page: a chain ending at 10 needs nothing more of it, one
+        // ending in the second page needs its next page.
+        let beyond = Txid::new(u64::try_from(first_page).unwrap()).unwrap();
+        assert!(listing.is_past(Txid::new(10).unwrap()));
+        assert!(!listing.is_past(beyond));
+        // Nothing is wanted past a chain that needs nothing: no request is made.
+        let requests = || store.batches.lock().unwrap().iter().sum::<usize>();
+        let asked = requests();
+        block_on(listing.advance(&store, Scope::Past(Txid::new(10).unwrap()))).unwrap();
+        assert_eq!(requests(), asked);
+        // A chain in the second page lists it, and only level 0 (the one level behind).
+        block_on(listing.advance(&store, Scope::Past(beyond))).unwrap();
+        assert_eq!(requests(), asked + 1);
+        assert_eq!(listing.inventory().unwrap().level(Level::ZERO).len(), 1500);
+        assert!(listing.is_complete());
+        assert!(listing.is_past(Txid::new(1500).unwrap()));
+    }
+
+    #[test]
+    fn a_levels_end_is_read_from_its_own_files() {
+        // Level 1 holds one file starting at 9000: it must not stand for level 0's last file.
+        let store = listed_store(1, 1500, 1);
+        let listing = block_on(super::Listing::begin(&store)).unwrap();
+        assert!(!listing.is_past(Txid::new(1400).unwrap()));
+    }
+
+    #[test]
+    fn a_complete_listing_is_past_every_chain() {
+        let store = listed_store(2, 3, 1);
+        let listing = block_on(super::Listing::begin(&store)).unwrap();
+        assert!(listing.is_complete());
+        assert!(listing.is_past(Txid::MAX));
     }
 
     #[test]

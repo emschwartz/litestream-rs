@@ -326,7 +326,7 @@ pub(crate) async fn resolve_knowing<S: ObjectStore, P: Step>(
 }
 
 /// Advances `step` until it is done, reading what it needs into `resolved`.
-async fn drive<S: ObjectStore, P: Step>(
+pub(crate) async fn drive<S: ObjectStore, P: Step>(
     store: &S,
     step: &mut P,
     resolved: &mut ResolvedCreatedAt,

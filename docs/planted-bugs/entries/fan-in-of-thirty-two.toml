@@ -1,0 +1,8 @@
+# One compaction takes 32 inputs again: a 60 second level-1 window of one file a second splits
+# into two level-1 files, and level 2 reads twice the files Go reads.
+name = "fan-in-of-thirty-two"
+fix = "claude/one-window-merge"
+package = "lsr-core"
+tests = [
+    "actor::tests::steady::a_minute_of_level_zero_files_is_one_level_one_file",
+]

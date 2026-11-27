@@ -48,7 +48,7 @@ A failure in one task does not stop the others, but a long unit does: while the 
 
 ## Compaction, snapshots and retention
 
-A level is merged when its window has passed and the level below holds files above it. One job merges at most 32 input files, in one unbroken run of transaction ids. A merge never deletes its inputs, so a crash at any point leaves a replica that restores.
+A level is merged when its window has passed and the level below holds files above it. One job merges at most 128 input files, in one unbroken run of transaction ids: as many as fit its read budget at the smallest read size, so a level-1 window of one file a second up to two minutes long is one merge, as in Go (whose merges have no limit). A merge never deletes its inputs, so a crash at any point leaves a replica that restores.
 
 A snapshot is a level-9 file holding every page. One is taken on the schedule, and whenever the replicator cannot prove the WAL continues from what it last replicated: a first sync, a deleted or restarted WAL, a `VACUUM`, a database that went backwards. Each snapshot records its cause.
 

@@ -12,7 +12,7 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::conformance::block_on;
-use crate::fault::role::{Replica, Role, STAGING_WINDOW, Staging};
+use crate::fault::role::{Replica, Role, SMALLEST_WINDOW, STAGING_WINDOW, Staging};
 use crate::layout::CreatedAt;
 use crate::layout::ListedTime;
 use crate::mem::{MemStore, MemUpload};
@@ -449,12 +449,15 @@ fn inputs_must_not_be_empty() {
 #[test]
 fn inputs_are_capped_at_the_fan_in() {
     let files = |n: u64| (1..=n).map(|i| info(0, i, i)).collect::<Vec<_>>();
-    let ok = CompactionInputs::new(files(32)).unwrap();
+    let most = u64::try_from(MAX_INPUTS).unwrap();
+    let ok = CompactionInputs::new(files(most)).unwrap();
     assert_eq!(ok.files().len(), MAX_INPUTS);
-    assert_eq!(ok.range(), range(1, 32));
+    assert_eq!(ok.range(), range(1, most));
     assert_eq!(
-        CompactionInputs::new(files(33)),
-        Err(InputsError::TooMany { found: 33 })
+        CompactionInputs::new(files(most + 1)),
+        Err(InputsError::TooMany {
+            found: MAX_INPUTS + 1
+        })
     );
 }
 
@@ -990,13 +993,13 @@ fn thirty_two_inputs_of_two_thousand_pages_stay_under_the_stated_bound() {
     let dest = MemStore::new();
     let done = compact_infos(&source, &dest, &infos, 9).unwrap();
     // Thirty-two inputs share the replica's budget: each reads in its share.
-    let window =
-        usize::try_from(<Replica<'_, MemStore> as Role>::COMPACT_BUDGET).unwrap() / MAX_INPUTS;
+    let n = infos.len();
+    let window = usize::try_from(<Replica<'_, MemStore> as Role>::COMPACT_BUDGET).unwrap() / n;
     assert!(window < usize::try_from(CHUNK_BYTES).unwrap());
-    let bound = MAX_INPUTS * (window + page) + FLUSH_BYTES + 2 * page;
+    let bound = n * (window + page) + FLUSH_BYTES + 2 * page;
     assert!(done.peak_buffered() <= bound, "{}", done.peak_buffered());
     assert!(
-        done.peak_buffered() >= MAX_INPUTS * window / 2,
+        done.peak_buffered() >= n * window / 2,
         "every input holds a window at once: {}",
         done.peak_buffered()
     );
@@ -1018,12 +1021,12 @@ fn thirty_two_inputs_of_two_thousand_pages_stay_under_the_stated_bound() {
         small,
     ))
     .unwrap();
-    let bound = MAX_INPUTS * (16 * 1024 + page) + 16 * 1024 + 2 * page;
+    let bound = n * (16 * 1024 + page) + 16 * 1024 + 2 * page;
     assert!(done.peak_buffered() <= bound, "{}", done.peak_buffered());
     // The peak is measured, not assumed: every input holds a chunk at once,
     // so it is far above what the output buffer alone could reach.
     assert!(
-        done.peak_buffered() >= MAX_INPUTS * 16 * 1024 / 2,
+        done.peak_buffered() >= n * 16 * 1024 / 2,
         "{}",
         done.peak_buffered()
     );
@@ -1306,8 +1309,9 @@ fn the_chunk_is_one_mebibyte() {
 }
 
 /// A merge of few inputs reads each in the role's largest window, a merge of many in its share
-/// of the budget, never below the staging window: the memory is the budget, the requests are
-/// what the share leaves.
+/// of the budget, never below the smallest window: the memory is the budget, the requests are
+/// what the share leaves. The fan-in cap is the smaller budget, the staging directory's, in
+/// smallest windows, so a merge of any fan-in it allows reads within its role's budget.
 #[test]
 fn the_replica_window_is_the_budget_shared_out() {
     let window = |inputs: usize| Budget::reading::<Replica<'_, MemStore>>(inputs).chunk.get();
@@ -1317,12 +1321,23 @@ fn the_replica_window_is_the_budget_shared_out() {
     assert_eq!(window(1), mib);
     assert_eq!(window(16), mib);
     assert_eq!(window(32), mib / 2);
-    // More inputs than the cap allows never read below the staging window.
-    assert_eq!(window(4096), STAGING_WINDOW.get());
-    // A staged input is never read above the staging window.
+    assert_eq!(window(MAX_INPUTS), mib / 8);
+    // More inputs than the cap allows never read below the smallest window.
+    assert_eq!(window(4096), SMALLEST_WINDOW.get());
+    // A staged input is never read above the staging window, and a full merge reads each in
+    // the smallest one: its windows are the staging budget exactly.
     let staged = |inputs: usize| Budget::reading::<Staging<'_, MemStore>>(inputs).chunk.get();
-    assert_eq!(staged(1), STAGING_WINDOW.get());
+    assert_eq!(staged(1), 128 * 1024);
     assert_eq!(staged(32), STAGING_WINDOW.get());
+    assert_eq!(staged(64), 64 * 1024);
+    assert_eq!(staged(MAX_INPUTS), SMALLEST_WINDOW.get());
+    assert_eq!(staged(4096), SMALLEST_WINDOW.get());
+    let most = u64::try_from(MAX_INPUTS).unwrap();
+    assert_eq!(
+        most * SMALLEST_WINDOW.get(),
+        <Staging<'_, MemStore> as Role>::COMPACT_BUDGET
+    );
+    assert!(most * window(MAX_INPUTS) <= <Replica<'_, MemStore> as Role>::COMPACT_BUDGET);
 }
 
 /// A level-1 compaction reads the staged files in the staging window, so its inputs hold
@@ -1358,10 +1373,11 @@ fn staged_inputs_are_read_in_the_staging_window() {
         WriteMode::Replace,
     ))
     .unwrap();
-    let bound = MAX_INPUTS * (window + page) + FLUSH_BYTES + 2 * page;
+    let n = infos.len();
+    let bound = n * (window + page) + FLUSH_BYTES + 2 * page;
     assert!(done.peak_buffered() <= bound, "{}", done.peak_buffered());
     assert!(
-        done.peak_buffered() >= MAX_INPUTS * window / 2,
+        done.peak_buffered() >= n * window / 2,
         "every input holds a window at once: {}",
         done.peak_buffered()
     );
@@ -1379,6 +1395,56 @@ fn staged_inputs_are_read_in_the_staging_window() {
         read_all(&staged_dest, &done.info().key),
         read_all(&dest, &control.info().key)
     );
+}
+
+/// A level-1 merge of 64 staged inputs, and of as many as one compaction takes, reads each in
+/// its share of the staging budget: 4 MiB of windows whatever the fan-in, as at 32.
+#[test]
+#[cfg_attr(miri, ignore = "compacts 38400 pages; native runs measure the bound")]
+fn a_full_staged_merge_holds_the_staging_budget() {
+    let ps = size(512);
+    let page = ps.bytes();
+    let budget = usize::try_from(<Staging<'_, MemStore> as Role>::COMPACT_BUDGET).unwrap();
+    for n in [64, MAX_INPUTS] {
+        let source = MemStore::new();
+        let count = u64::try_from(n).unwrap();
+        let infos: Vec<FileInfo> = (1..=count)
+            .map(|i| {
+                let mut spec = Spec::plain(512, 200, i, i, &[]);
+                spec.pages = (1..=200_u32)
+                    .map(|p| (p, noisy(ps, i * 10_000 + u64::from(p))))
+                    .collect();
+                put(&source, 0, &spec)
+            })
+            .collect();
+        let window = budget / n;
+        assert!(
+            infos
+                .iter()
+                .all(|i| i.size > u64::try_from(window).unwrap())
+        );
+        let dest = MemStore::new();
+        let done = block_on(compact_in(
+            &Staging(&source),
+            &dest,
+            &inputs(&infos),
+            level(1),
+            WriteMode::Replace,
+        ))
+        .unwrap();
+        let bound = budget + n * page + FLUSH_BYTES + 2 * page;
+        assert!(
+            done.peak_buffered() <= bound,
+            "{n}: {}",
+            done.peak_buffered()
+        );
+        assert!(
+            done.peak_buffered() >= budget / 2,
+            "{n}: every input holds a window at once: {}",
+            done.peak_buffered()
+        );
+        assert_eq!(done.pages(), 200);
+    }
 }
 
 /// Output is handed to the upload when the buffer reaches the flush size, not

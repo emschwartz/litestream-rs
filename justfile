@@ -85,21 +85,35 @@ doctest:
 sim-replay seed steps="300":
     LSR_SIM_SEED={{seed}} LSR_SIM_STEPS={{steps}} cargo nextest run --cargo-profile sim -p lsr-sim --test sim -E 'test(/^replay::/)' --no-capture --locked
 
+# Replays a failing simulator run, cuts its history down to the operations that matter
+# (docs/decisions/D285.md) and prints them as Rust source for an explicit scenario test:
+# just sim-shrink 0x2a [steps]. Same mix and overrides as sim-replay.
+sim-shrink seed steps="300":
+    LSR_SIM_SEED={{seed}} LSR_SIM_STEPS={{steps}} cargo nextest run --cargo-profile sim -p lsr-sim --test sim -E 'test(/^shrink::/)' --no-capture --locked
+
 # Sums what random simulator histories reach over `seeds` seeds from `base`: one count per state.
 sim-tally seeds="200" base="1":
     LSR_SIM_TALLY_SEEDS={{seeds}} LSR_SIM_BASE_SEED={{base}} cargo nextest run -p lsr-sim --test sim -E 'test(/^tally::/)' --run-ignored only --no-capture --locked
 
 # Runs rotating simulator seeds for the given seconds from a base seed (default: now).
 sim-soak seconds base=`date +%s`:
-    LSR_SIM_BASE_SEED={{base}} LSR_SIM_SECONDS={{seconds}} cargo nextest run --cargo-profile sim -p lsr-sim --test sim -E 'test(/^soak::/)' --run-ignored only --no-capture --locked
+    LSR_SIM_BASE_SEED={{base}} LSR_SIM_SECONDS={{seconds}} cargo nextest run --profile long --cargo-profile sim -p lsr-sim --test sim -E 'test(=soak::rotating_seeds)' --run-ignored only --no-capture --locked
 
 # The nightly rotating seed set: seeds follow from the UTC date (YYYYMMDD), a million per night,
 # so no two nights share one and a night is rerun with `just sim-nightly <seconds> <YYYYMMDD>`.
 # A failing seed is printed last as its replay line. The arguments reach the test as environment
 # variables only, never as shell text. The summed reach goes to target/sim-reach.json, and a
-# row or fault class no seed reached fails the run (crates/sim/src/marks.rs).
+# row or fault class no seed reached fails the run (crates/sim/src/marks.rs). The `long` nextest
+# profile lets a run last up to two hours (`just sim-nightly 3600`).
 sim-nightly $LSR_SIM_SECONDS="900" $LSR_SIM_DAY=`date -u +%Y%m%d`:
-    env -u LSR_SIM_BASE_SEED LSR_SIM_COMMIT="$(git rev-parse HEAD)" LSR_SIM_REACH_OUT="${LSR_SIM_REACH_OUT:-$PWD/target/sim-reach.json}" cargo nextest run --cargo-profile sim -p lsr-sim --test sim -E 'test(/^soak::/)' --run-ignored only --no-capture --locked
+    env -u LSR_SIM_BASE_SEED LSR_SIM_COMMIT="$(git rev-parse HEAD)" LSR_SIM_REACH_OUT="${LSR_SIM_REACH_OUT:-$PWD/target/sim-reach.json}" cargo nextest run --profile long --cargo-profile sim -p lsr-sim --test sim -E 'test(=soak::rotating_seeds)' --run-ignored only --no-capture --locked
+
+# The nightly's large-profile set (docs/decisions/D277.md): long histories and larger transactions
+# from the upper half of the night's seeds, one shard of n jobs: `just sim-long <seconds>
+# <YYYYMMDD> <i>/<n>`. Same rules as sim-nightly; a failing seed is printed last with its replay
+# line. The summed reach goes to target/sim-reach-long.json and is not gated.
+sim-long $LSR_SIM_SECONDS="900" $LSR_SIM_DAY=`date -u +%Y%m%d` $LSR_SIM_SHARD="0/1":
+    env -u LSR_SIM_BASE_SEED LSR_SIM_COMMIT="$(git rev-parse HEAD)" LSR_SIM_REACH_OUT="${LSR_SIM_REACH_OUT:-$PWD/target/sim-reach-long.json}" cargo nextest run --profile long --cargo-profile sim -p lsr-sim --test sim -E 'test(=soak::long_seeds)' --run-ignored only --no-capture --locked
 
 # The nightly toolchain for the sanitizer, Miri and fuzz recipes; override with LSR_NIGHTLY=nightly-YYYY-MM-DD.
 nightly := env("LSR_NIGHTLY", "nightly")
@@ -120,6 +134,10 @@ tsan:
         cargo +{{nightly}} test -Zbuild-std --target x86_64-unknown-linux-gnu --locked \
         -p lsr-sqlite -p lsr-replica --lib --tests
 
+# Miri cannot run the aarch64 crypto intrinsics crc-fast picks on Apple Silicon, so there it
+# interprets the x86_64 macOS build, whose carry-less multiply it does run. Empty elsewhere.
+miri-target := if arch() + "-" + os() == "aarch64-macos" { "--target x86_64-apple-darwin" } else { "" }
+
 # Miri over the pure crates (ltx, wal), the core's decision code (plan, retry, position,
 # layout, checkpoint, compact), and lsr-sqlite's tests that call no SQLite (the build check, result
 # codes, offsets, and the io_methods and wal-index checks on synthetic tables): no I/O, no FFI. Miri runs about 1000 times slower than native,
@@ -132,13 +150,13 @@ tsan:
 miri:
     MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-env-forward=PROPTEST_CASES -Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE" \
         PROPTEST_CASES=4 PROPTEST_DISABLE_FAILURE_PERSISTENCE=true CARGO_TARGET_DIR=target/miri \
-        cargo +{{nightly}} miri test --locked -p lsr-ltx -p lsr-wal --lib
+        cargo +{{nightly}} miri test {{miri-target}} --locked -p lsr-ltx -p lsr-wal --lib
     MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-env-forward=PROPTEST_CASES -Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE" \
         PROPTEST_CASES=4 PROPTEST_DISABLE_FAILURE_PERSISTENCE=true CARGO_TARGET_DIR=target/miri \
-        cargo +{{nightly}} miri test --locked -p lsr-core --lib -- \
+        cargo +{{nightly}} miri test {{miri-target}} --locked -p lsr-core --lib -- \
         --skip actor:: plan:: retry:: position:: layout:: checkpoint:: compact::
     MIRIFLAGS="-Zmiri-strict-provenance" CARGO_TARGET_DIR=target/miri \
-        cargo +{{nightly}} miri test --locked -p lsr-sqlite --lib -- \
+        cargo +{{nightly}} miri test {{miri-target}} --locked -p lsr-sqlite --lib -- \
         version::tests::every version::tests::another version::tests::the_refusal error::tests \
         checkpoint::tests::checkpoint_results pages::tests::page_offsets pages::tests::a_missing \
         shm::tests::missing_methods identity::tests
@@ -213,6 +231,8 @@ prod-lines base="origin/main":
 
 # Mutation-tests the lines this branch changed in core and ltx against `base`; fails on a missed
 # mutant not in docs/mutants-escapes.txt. Runs on pull requests in CI.
+# A day's diff (about 900 mutants, two hours at six jobs) needs a larger budget than a pull
+# request's 40 minutes: `MUTANTS_DIFF_BUDGET=14000 MUTANTS_JOBS=6 just mutants-diff <base>`.
 mutants-diff base="origin/main":
     scripts/mutants-diff.sh {{base}}
 

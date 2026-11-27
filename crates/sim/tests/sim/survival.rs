@@ -80,6 +80,8 @@ fn key(hold: Hold) -> String {
         Hold::LyingDisk => "hold.LyingDisk".into(),
         Hold::StoreDownAll => "hold.StoreDownAll".into(),
         Hold::SecondWriter => "hold.SecondWriter".into(),
+        Hold::Hang(op) => format!("hold.hang.{op:?}"),
+        Hold::SlowStaging(_) => "hold.SlowStaging".into(),
     }
 }
 

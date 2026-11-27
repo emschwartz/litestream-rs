@@ -114,6 +114,10 @@ fn a_fault_shape_only_pairs_with_the_operation_it_means() {
                 FaultShape::Error(_) | FaultShape::Rate { .. } => {}
                 // A scenario step: drawing it would move every frozen schedule.
                 FaultShape::Scratch(_) => panic!("drawn: {shape:?}"),
+                // Gray weather: the default mix draws none, so its histories keep their shape.
+                FaultShape::Hang | FaultShape::HangAfterPublish | FaultShape::HangEvery => {
+                    panic!("drawn by the default mix: {shape:?}")
+                }
             }
         }
     }
@@ -155,4 +159,96 @@ fn holds_replace_drawn_steps_and_leave_every_other_step_as_it_was() {
         }
     }
     assert!(replaced > 0);
+}
+
+/// Gray weather replaces a step from its own stream: every step it does not replace is the
+/// step the same mix draws with no weather, so turning it on moves no other step of a history.
+#[test]
+fn gray_weather_moves_no_step_it_does_not_replace() {
+    for n in 0..32 {
+        let mut weights = Weights::swarm(seed(n));
+        weights.gray = 30;
+        let calm = Weights {
+            gray: 0,
+            ..weights.clone()
+        };
+        let with = history(seed(n), 400, &weights);
+        let without = history(seed(n), 400, &calm);
+        let mut replaced = 0;
+        for (a, b) in with.iter().zip(&without) {
+            if a != b {
+                replaced += 1;
+                assert!(is_gray(a), "{a:?} replaced {b:?}");
+            }
+        }
+        assert!(replaced <= 400, "{replaced}");
+    }
+}
+
+fn is_gray(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::Pause { .. }
+            | Op::Hold {
+                hold: Hold::Hang(_) | Hold::SlowStaging(_),
+                ..
+            }
+            | Op::HttpFault(HttpFault::Hang(_))
+            | Op::StoreFault {
+                shape: FaultShape::Hang | FaultShape::HangAfterPublish,
+                ..
+            }
+    )
+}
+
+/// The weather's draw reaches every kind it has, and the default mix draws none of it.
+#[test]
+fn gray_weather_draws_every_kind_and_the_default_mix_none() {
+    let entropy = SeededEntropy::new(3);
+    let drawn: std::collections::BTreeSet<String> = (0..2000)
+        .map(|_| {
+            let op = gray(&entropy, true);
+            if let Op::StoreFault { shape, .. } = &op {
+                format!("{shape:?}")
+            } else if let Op::Hold { hold, .. } = &op {
+                format!("Hold.{}", crate::reach::variant(hold))
+            } else {
+                crate::reach::variant(&op)
+            }
+        })
+        .collect();
+    assert_eq!(drawn.len(), 6, "{drawn:?}");
+    assert!(
+        !history(seed(5), 20_000, &Weights::default())
+            .iter()
+            .any(is_gray)
+    );
+}
+
+#[test]
+fn the_large_sizes_scale_commits_and_leave_every_draw_in_place() {
+    let small = Weights::default();
+    let large = Weights::default().with_large_sizes();
+    let scale = large.size_scale;
+    assert!(scale > 1);
+    let mut commits = 0;
+    for n in 0..8 {
+        let (a, b) = (history(seed(n), 300, &small), history(seed(n), 300, &large));
+        assert_eq!(a.len(), b.len());
+        for (was, now) in a.iter().zip(&b) {
+            match (was, now) {
+                (Op::Commit { pages: p, grow: g }, Op::Commit { pages: q, grow: h }) => {
+                    commits += 1;
+                    assert_eq!(*q, p * scale);
+                    assert!(!g || *h, "a commit that grew still grows");
+                }
+                (Op::CommitInTick { pages: p }, Op::CommitInTick { pages: q }) => {
+                    assert_eq!(*q, p * scale);
+                }
+                (Op::Vacuum { .. }, Op::Vacuum { page_size }) => assert_eq!(*page_size, None),
+                (was, now) => assert_eq!(was, now),
+            }
+        }
+    }
+    assert!(commits > 0);
 }

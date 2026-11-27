@@ -44,7 +44,7 @@ fn level_one_files_that_share_a_window_all_reach_level_two() {
     ops.extend(ticks(6));
     // Second 375, 25 seconds before level 2's next window: level 1 is compacted in its own
     // window, and then a writer that never lets the engine idle leaves 73 level-0 files
-    // behind it, more than two compactions take.
+    // behind it, which one compaction takes.
     ops.push(Op::ClockJump(255_000));
     ops.push(commit());
     ops.extend(ticks(4));
@@ -78,9 +78,9 @@ fn level_one_files_that_share_a_window_all_reach_level_two() {
         .collect();
     // The scenario is the one described. The first files of both levels (they start above the
     // first snapshot, at 2), those of the boundary after the idle five minutes, and the level-1
-    // file of second 375; then, at second 400, two full level-1 files and the rest (and one
-    // more, a level-1 file written after the last compaction), and one level-2 file over
-    // everything level 1 holds above it.
+    // file of second 375; then, at second 400, one level-1 file of every file behind it (73,
+    // fewer than one compaction takes, `MAX_INPUTS`) and one more, a level-1 file written after
+    // the last compaction, and one level-2 file over everything level 1 holds above it.
     let expected = [
         (1, 2, 2),
         (2, 2, 2),
@@ -88,9 +88,7 @@ fn level_one_files_that_share_a_window_all_reach_level_two() {
         (2, 3, 5),
         (1, 6, 8),
         (2, 6, 8),
-        (1, 9, 40),
-        (1, 41, 72),
-        (1, 73, 81),
+        (1, 9, 81),
         (1, 82, 82),
         (2, 9, 82),
     ];

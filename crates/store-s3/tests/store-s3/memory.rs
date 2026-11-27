@@ -42,7 +42,7 @@ use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{
     Again, BoxFuture, CompactionInputs, DatabaseSink, FakeClock, FileKey, Level, MAX_INPUTS,
-    ObjectStore, PageLimit, Reread, RestoreTarget, Seen, StoreError, StoreOp, Upload,
+    ObjectStore, PageLimit, Reread, RestoreTarget, Seen, StoreError, StoreOp, Upload, compact,
     compact_staged, restore,
 };
 use lsr_ltx::{
@@ -585,13 +585,14 @@ fn a_ranged_read_through_the_real_client_holds_its_body_once() {
     );
 }
 
-/// Pages each staged input holds, all of them distinct: 32 inputs make a 62.5 MiB output,
-/// twelve parts, so the compaction uploads in batches as a busy database's does.
-const INPUT_PAGES: u32 = 500;
+/// Pages each staged input holds, all of them distinct: `MAX_INPUTS` inputs make a 62.5 MiB
+/// output, twelve parts, so the compaction uploads in batches as a busy database's does.
+const INPUT_PAGES: u32 = 125;
 
-/// What the engine's compaction reads a staged input in (restated: a change shows here), a
-/// page, and the output buffer it flushes at.
-const STAGED_WINDOW: usize = 128 * KIB;
+/// What the engine's compaction reads a staged input in when it merges as many as one takes
+/// (its share of the 4 MiB staging budget, restated: a change shows here), a page, and the
+/// output buffer it flushes at.
+const STAGED_WINDOW: usize = 4 * MIB / MAX_INPUTS;
 const PAGE: usize = 4 * KIB;
 const FLUSH: usize = MIB;
 
@@ -603,6 +604,23 @@ fn a_compaction_into_s3_holds_its_inputs_and_its_parts() {
     assert_compaction_holds_its_parts(PartSize::MIN.get().try_into().unwrap(), 5);
 }
 
+/// A merge of four staged files reads each in 128 KiB, the most a staging window is (the
+/// budget would allow a mebibyte each): the files are over a mebibyte, so a window that grew
+/// to it would show. The output is under one part, so the output it holds is its size.
+#[test]
+fn a_compaction_of_few_staged_files_into_s3_reads_each_in_a_staging_window() {
+    let (done, peak) = staged_compaction_peak(4, 300, PartSize::MIN.get().try_into().unwrap(), 5);
+    let output = usize::try_from(done.info().size).unwrap();
+    assert!(output < 5 * MIB, "one part holds the output: {output}");
+    let bound = 4 * (128 * KIB + PAGE) + FLUSH + output + MIB;
+    eprintln!(
+        "compaction of 4 files into s3: {} KiB (bound {} KiB)",
+        peak >> 10,
+        bound >> 10
+    );
+    assert!(peak <= bound, "held {peak} bytes, over {bound}");
+}
+
 /// The same at a part size above the default and a concurrency below it: the output is four
 /// parts, two batches, so a part held past its batch shows.
 #[test]
@@ -611,14 +629,40 @@ fn a_compaction_into_s3_at_a_large_part_size_holds_its_parts() {
 }
 
 fn assert_compaction_holds_its_parts(part: usize, concurrency: usize) {
+    let (done, peak) = staged_compaction_peak(MAX_INPUTS, INPUT_PAGES, part, concurrency);
+    assert!(done.info().size > u64::try_from(concurrency * part).unwrap());
+    // One batch of parts: a compaction hands each part to the upload as it fills, so measured
+    // it never holds the part after the batch (37.6 MiB at 16 MiB x 2, where 3 parts were
+    // allowed), and a body copied for the request shows (54 MiB).
+    let bound = MAX_INPUTS * (STAGED_WINDOW + PAGE) + FLUSH + concurrency * part + MARGIN;
+    eprintln!(
+        "compaction into s3: {} KiB (bound {} KiB)",
+        peak >> 10,
+        bound >> 10
+    );
+    assert!(
+        peak <= bound,
+        "compaction held {peak} bytes, over {bound} ({MAX_INPUTS} inputs x ({STAGED_WINDOW} + {PAGE}) + {FLUSH} + {concurrency} parts in flight x {part} + {MARGIN})"
+    );
+}
+
+/// Compacts `inputs` staged level-0 files of `pages` distinct pages each into level 1 of a
+/// store that uploads `concurrency` parts of `part` bytes at once, and returns what it wrote
+/// and the peak live heap above the start.
+fn staged_compaction_peak(
+    inputs: usize,
+    pages: u32,
+    part: usize,
+    concurrency: usize,
+) -> (lsr_core::Compacted, usize) {
     let from = tempfile::tempdir().unwrap();
     let staging = FsStore::new(from.path());
-    let commit = INPUT_PAGES * u32::try_from(MAX_INPUTS).unwrap();
+    let commit = pages * u32::try_from(inputs).unwrap();
     // From transaction 2: a file that starts at transaction 1 is a snapshot, and must hold
     // every page.
-    for n in 2..=u64::try_from(MAX_INPUTS).unwrap() + 1 {
-        let first = INPUT_PAGES * u32::try_from(n - 2).unwrap() + 1;
-        let bytes = ltx_bytes(n, commit, first..=first + INPUT_PAGES - 1);
+    for n in 2..=u64::try_from(inputs).unwrap() + 1 {
+        let first = pages * u32::try_from(n - 2).unwrap() + 1;
+        let bytes = ltx_bytes(n, commit, first..=first + pages - 1);
         let key = FileKey::new(Level::ZERO, TxidRange::new(txid(n), txid(n)).unwrap());
         block_on(async {
             let stamp = Timestamp::from_unix_millis(1_700_000_000_000);
@@ -648,16 +692,81 @@ fn assert_compaction_holds_its_parts(part: usize, concurrency: usize) {
 
     let done = done.unwrap();
     assert_eq!(done.pages(), commit);
-    assert!(done.info().size > u64::try_from(concurrency * part).unwrap());
-    let bound = MAX_INPUTS * (STAGED_WINDOW + PAGE) + FLUSH + (concurrency + 1) * part + MARGIN;
-    eprintln!(
-        "compaction into s3: {} KiB (bound {} KiB)",
-        peak.extra >> 10,
-        bound >> 10
-    );
-    assert!(
-        peak.extra <= bound,
-        "compaction held {} bytes, over {bound} ({MAX_INPUTS} inputs x ({STAGED_WINDOW} + {PAGE}) + {FLUSH} + {concurrency} parts in flight and one more x {part} + {MARGIN})",
-        peak.extra
-    );
+    (done, peak.extra)
+}
+
+/// Pages each replica input of [`compaction_from_s3_peak`] holds: about 400 KiB, more than
+/// the window a merge of 32 inputs or more reads it in.
+const REPLICA_INPUT_PAGES: u32 = 100;
+
+/// What a merge holds for each replica input besides its window: a page waiting to be merged,
+/// the decoder's page and frame, and the held GET's connection with the client's buffers
+/// (32 KiB read and 128 KiB write, `docs/decisions/D212.md`). Measured: 187 KiB an input at
+/// 64 inputs and at 128 (28.0 MiB and 39.4 MiB in all).
+const PER_REPLICA_INPUT: usize = 208 * KIB;
+
+/// The peak live heap of a compaction above level 1 that reads `inputs` level-1 files through
+/// the real client, each over one GET held for the whole merge (Go's compactor holds one
+/// open reader per input the same way), into a directory.
+fn compaction_from_s3_peak(inputs: u64) -> usize {
+    let fake = fake();
+    let source = store_on(serve(&fake), PartSize::MIN.get().try_into().unwrap(), 5);
+    let commit = REPLICA_INPUT_PAGES * u32::try_from(inputs).unwrap();
+    for n in 2..=inputs + 1 {
+        let first = REPLICA_INPUT_PAGES * u32::try_from(n - 2).unwrap() + 1;
+        let bytes = ltx_bytes(n, commit, first..=first + REPLICA_INPUT_PAGES - 1);
+        assert!(
+            bytes.len() > 256 * KIB,
+            "an input holds more than its window"
+        );
+        let key = FileKey::new(
+            Level::new(1).unwrap(),
+            TxidRange::new(txid(n), txid(n)).unwrap(),
+        );
+        block_on(async {
+            let stamp = Timestamp::from_unix_millis(1_700_000_000_000);
+            let mut upload = source
+                .begin_upload(&key, stamp, WriteMode::New)
+                .await
+                .unwrap();
+            upload.write(&bytes).await.unwrap();
+            upload.commit().await.unwrap();
+        });
+    }
+    let files = block_on(source.list(Level::new(1).unwrap(), None, PageLimit::MAX))
+        .unwrap()
+        .files;
+    assert_eq!(files.len(), usize::try_from(inputs).unwrap());
+    let inputs = CompactionInputs::new(files).unwrap();
+    let to = tempfile::tempdir().unwrap();
+    let dest = FsStore::new(to.path());
+    let (done, peak) =
+        process_peak_of(|| block_on(compact(&source, &dest, &inputs, Level::new(2).unwrap())));
+    assert_eq!(done.unwrap().pages(), commit);
+    peak.extra
+}
+
+/// A compaction above level 1 of as many replica inputs as one may take holds the replica's
+/// 16 MiB budget of windows and, per input, a page or two and the held GET's connection: the
+/// memory a whole 128-input merge costs, where Go holds one reader per input with no cap.
+#[test]
+fn a_compaction_from_s3_holds_its_budget_and_a_connection_per_input() {
+    for inputs in [64, MAX_INPUTS] {
+        let peak = compaction_from_s3_peak(u64::try_from(inputs).unwrap());
+        let window = (16 * MIB / inputs).min(MIB);
+        let bound = inputs * (window + PER_REPLICA_INPUT) + FLUSH + MARGIN;
+        eprintln!(
+            "compaction of {inputs} inputs from s3: {} KiB (bound {} KiB)",
+            peak >> 10,
+            bound >> 10
+        );
+        assert!(
+            peak <= bound,
+            "{inputs} inputs held {peak} bytes, over {bound} ({inputs} x ({window} + {PER_REPLICA_INPUT}) + {FLUSH} + {MARGIN})"
+        );
+        assert!(
+            peak >= inputs * window / 2,
+            "the gate saw {peak} bytes: it cannot see the windows"
+        );
+    }
 }

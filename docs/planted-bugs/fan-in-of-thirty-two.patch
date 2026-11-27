@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/compact.rs b/crates/core/src/compact.rs
+index 9ceeb383a..ea5b4b78c 100644
+--- a/crates/core/src/compact.rs
++++ b/crates/core/src/compact.rs
+@@ -82,7 +82,7 @@ mod tests;
+ /// fan-in reads within its role's budget. A 60 second level-1 window of one file a second
+ /// merges as one file, as Go merges every file the level below holds; Go's fan-in has no
+ /// bound at all (upstream #1467), this one is the memory (`docs/decisions/D295.md`).
+-pub const MAX_INPUTS: usize = 128;
++pub const MAX_INPUTS: usize = 32;
+ 
+ /// The most bytes asked of a replica per read of an input ([`Role::COMPACT_WINDOW`] says what
+ /// a staged one gets; [`Role::COMPACT_BUDGET`] shares the total out).

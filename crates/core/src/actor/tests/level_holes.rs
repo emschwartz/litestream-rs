@@ -73,7 +73,7 @@ fn write_through_compactions(rig: &mut Rig, actor: &mut Actor, from: i64, until:
     seen
 }
 
-/// A writer that commits four times a second from `from` to `until` (seconds after `T0`):
+/// A writer that commits twenty times a second from `from` to `until` (seconds after `T0`):
 /// more level-0 files in each of level 1's ten-second windows than one compaction takes.
 /// Returns every tick, and each compaction output with the time of the tick that wrote it.
 fn write_more_than_one_compaction_takes(
@@ -83,9 +83,9 @@ fn write_more_than_one_compaction_takes(
     until: i64,
 ) -> (Vec<Tick>, Vec<(i64, FileKey)>) {
     let (mut seen, mut outputs) = (Vec::new(), Vec::new());
-    for quarter in from * 4..until * 4 {
-        let begins = T0 + 100 + quarter * 250;
-        rig.commit(u8::try_from(quarter % 250 + 1).unwrap());
+    for twentieth in from * 20..until * 20 {
+        let begins = T0 + 100 + twentieth * 50;
+        rig.commit(u8::try_from(twentieth % 250 + 1).unwrap());
         let mut now = begins;
         for _ in 0..100 {
             let tick = rig.tick(actor, now);
@@ -100,7 +100,7 @@ fn write_more_than_one_compaction_takes(
             seen.push(tick);
             match next {
                 Some(Next::Now) => {}
-                Some(Next::At(at)) if at.unix_millis() < begins + 250 => {
+                Some(Next::At(at)) if at.unix_millis() < begins + 50 => {
                     now = now.max(at.unix_millis());
                 }
                 Some(Next::At(_) | Next::OnWalChange) | None => break,

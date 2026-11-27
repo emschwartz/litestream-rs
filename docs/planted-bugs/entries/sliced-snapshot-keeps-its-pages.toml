@@ -1,0 +1,6 @@
+# The level-9 snapshot, sliced over many ticks, keeps a copy of every page it encoded in its own
+# state, so it holds the database in RAM between ticks while every one-call memory gate passes.
+name = "sliced-snapshot-keeps-its-pages"
+fix = "plant"
+package = "lsr-core"
+tests = ["a_sliced_job_carries_heap_linear_in_pages_at_the_pinned_coefficient"]

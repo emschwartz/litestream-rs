@@ -113,8 +113,15 @@ fn a_plain_drain_deletes_nothing() {
 fn retention_switched_off_deletes_nothing() {
     let (mut rig, mut actor) = four_snapshots(RetentionMode::Off);
     let before = snapshot_ends(&rig);
+    let newest = *Rig::files(&rig.remote, Level::SNAPSHOT).last().unwrap();
+    let reads = rig.remote.reads_of(&newest.key);
     drain_with_retention(&mut rig, &mut actor, T0 + 6 * HOUR + 60_000);
     assert_eq!(snapshot_ends(&rig), before);
+    assert_eq!(
+        rig.remote.reads_of(&newest.key),
+        reads,
+        "nothing is read back for no delete"
+    );
     assert_eq!(actor.final_retention(), FinalRetention::Off);
 }
 
@@ -266,6 +273,83 @@ fn a_written_snapshot_is_followed_by_the_pass() {
     ));
     assert!(
         matches!(actor.final_retention(), FinalRetention::Done { deleted } if deleted >= 1),
+        "{:?}",
+        actor.final_retention()
+    );
+}
+
+/// A drain runs no maintenance, so the read-back a boot owes (`maintain::audit`) is still owed
+/// when the pass starts, and the pass deletes the older snapshots on the strength of the
+/// newest one. It reads the newest files back first: one that does not verify holds the pass,
+/// and nothing is deleted.
+#[test]
+fn a_rotten_newest_snapshot_holds_the_pass_before_it_deletes_anything() {
+    let (mut rig, mut actor) = four_snapshots(RetentionMode::Enforce);
+    let before = snapshot_ends(&rig);
+    let newest = *Rig::files(&rig.remote, Level::SNAPSHOT).last().unwrap();
+    super::audit::rot_at(&rig, &newest, ts(T0 + 6 * HOUR));
+    let seen = drain_with_retention(&mut rig, &mut actor, T0 + 6 * HOUR + 60_000);
+    assert!(
+        matches!(seen.last(), Some(Tick::Drained { .. })),
+        "{seen:?}"
+    );
+    assert_eq!(snapshot_ends(&rig), before);
+    assert!(
+        matches!(
+            actor.final_retention(),
+            FinalRetention::Failed {
+                deleted: 0,
+                fault: Fault::RemoteCorrupt
+            }
+        ),
+        "{:?}",
+        actor.final_retention()
+    );
+}
+
+/// The read-back runs once for the pass, not once per delete job, and a sound replica is
+/// pruned as before.
+#[test]
+fn the_pass_reads_the_newest_files_back_once() {
+    let (mut rig, mut actor) = four_snapshots(RetentionMode::Enforce);
+    let newest = *Rig::files(&rig.remote, Level::SNAPSHOT).last().unwrap();
+    let before = rig.remote.reads_of(&newest.key);
+    drain_with_retention(&mut rig, &mut actor, T0 + 6 * HOUR + 60_000);
+    assert!(matches!(
+        actor.final_retention(),
+        FinalRetention::Done { deleted } if deleted >= 2
+    ));
+    assert_eq!(rig.remote.reads_of(&newest.key), before + 1);
+    assert!(!actor.engine.maintain.read_back_owed);
+}
+
+/// A read-back that fails to read ends the pass as a failure and deletes nothing: the newest
+/// file is not confirmed.
+#[test]
+fn a_failed_read_back_ends_the_pass_and_deletes_nothing() {
+    let (mut rig, mut actor) = four_snapshots(RetentionMode::Enforce);
+    let before = snapshot_ends(&rig);
+    let at = T0 + 6 * HOUR + 60_000;
+    actor.request_final_retention();
+    actor.begin_shutdown(actor.shutdown_deadline(ts(at)));
+    let boot = rig.tick(&mut actor, at);
+    assert!(
+        matches!(event(&boot), Some(Event::Booted { .. })),
+        "{boot:?}"
+    );
+    rig.remote
+        .inner
+        .inject_failure(StoreOp::Read, transient(StoreOp::Read));
+    rig.follow(&mut actor, at, 200);
+    assert_eq!(snapshot_ends(&rig), before);
+    assert!(
+        matches!(
+            actor.final_retention(),
+            FinalRetention::Failed {
+                deleted: 0,
+                fault: Fault::StoreTransient
+            }
+        ),
         "{:?}",
         actor.final_retention()
     );

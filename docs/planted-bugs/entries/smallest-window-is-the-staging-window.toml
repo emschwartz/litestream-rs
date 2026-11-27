@@ -1,0 +1,9 @@
+# A read never goes below the staging window, so a full level-1 merge of 128 staged inputs
+# holds 16 MiB of windows, four times the staging budget.
+name = "smallest-window-is-the-staging-window"
+fix = "claude/one-window-merge"
+package = "lsr-core"
+tests = [
+    "compact::tests::the_replica_window_is_the_budget_shared_out",
+    "compact::tests::a_full_staged_merge_holds_the_staging_budget",
+]

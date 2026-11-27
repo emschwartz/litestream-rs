@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor/once_retention.rs b/crates/core/src/actor/once_retention.rs
+index 09e1330..5fa9603 100644
+--- a/crates/core/src/actor/once_retention.rs
++++ b/crates/core/src/actor/once_retention.rs
+@@ -141,7 +141,7 @@ impl Actor {
+         // a newest file a store took cut short or damaged costs the files that could still
+         // restore (D293). The daemon reads back before it plans from a listing as well.
+         let enforcing = self.kept.cfg.maintenance.retention() == RetentionMode::Enforce;
+-        if enforcing && self.engine.maintain.read_back_owed {
++        if false && enforcing && self.engine.maintain.read_back_owed {
+             match read_back(env.remote, &inventory).await {
+                 Ok(ReadBack::Sound) => self.engine.maintain.read_back_owed = false,
+                 Ok(ReadBack::Rotten { .. }) => {

@@ -30,6 +30,8 @@ mod final_snapshot;
 #[cfg(test)]
 mod fixed_seeds;
 #[cfg(test)]
+mod gray;
+#[cfg(test)]
 mod histories;
 #[cfg(test)]
 mod kill_after_fault;
@@ -56,6 +58,8 @@ mod retention;
 mod retention_windows;
 #[cfg(test)]
 mod short_write;
+#[cfg(test)]
+mod shrink;
 #[cfg(test)]
 mod sliced;
 #[cfg(test)]

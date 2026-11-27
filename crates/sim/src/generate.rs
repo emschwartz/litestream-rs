@@ -2,7 +2,7 @@
 //!
 //! A history is a pure function of its seed: it draws from one sequential
 //! stream and looks at no state, so the first `k` operations of a history of
-//! `n` are the history of `k` (what [`crate::shrink`] relies on). Whatever
+//! `n` are the history of `k` (what [`crate::shrink`] relies on to cut a failure to its prefix). Whatever
 //! needs the world's state (which pages a commit touches, which other process ends)
 //! is decided when the runner applies the operation, from the step number.
 //!
@@ -132,6 +132,10 @@ pub enum HttpFault {
     BodyMismatch(HttpShape),
     /// No response: the connection is reset.
     ConnectionReset(HttpShape),
+    /// No response before the client gives up: the request never reaches the bucket, and the
+    /// tick spends the client's timeout on it (`crate::remote::client_timeout`). Drawn by the
+    /// gray weather ([`Weights::gray`]), never by the provider-fault draw.
+    Hang(HttpShape),
     /// The provider refuses the request with `code`'s status and S3 error code.
     Denied(HttpShape, DenialCode),
     /// A bucket policy refuses deleting each object the replica holds now, key by key inside a
@@ -234,6 +238,15 @@ pub enum Op {
     EnvFault(EnvFault),
     /// The clock moves by this many milliseconds, either way.
     ClockJump(i64),
+    /// The process stops for `millis` milliseconds just before the next tick's `read`th clock
+    /// read, as an OS that suspends it would, and that tick runs (`SimClock::pause_at`). A
+    /// tick with fewer reads is not paused. Drawn by the gray weather.
+    Pause {
+        /// The read it stops before, counted from 1 after the tick's own.
+        read: u8,
+        /// How long it stops.
+        millis: u64,
+    },
     /// The actor runs one tick.
     Tick,
     /// The actor ticks until it has nothing to do: a tick that ran nothing. Scenarios only: it
@@ -386,6 +399,14 @@ pub enum Hold {
     /// position, and the replica is judged while it stands. Drawn only with
     /// [`Weights::overlap`].
     SecondWriter,
+    /// Every call of the operation on the replica hangs until the client gives up
+    /// ([`crate::FaultShape::HangEvery`]): an endpoint that takes requests and never answers.
+    /// Restores made meanwhile meet the same timeouts. Drawn by the gray weather.
+    Hang(StoreOp),
+    /// The staging disk is this many times slower than its price (`crate::cost`): every
+    /// tick's staging calls cost that much more time, and nothing fails. Drawn by the gray
+    /// weather.
+    SlowStaging(u16),
 }
 
 /// Where inside a tick the app acts ([`Op::AppInTick`]).
@@ -627,6 +648,20 @@ pub struct Weights {
     /// Not an operation, for the same reason as `block_crash_law`; drawn last in the swarm
     /// mix.
     pub slice_bytes: Option<std::num::NonZeroU64>,
+    /// The chance in a thousand that a step is gray weather instead of what the history drew
+    /// there: a store call that hangs until the client gives up, an endpoint that hangs every
+    /// call, a slow staging disk, or a pause of the process inside a tick ([`gray`]). As
+    /// [`Weights::hold`], from a stream of its own, so a run that draws none is the run it was.
+    pub gray: u32,
+    /// Each replica request's latency is drawn from a heavy tail (`crate::cost::tail_factor`),
+    /// and the run is charged for its I/O at [`crate::cost::Profile::DEFAULT`] plus the tail.
+    /// Not an operation, for the same reason as `block_crash_law`; drawn last in the swarm mix.
+    pub latency_tail: bool,
+    /// A multiplier on the pages of every [`Op::Commit`] and [`Op::CommitInTick`], and on how
+    /// often a commit grows the database (1 in 6 at 1, 1 in 2 from 3 up). Not an operation:
+    /// the draws are the same at any scale. 1 in every mix; [`Weights::with_large_sizes`] sets
+    /// the large profile's (`docs/decisions/D277.md`).
+    pub size_scale: u8,
 }
 
 /// What the application does when it comes back after a restart, before the
@@ -658,6 +693,9 @@ pub enum AfterRestart {
     /// other bytes and the next lost commit's frames byte for byte.
     Retry,
 }
+
+/// The large profile's [`Weights::size_scale`] (`docs/decisions/D277.md`).
+pub const LARGE_SIZE_SCALE: u8 = 8;
 
 /// The most commits a [`AfterRestart::Redo`] replays, and the length of the
 /// app's own log of commits.
@@ -728,6 +766,11 @@ impl Default for Weights {
             // Off in the default mix so its recorded histories keep their
             // shape; swarm mixes draw it.
             slice_bytes: None,
+            // Off in the default mix so its recorded histories keep their shape; swarm mixes
+            // draw them.
+            gray: 0,
+            latency_tail: false,
+            size_scale: 1,
         }
     }
 }
@@ -870,6 +913,9 @@ impl Weights {
             http_fault: 0,
             remote_parts: None,
             slice_bytes: None,
+            gray: 0,
+            latency_tail: false,
+            size_scale: 1,
         };
         // Drawn last, so every other kind keeps the weight it had before
         // second writers were drawn.
@@ -942,6 +988,14 @@ impl Weights {
         mix.remote_parts = (below(&entropy, 2) == 0)
             .then(|| crate::remote::Parts::new(part, lanes))
             .flatten();
+        // And after that: gray weather in two thirds of the swarm, at 1 to 30 steps in a
+        // thousand, and the latency tail in half (`docs/decisions/D276.md`).
+        mix.gray = if below(&entropy, 3) == 0 {
+            0
+        } else {
+            u32::try_from(below(&entropy, 30).saturating_add(1)).unwrap_or(1)
+        };
+        mix.latency_tail = below(&entropy, 2) == 0;
         mix
     }
 
@@ -961,6 +1015,17 @@ impl Weights {
         if self.truncate_pages.is_some() {
             self.other_process_reader = self.other_process_reader.max(10);
         }
+        self
+    }
+
+    /// The large profile's sizes on top of this mix: [`LARGE_SIZE_SCALE`] times the pages per
+    /// commit, a commit that grows the database half the time instead of a sixth, and no page-size
+    /// change: after one the engine is degraded for the rest of the run
+    /// ([`Weights::vacuum_resizes`]), which a long history would spend nearly all of.
+    #[must_use]
+    pub fn with_large_sizes(mut self) -> Self {
+        self.size_scale = LARGE_SIZE_SCALE;
+        self.vacuum_resizes = false;
         self
     }
 
@@ -1263,11 +1328,15 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
     match weights.pick(below(entropy, weights.total())) {
         Kind::Tick => Op::Tick,
         Kind::Commit => Op::Commit {
-            pages: small(entropy, 4).saturating_add(1),
-            grow: below(entropy, 6) == 0,
+            pages: small(entropy, 4)
+                .saturating_add(1)
+                .saturating_mul(weights.size_scale),
+            grow: below(entropy, 6) < u64::from(weights.size_scale.clamp(1, 3)),
         },
         Kind::CommitInTick => Op::CommitInTick {
-            pages: small(entropy, 4).saturating_add(1),
+            pages: small(entropy, 4)
+                .saturating_add(1)
+                .saturating_mul(weights.size_scale),
         },
         Kind::Spill => Op::Spill,
         Kind::Rollback => Op::Rollback,
@@ -1377,16 +1446,83 @@ const SOURCE_OPS: [SourceOp; 10] = [
 pub fn history(seed: Seed, steps: u32, weights: &Weights) -> Vec<Op> {
     let entropy = SeededEntropy::new(seed.stream(10));
     let holds = SeededEntropy::new(seed.stream(41));
+    let weather = SeededEntropy::new(seed.stream(42));
     (0..steps)
         .map(|_| {
             let drawn = draw(weights, &entropy);
-            if weights.hold > 0 && below(&holds, 1000) < u64::from(weights.hold) {
-                hold(&holds, weights.overlap)
-            } else {
-                drawn
-            }
+            let held = (weights.hold > 0 && below(&holds, 1000) < u64::from(weights.hold))
+                .then(|| hold(&holds, weights.overlap));
+            // Drawn at every step, whatever the hold did, so neither moves the other.
+            let gray = (weights.gray > 0 && below(&weather, 1000) < u64::from(weights.gray))
+                .then(|| gray(&weather, weights.remote_s3));
+            held.or(gray).unwrap_or(drawn)
         })
         .collect()
+}
+
+/// The longest pause [`gray`] draws, in milliseconds: two days, past the snapshot interval
+/// and the snapshot retention window (a day each in Go's defaults, which the simulator runs).
+pub const MAX_PAUSE_MS: u64 = 2 * 86_400_000;
+
+/// A step of gray weather (`docs/decisions/D276.md`), a fifth each: a replica call that hangs
+/// until the client gives up (one in four of them after the commit published, and with the
+/// replica on S3 half of them as the HTTP request that timed out); an endpoint that hangs every
+/// call of one operation for 32 to 64 ticks (long enough for the health judge's sixteen
+/// retries, ticks that sync between them included); a staging disk 10 to 1000 times slower for 2 to 11
+/// ticks; or a pause of the process before one of a tick's first eight clock reads, of seconds,
+/// minutes or hours (a third each, up to [`MAX_PAUSE_MS`]).
+#[must_use]
+pub fn gray(entropy: &SeededEntropy, remote_s3: bool) -> Op {
+    let op = choose(
+        entropy,
+        &[
+            StoreOp::List,
+            StoreOp::Read,
+            StoreOp::Upload,
+            StoreOp::Upload,
+            StoreOp::Delete,
+        ],
+    )
+    .unwrap_or(StoreOp::Upload);
+    match below(entropy, 5) {
+        0 if remote_s3 && below(entropy, 2) == 0 => Op::HttpFault(HttpFault::Hang(
+            choose(entropy, http_shapes(false)).unwrap_or(HttpShape::Put),
+        )),
+        0 => {
+            let after = op == StoreOp::Upload && below(entropy, 4) == 0;
+            Op::StoreFault {
+                target: Target::Remote,
+                op,
+                ahead: u16::from(small(entropy, 4)),
+                shape: if after {
+                    FaultShape::HangAfterPublish
+                } else {
+                    FaultShape::Hang
+                },
+            }
+        }
+        1 => Op::Hold {
+            hold: Hold::Hang(op),
+            ticks: small(entropy, 33).saturating_add(32),
+        },
+        2 => Op::Hold {
+            hold: Hold::SlowStaging(
+                u16::try_from(below(entropy, 991).saturating_add(10)).unwrap_or(10),
+            ),
+            ticks: small(entropy, 10).saturating_add(2),
+        },
+        _ => {
+            let read = small(entropy, 8).saturating_add(1);
+            let millis = match below(entropy, 3) {
+                0 => below(entropy, 60_000).saturating_add(1_000),
+                1 => below(entropy, 3_600_000).saturating_add(60_000),
+                _ => {
+                    below(entropy, MAX_PAUSE_MS.saturating_sub(3_600_000)).saturating_add(3_600_000)
+                }
+            };
+            Op::Pause { read, millis }
+        }
+    }
 }
 
 #[cfg(test)]

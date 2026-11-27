@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 8d3582aa5..a86498dd8 100644
+index 3de7a1617..f2b217cbf 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -3001,6 +3001,9 @@ async fn boot_listing<L: Role, R: Role>(
-             did: Did::Diverged { confirmed: from },
-         }) => (state, Some(from)),
-         Ok(listed) => (listed.state, None),
+@@ -3407,6 +3407,9 @@ async fn boot_listing<L: Role, R: Role>(
+             empty,
+         )) => (state, Some(from), empty),
+         Ok((listed, empty)) => (listed.state, None, empty),
 +        Err(failed) if failed.fault == Fault::StoreDenied(Denied::Permission) => {
-+            (UploadState::ListFirst { confirmed: None }, None)
++            (UploadState::ListFirst { confirmed: None }, None, Default::default())
 +        }
          Err(failed) => return Err(failed.fault.into()),
      };

@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/fault/role.rs b/crates/core/src/fault/role.rs
-index 9e970c9c2..c6f87d620 100644
+index da2cf2752..aedea9924 100644
 --- a/crates/core/src/fault/role.rs
 +++ b/crates/core/src/fault/role.rs
-@@ -41,7 +41,7 @@ pub(crate) trait Role: ObjectStore {
+@@ -49,7 +49,7 @@ pub(crate) trait Role: ObjectStore {
  }
  
  /// What a compaction reads of each staged file at a time: twice the largest page.
 -pub(crate) const STAGING_WINDOW: ReadLen = ReadLen::or_chunk(128 * 1024);
 +pub(crate) const STAGING_WINDOW: ReadLen = ReadLen::CHUNK;
  
- /// The staging directory.
- #[derive(Debug)]
+ /// The least a compaction reads of an input at a time, whatever its fan-in: a quarter of
+ /// [`STAGING_WINDOW`]. A staged read is answered from the page cache, so a smaller window

@@ -12,7 +12,9 @@
 //! The window. Each forcing is forgotten once the engine has moved past it
 //! ([`Forcing::forgotten_at`]): one about the WAL or a power loss once a
 //! level-0 file is staged after it, since the next boot or step compares the
-//! WAL with that file; one about the replica or the staged files themselves
+//! WAL with that file; an unproven position once a staged file reaches the
+//! WAL's committed end, since a step that stops short at the size cap proves
+//! nothing (`docs/decisions/D283.md`); one about the replica or the staged files themselves
 //! once an upload brings the replica up to the newest staged file, since an
 //! upload's read or a listing is what finds a damaged staged file or a
 //! divergence, and an upload that only repairs an older file proves nothing
@@ -55,7 +57,10 @@ pub enum Forcing {
     StagingFault,
     /// A fault failed a step, a boot ran under a wal-index reset ahead of
     /// the WAL header, or a boot continued short of a commit it never staged,
-    /// so the position proves no continuity until the next step stages a file.
+    /// so the position proves no continuity until a step stages a file that
+    /// reaches the WAL's committed end. A step stopped short by the size cap
+    /// proves nothing: the boot's read transaction may sit on mark 0, which
+    /// blocks no restart, and a restart then takes the frames past it.
     PositionUnproven,
     /// The engine deleted staged files the replica never took
     /// ([`crate::oracle::lost_restore_points`] counted the give-up).
@@ -75,7 +80,8 @@ pub enum Forcing {
     /// A change under a hold on read mark zero is no reason: the hold blocks
     /// every backfill, so no commit can go with the old generation and the
     /// engine follows it (`lsr_core::recover_traced`, rule 6; seeds 0xe and
-    /// 0xf4846 snapshotted there before).
+    /// 0xf4846 snapshotted there before). That holds for a position that reached the
+    /// committed end in the hold; one still behind it is [`Self::PositionUnproven`].
     ReadLockLapsed,
     /// The operator asked for a snapshot.
     SnapshotRequested,
@@ -89,6 +95,8 @@ pub enum Forcing {
 pub enum ForgottenAt {
     /// Once a level-0 file is staged after it.
     Staging,
+    /// Once a level-0 file staged after it reaches the WAL's committed end.
+    StagedThrough,
     /// Once the replica takes a level-0 file that reaches the newest staged
     /// one: the replica holds everything staging does.
     Upload,
@@ -116,8 +124,8 @@ impl Forcing {
             | Self::WalDamaged
             | Self::WalRestarted
             | Self::WalEmptied
-            | Self::ReadLockLapsed
-            | Self::PositionUnproven => ForgottenAt::Staging,
+            | Self::ReadLockLapsed => ForgottenAt::Staging,
+            Self::PositionUnproven => ForgottenAt::StagedThrough,
         }
     }
 }
@@ -145,6 +153,9 @@ pub const fn noted_by_op(op: &Op) -> &'static [Forcing] {
             crate::generate::Hold::LyingDisk => &[Forcing::LyingDisk],
             crate::generate::Hold::ReadersHeld => &[],
             crate::generate::Hold::SecondWriter => &[Forcing::RemoteEdited],
+            crate::generate::Hold::Hang(_) => &[Forcing::RemoteFault],
+            // Slowness fails nothing: it forces nothing.
+            crate::generate::Hold::SlowStaging(_) => &[],
         },
         Op::OurReader { begin: false } => &[Forcing::ReadLockLapsed],
         // The database goes back to an older image: nothing the engine staged vouches for it.
@@ -165,6 +176,7 @@ pub const fn noted_by_op(op: &Op) -> &'static [Forcing] {
         | Op::Crash(_)
         | Op::StoreFault { .. }
         | Op::ClockJump(_)
+        | Op::Pause { .. }
         // When a part lands is the store's own traffic: it forces nothing.
         | Op::Parts(_)
         | Op::Tick
@@ -224,6 +236,8 @@ pub const fn noted_by_opts(opts: &crate::run::Opts) -> &'static [Forcing] {
         // The database's size and the cost of I/O force nothing.
         first_db_pages: _,
         cost: _,
+        // A latency tail only prices requests: it fails none.
+        latency_tail: _,
         // The law's process crashes are noted as they happen, as a crash operation's are.
         kill_after_fault: _,
         // The replica on S3, in parts or not: its provider faults are noted as they are drawn.
@@ -416,8 +430,15 @@ impl Forcings {
         NeedlessSnapshot::check_counter(checkable, grew, staged.bare, staged.full)?;
         let staged_snapshots = staged.full.max(staged.bare);
         let requested = self.snapshots.settle(counts, ended, grew, staged_snapshots);
+        let through = staged.any
+            && self
+                .window
+                .iter()
+                .any(|why| why.forgotten_at() == ForgottenAt::StagedThrough)
+            && !world.staging_behind_commit();
         self.window.retain(|why| match why.forgotten_at() {
             ForgottenAt::Staging => !staged.any,
+            ForgottenAt::StagedThrough => !through,
             ForgottenAt::Upload => !caught_up,
             ForgottenAt::RequestedSnapshot => requested == 0,
             ForgottenAt::Never => true,
@@ -521,6 +542,8 @@ pub trait TickWorld {
     fn staged_level_zero(&self) -> Vec<FileKey>;
     /// Whether a staged level-0 file has other bytes than the replica's object under its key.
     fn staged_differs_from_replica(&self) -> bool;
+    /// Whether the local database holds a commit past the newest staged file's.
+    fn staging_behind_commit(&self) -> bool;
 }
 
 impl TickWorld for crate::World {
@@ -560,6 +583,10 @@ impl TickWorld for crate::World {
                 self.staging_departs_from_remote(key)
                     .is_ok_and(|departs| departs)
             })
+    }
+
+    fn staging_behind_commit(&self) -> bool {
+        self.staging_behind_newest_commit()
     }
 }
 
@@ -604,6 +631,10 @@ impl<W: TickWorld> TickWorld for WithEngine<'_, W> {
     fn staged_differs_from_replica(&self) -> bool {
         self.world.staged_differs_from_replica()
     }
+
+    fn staging_behind_commit(&self) -> bool {
+        self.world.staging_behind_commit()
+    }
 }
 
 /// What one tick staged at level 0.
@@ -643,6 +674,9 @@ mod tests {
             vec![key(24), key(25)]
         }
         fn staged_differs_from_replica(&self) -> bool {
+            false
+        }
+        fn staging_behind_commit(&self) -> bool {
             false
         }
     }
@@ -772,6 +806,9 @@ mod tests {
         fn staged_differs_from_replica(&self) -> bool {
             self.differs
         }
+        fn staging_behind_commit(&self) -> bool {
+            false
+        }
     }
 
     /// An upload that reaches the newest staged file has not caught up while staging still
@@ -879,6 +916,9 @@ mod tests {
             Vec::new()
         }
         fn staged_differs_from_replica(&self) -> bool {
+            false
+        }
+        fn staging_behind_commit(&self) -> bool {
             false
         }
     }

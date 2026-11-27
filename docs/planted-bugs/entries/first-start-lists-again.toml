@@ -1,0 +1,9 @@
+# A first start lists the whole replica again to plan its first snapshot, ten LISTs (one per
+# level) the boot's own listing and the level-0 file just put already answer, and once more for
+# each maintenance pass made while that first file is in flight.
+name = "first-start-lists-again"
+fix = "claude/steady-lists"
+package = "lsr-core"
+tests = [
+    "a_first_start_lists_the_replica_at_boot_and_after_its_first_snapshot_only",
+]

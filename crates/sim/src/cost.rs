@@ -29,6 +29,22 @@ pub struct Link {
 }
 
 impl Link {
+    /// A store that costs nothing: no latency, and bytes move at once.
+    pub const FREE: Self = Self {
+        latency_us: 0,
+        bytes_per_sec: u64::MAX,
+    };
+
+    /// The same store `factor` times slower: each request waits `factor` times as long, and
+    /// bytes move at a `factor`th of the rate.
+    #[must_use]
+    pub fn slowed(&self, factor: u64) -> Self {
+        Self {
+            latency_us: self.latency_us.saturating_mul(factor),
+            bytes_per_sec: self.bytes_per_sec.checked_div(factor).unwrap_or(0).max(1),
+        }
+    }
+
     /// Microseconds `requests` requests moving `bytes` bytes take, one after another.
     #[must_use]
     pub fn micros(&self, requests: u64, bytes: u64) -> u64 {
@@ -105,11 +121,49 @@ impl Profile {
     }
 }
 
+/// The draws [`tail_factor`] reads a request's latency from: uniform below this, so a draw
+/// `d` stands for the fraction `(d + 1) / TAIL_DRAWS` of the way up the tail.
+pub const TAIL_DRAWS: u64 = 1 << 20;
+
+/// The most times its profile's latency one request may take: three orders of magnitude, the
+/// span between a healthy object store's median and its worst seconds-long stalls.
+pub const TAIL_MAX: u64 = 1000;
+
+/// How many times its profile's latency a request takes, for a draw uniform below
+/// [`TAIL_DRAWS`]: a Pareto tail of shape 1.5, cut at [`TAIL_MAX`]. The chance a request
+/// takes at least `k` times the latency is `k^-1.5` (`docs/decisions/D276.md`): about 65
+/// percent take the latency, 3 percent ten times it, 1 in 1000 a hundred times, and 1 in 31,600
+/// the cap. The factor is the largest `k` with `k³·u² ≤ 1`, `u` the draw's fraction,
+/// computed in integers so every run's times are exact.
+#[must_use]
+pub fn tail_factor(draw: u64) -> u64 {
+    let u = u128::from(draw.min(TAIL_DRAWS.saturating_sub(1)).saturating_add(1));
+    let one = u128::from(TAIL_DRAWS).saturating_mul(u128::from(TAIL_DRAWS));
+    let fits = |k: u64| {
+        let k = u128::from(k);
+        k.saturating_mul(k)
+            .saturating_mul(k)
+            .saturating_mul(u.saturating_mul(u))
+            <= one
+    };
+    let (mut low, mut high) = (1_u64, TAIL_MAX);
+    while low < high {
+        let mid = low.saturating_add(high.saturating_sub(low).div_ceil(2));
+        if fits(mid) {
+            low = mid;
+        } else {
+            high = mid.saturating_sub(1);
+        }
+    }
+    low
+}
+
 /// Requests any tick may make on a store besides those for the files it puts: a boot's
 /// listings (ten levels, three times over) and its reads (a header and a body for the newest
 /// file of each level, and the upload lane's read-back), or a merge's first slice opening each
-/// of its inputs (the swarm's largest seen was 60 reads and 10 listings), with room to spare.
-pub const BASE_REQUESTS: u64 = 128;
+/// of its inputs (at most `MAX_INPUTS`, 128, and the swarm's merge of 126 inputs from the
+/// replica made 263 requests, two an input) and ten listings, with room to spare.
+pub const BASE_REQUESTS: u64 = 320;
 
 /// Staging reads one part the S3 replica sends may make of its staged bytes, before the
 /// re-reads each cell is allowed (`s3_rereads`): room to spare.

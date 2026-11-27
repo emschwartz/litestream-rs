@@ -4,6 +4,12 @@
 // `cfg(test)` is always set here; it marks the helpers as test code, so clippy.toml's
 // allow-*-in-tests cover them as they cover #[test] fns.
 #[cfg(test)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "the fixtures size databases and measure heap from small bounded counts"
+)]
+mod carried;
+#[cfg(test)]
 mod created_at_sources;
 #[cfg(test)]
 mod gates;
