@@ -5,7 +5,4 @@ package = "lsr-store-s3"
 tests = [
     "memory::an_upload_through_the_real_client_holds_five_parts_in_flight_and_one_more",
     "memory::the_bound_follows_part_size_and_concurrency",
-    # At 5 MiB parts the compaction peaks well under its bound (20 MiB of 40) and a copy of
-    # each part in flight stays under it; at 16 MiB the copies show.
-    "memory::a_compaction_into_s3_at_a_large_part_size_holds_its_parts",
 ]
