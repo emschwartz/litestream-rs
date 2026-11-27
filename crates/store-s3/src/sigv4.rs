@@ -14,7 +14,6 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use sha2::{Digest as _, Sha256};
 use url::Url;
 
-
 const ALGORITHM: &str = "AWS4-HMAC-SHA256";
 
 /// The SHA-256 of a request body: what `x-amz-content-sha256` carries and the signature covers.

@@ -716,7 +716,11 @@ fn join_parts(
         body.extend_from_slice(part);
         digests.extend_from_slice(&digest);
     }
-    let etag = format!("\"{}-{}\"", hex::encode(Md5::digest(&digests)), listed.len());
+    let etag = format!(
+        "\"{}-{}\"",
+        hex::encode(Md5::digest(&digests)),
+        listed.len()
+    );
     Ok(Joined { body, etag })
 }
 
