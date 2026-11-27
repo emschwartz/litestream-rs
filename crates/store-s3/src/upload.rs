@@ -81,7 +81,7 @@ use lsr_core::{
 use lsr_ltx::Timestamp;
 
 use crate::again::{Run, Sealed};
-use crate::classify::{classify, is_not_implemented, transient_other};
+use crate::classify::{classify, transient_other};
 use crate::lanes::{Condvar, Mutex, MutexGuard, lock};
 use crate::multipart::{PAYLOAD_TOO_LARGE, Sent, completed_etag_fits, judge_part};
 use crate::part_plan::{MAX_OBJECT, held_width, plan_part_size};
@@ -93,7 +93,7 @@ use crate::transport::{HttpResponse, StreamedRequest, Transport};
 /// A part's bytes: a buffer, or what is needed to read them again.
 pub(crate) enum Bytes {
     Held(Vec<u8>),
-    Again(Sealed),
+    Again(Box<Sealed>),
 }
 
 impl Bytes {
@@ -182,7 +182,7 @@ impl Filling {
     fn seal(&mut self) -> Option<Bytes> {
         match self {
             Self::Held(buf) => Some(Bytes::Held(std::mem::take(buf))),
-            Self::Again(run) => run.take().map(|run| Bytes::Again(run.seal())),
+            Self::Again(run) => run.take().map(|run| Bytes::Again(Box::new(run.seal()))),
         }
     }
 
@@ -293,26 +293,19 @@ impl<T> Drop for Report<T> {
     }
 }
 
-impl<T: Transport> Inner<T> {
-    /// Starts one part on the store's lanes. Its answer is left with `shared`.
-    fn start_part(&self, shared: Arc<Shared<T>>, number: PartNumber, bytes: Bytes) {
-        let report = Report {
-            _started: Started::new(Arc::clone(&shared.inner)),
-            shared,
-            number,
-            held: bytes.held(),
-            bytes: Some(bytes),
-            sent: None,
-        };
-        self.lanes.start(Box::new(move || report.run()));
-    }
-}
-
 impl<T: Transport> Report<T> {
     /// The part's work; what it came to is left when this is dropped.
     fn run(mut self) {
-        if let Some(bytes) = self.bytes.take() {
-            self.sent = Some(self.shared.send_part(self.number, bytes));
+        if let Some(mut bytes) = self.bytes.take() {
+            let (key, id) = (&self.shared.key, &self.shared.id);
+            let number = self.number;
+            self.sent = Some(
+                bytes
+                    .send_with(&self.shared.inner, &self.shared.stop, |b, now, sized| {
+                        b.upload_part_of(now, key, id, number, sized)
+                    })
+                    .map(|(response, _)| response),
+            );
         }
     }
 }
@@ -507,16 +500,8 @@ impl<T: Transport> Inner<T> {
         precondition: Precondition,
         response: &HttpResponse,
     ) -> Result<FileInfo, StoreError> {
-        let op = StoreOp::Upload;
-        if precondition == Precondition::KeyIsFree && is_not_implemented(response) {
-            // Nothing published and nothing checked: the caller decides whether to replace
-            // (D79). The store never drops the condition itself.
-            return Err(StoreError::CreateOnlyUnsupported { op, key: *key });
-        }
-        if response.status() == 412 {
-            self.tally_taken();
-        }
-        classify(op, Some(key), None, response)?;
+        self.refuse_unsupported_or_tally(precondition, key, response)?;
+        classify(StoreOp::Upload, Some(key), None, response)?;
         Ok(FileInfo {
             key: *key,
             size: wrote,
@@ -535,17 +520,6 @@ impl<T: Transport> Inner<T> {
             key: Some(*key),
             cause: CorruptCause::ChecksumMismatch { part },
         }
-    }
-}
-
-impl<T: Transport> Shared<T> {
-    /// One part's work, on the thread that sends it: the SHA-256, the request, the answer.
-    fn send_part(&self, number: PartNumber, mut bytes: Bytes) -> Result<HttpResponse, StoreError> {
-        let (key, id) = (&self.key, &self.id);
-        let (response, _) = bytes.send_with(&self.inner, &self.stop, |b, now, sized| {
-            b.upload_part_of(now, key, id, number, sized)
-        })?;
-        Ok(response)
     }
 }
 
@@ -602,8 +576,16 @@ impl<T: Transport> S3Upload<T> {
         multi.etags.push(None);
         multi.flying = multi.flying.saturating_add(1);
         multi.flying_held = multi.flying_held.saturating_add(bytes.held());
-        self.inner
-            .start_part(Arc::clone(&multi.shared), number, bytes);
+        // The part's answer is left with `shared`.
+        let report = Report {
+            _started: Started::new(Arc::clone(&multi.shared.inner)),
+            shared: Arc::clone(&multi.shared),
+            number,
+            held: bytes.held(),
+            bytes: Some(bytes),
+            sent: None,
+        };
+        self.inner.lanes.start(Box::new(move || report.run()));
         Ok(true)
     }
 

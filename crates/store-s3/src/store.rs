@@ -5,13 +5,12 @@
 //! `RequestBuilder`, sent, then judged by `classify`, so what a status or code
 //! means is decided in one place. The store never retries.
 //!
-//! Batches: a call that needs several independent requests (the parts of an
-//! upload, the levels of a listing, a set of created-at times) builds them
-//! all, hands them to [`Transport::send_many`] with the limit of their kind,
-//! and judges each response alone, exactly as a single request. The kinds are
-//! limited apart, as Go does: multipart parts by the `concurrency` setting
-//! (provider defaults in [`S3Config::concurrency`]), HEADs by
-//! `CREATION_TIME_CONCURRENCY`, listing pages by `READ_CONCURRENCY`.
+//! Batches: a call that needs several independent requests (the levels of a listing, a
+//! set of created-at times) builds them all, hands them to [`Transport::send_many`] with the
+//! limit of their kind, and judges each response alone, exactly as a single request. HEADs are
+//! limited by `CREATION_TIME_CONCURRENCY`, listing pages by `READ_CONCURRENCY`. The parts of
+//! an upload are not a batch: they go through the lanes (`lanes.rs`), as many at once as the
+//! `concurrency` setting says (provider defaults in [`S3Config::concurrency`]).
 //!
 //! Deadlines: the transport bounds one request. A call that sends several (a
 //! listing, a large delete) also checks the `Clock` between them against four
@@ -507,6 +506,17 @@ impl<T: Transport> Inner<T> {
         build(&builder, now).map_err(|err| request_error(op, err))
     }
 
+    /// Builds a request signed with the current time and sends it, whatever the status.
+    /// The clock is read in `request`, just before the send.
+    pub(crate) fn call(
+        &self,
+        op: StoreOp,
+        build: impl FnOnce(&RequestBuilder, Timestamp) -> Result<HttpRequest, RequestError>,
+    ) -> Result<HttpResponse, StoreError> {
+        let request = self.request(op, build)?;
+        self.send(op, request)
+    }
+
     /// Sends and returns whatever came back, whatever the status.
     pub(crate) fn send(
         &self,
@@ -575,14 +585,14 @@ impl<T: Transport> Inner<T> {
         }
     }
 
-    /// Sends, and turns a failure status into its [`StoreError`].
+    /// [`Self::call`], and turns a failure status into its [`StoreError`].
     pub(crate) fn exec(
         &self,
         op: StoreOp,
         key: Option<&FileKey>,
-        request: HttpRequest,
+        build: impl FnOnce(&RequestBuilder, Timestamp) -> Result<HttpRequest, RequestError>,
     ) -> Result<HttpResponse, StoreError> {
-        let response = self.send(op, request)?;
+        let response = self.call(op, build)?;
         classify(op, key, None, &response)?;
         Ok(response)
     }
@@ -655,8 +665,7 @@ impl<T: Transport> Inner<T> {
 
     fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         let op = StoreOp::Read;
-        let request = self.request(op, |b, now| b.get_range(now, key, offset, len))?;
-        let response = self.send(op, request)?;
+        let response = self.call(op, |b, now| b.get_range(now, key, offset, len))?;
         Self::range_body(key, offset, len, response)
     }
 
@@ -672,8 +681,7 @@ impl<T: Transport> Inner<T> {
     fn head_created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
         let op = StoreOp::Read;
         let key = file.key;
-        let request = self.request(op, |b, now| b.head(now, &key))?;
-        let response = self.send(op, request)?;
+        let response = self.call(op, |b, now| b.head(now, &key))?;
         Self::judge_head(file, &response)
     }
 
@@ -716,8 +724,7 @@ impl<T: Transport> Inner<T> {
     ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
         let op = StoreOp::Read;
         let key = file.key;
-        let request = self.request(op, |b, now| b.get_range(now, &key, 0, len))?;
-        let response = self.send(op, request)?;
+        let response = self.call(op, |b, now| b.get_range(now, &key, 0, len))?;
         // The metadata is read before the body is taken out of the response, and judged after
         // the body's own errors, as it was when the body was copied.
         let carried = match response.status() {
@@ -802,8 +809,7 @@ impl<T: Transport> Inner<T> {
         let start = self.now();
         for batch in sorted.chunks(MAX_DELETE_KEYS) {
             self.within_budget(op, start)?;
-            let request = self.request(op, |b, now| b.delete_objects(now, batch))?;
-            let response = self.exec(op, None, request)?;
+            let response = self.exec(op, None, |b, now| b.delete_objects(now, batch))?;
             // A key that is already gone is not a failure; anything else is.
             let failed =
                 parse_delete_failure_codes(&response).map_err(|err| err.into_store(op, None))?;
