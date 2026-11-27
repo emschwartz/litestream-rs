@@ -41,6 +41,10 @@ crc = "3.4.0"
 crc-fast = { version = "1.10.0", default-features = false, features = ["std"] }
 jiff = { version = "1.0", default-features = false, features = ["std"] }
 lz4_flex = { version = "0.14.2", default-features = false, features = ["std", "safe-decode", "safe-encode"] }
+# Hex encoding of digests and ETags (MIT OR Apache-2.0).
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+# HMAC-SHA-256 for SigV4 signing (MIT OR Apache-2.0), already in the lock through rusty-s3.
+hmac = { version = "0.13", default-features = false }
 md-5 = { version = "0.11", default-features = false }
 # Recognising a TLS failure from an application's native-tls reqwest client (the S3 store's optional
 # `native-tls` feature); reqwest names the same 0.2 line, so an application using it compiles it already.

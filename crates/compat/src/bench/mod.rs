@@ -277,10 +277,7 @@ fn report(rig: &Rig, arms: [&Program; 2], series: &[Series]) -> Result<(), Compa
 
 fn sha256_of(path: &Path) -> Result<String, CompatError> {
     let bytes = fs::read(path).map_err(CompatError::io(path))?;
-    Ok(Sha256::digest(&bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+    Ok(hex::encode(Sha256::digest(&bytes)))
 }
 
 /// Copies `from` beside the results, so a rebuild cannot swap an arm, and returns the program.

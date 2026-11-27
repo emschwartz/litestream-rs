@@ -74,7 +74,7 @@ fn usage() -> ExitCode {
 fn digest(db: &Path) -> ExitCode {
     match chain::read(db) {
         Ok(d) => {
-            println!("{}", hex(&d));
+            println!("{}", hex::encode(d.bytes()));
             ExitCode::SUCCESS
         }
         Err(why) => {
@@ -84,24 +84,8 @@ fn digest(db: &Path) -> ExitCode {
     }
 }
 
-fn hex(d: &Digest) -> String {
-    d.bytes().iter().map(|b| format!("{b:02x}")).collect()
-}
-
 fn parse_digest(text: &str) -> Option<Digest> {
-    if text.len() != 64 {
-        return None;
-    }
-    let bytes: Option<Vec<u8>> = text
-        .as_bytes()
-        .chunks(2)
-        .map(|pair| {
-            std::str::from_utf8(pair)
-                .ok()
-                .and_then(|p| u8::from_str_radix(p, 16).ok())
-        })
-        .collect();
-    bytes.and_then(|b| Digest::from_slice(&b))
+    Digest::from_slice(&hex::decode(text).ok()?)
 }
 
 /// The replay: the tree so far, the judge's state, and a commit sent but not yet answered.
