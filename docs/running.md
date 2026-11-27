@@ -54,7 +54,7 @@ litestream-rs:
 
 Temporary credentials are fetched again before they expire. A profile that needs an assumed role, IAM Identity Center or a login session is refused by name: those are not built ([#176](https://github.com/emschwartz/litestream-rs/issues/176)).
 
-On AWS the keys need the policy in Litestream's S3 guide plus two actions it does not grant: `s3:ListBucketMultipartUploads` on the bucket and `s3:AbortMultipartUpload` on its objects. `lsr` lists and aborts unfinished multipart uploads at every start, and Go does neither. Without them the start is refused as a permission error, although every get, put, list and delete works by hand.
+On AWS the keys need the policy in Litestream's S3 guide. Two more actions are optional: `s3:ListBucketMultipartUploads` on the bucket and `s3:AbortMultipartUpload` on its objects. With them `lsr` lists and aborts unfinished multipart uploads at every start, which Go never does. Without them that clean-up is skipped with one warning and nothing else fails ([s3-permissions.md](s3-permissions.md)).
 
 ## Running an application under -exec
 
@@ -97,7 +97,7 @@ Logs go to standard error in Go's `slog` text format, `time=... level=... msg=..
 | `replica position recovered; snapshot required` with `cause=` | A snapshot follows. `FirstSync` is a new replica; other causes say what broke continuity |
 | `retrying` with `error=` and `retry_at=` | A fault that is being retried, for example `StoreTransient` while the store is unreachable |
 | `replication degraded` with `task=` and `cause=` | A failure that persists. That task waits and retries |
-| `writes blocked` with `held_by=refused_at_start` | The store refused a request the start needs (credentials, or a permission such as the two multipart ones). Writes stay held until it accepts |
+| `writes blocked` with `held_by=refused_at_start` | The store refused a request the start needs (credentials, or a permission such as listing the bucket). Writes stay held until it accepts |
 | `replicate refused: the replica holds transactions up to ...`, then `replication stopped` with `cause=OtherWriter` | The bucket holds files this database cannot account for. See "When it stops" |
 | `database drained` with `txid=` | At shutdown, everything committed reached the replica |
 | `database not drained: deadline reached, the replica lacks every commit after last_replicated_txid` | Shutdown ran out of time (`shutdown-sync-timeout`, 30 seconds by default) with changes not uploaded. A restore lacks every commit after `last_replicated_txid` (`none`: no transaction of this database was confirmed on the replica) until the next start uploads them; `unsynced_wal_bytes` and `staged_not_uploaded` say how much, counted high |
@@ -147,7 +147,7 @@ The first says this database is the right one; the next start takes a snapshot a
 
 Never let Go and `lsr` run on one bucket path at the same moment, not even for the seconds of a rolling deploy: restores can then come back wrong with no error ([#346](https://github.com/emschwartz/litestream-rs/issues/346)). Nothing enforces it, because the working folder's lock does not exclude Go, and an application that embeds the library while a Go sidecar still runs is the same overlap. To swap them: stop the one that is running, confirm its process has exited, then start the other.
 
-With Go stopped, `lsr` reads the same config and the same working folder (`.<name>-litestream` beside the database) and continues from Go's files, with no snapshot when the WAL is intact. Before the swap, run `lsr config check` (it refuses settings for features `lsr` lacks), add the two permissions above, and keep free disk about the size of the database beside it: a start that cannot continue from the WAL stages a compressed copy there first. To go back, stop `lsr`, confirm it has exited, and start Go v0.5.16 or later.
+With Go stopped, `lsr` reads the same config and the same working folder (`.<name>-litestream` beside the database) and continues from Go's files, with no snapshot when the WAL is intact. Before the swap, run `lsr config check` (it refuses settings for features `lsr` lacks), add the two optional permissions above if the keys can have them, and keep free disk about the size of the database beside it: a start that cannot continue from the WAL stages a compressed copy there first. To go back, stop `lsr`, confirm it has exited, and start Go v0.5.16 or later.
 
 ### When the application runs under Go's -exec
 
