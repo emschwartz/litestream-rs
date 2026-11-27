@@ -24,6 +24,8 @@ The time from start until the first snapshot is on the replica. "Large parts" is
 | MinIO, text-like, large parts | 3 | 62.7 / 28.9 s | -54% [-57, -50] | -52% [-66, -32] | 810 / 197 MiB (-76% [-83, -65]) |
 | File, random | 1 | 67.6 / 30.5 s | -55% | -74% | 120 / 23 MiB (-81%) |
 
+The two large-parts rows predate `docs/decisions/D309.md`, which removed the 256 MiB cap on the parts a buffered upload holds. On a Mac Studio against local MinIO at 100 MB parts, `lsr`'s peak for the same first start rose from 225 to 320 MiB with ten parts at once and from 225 to 320 MiB with two (a 4 GiB random database, six pairs each, +42% [+41, +43]); Go's 824 MiB was measured on the Linux VM and has not been re-measured with the new code there.
+
 Bytes written to the replica are equal on MinIO (8.5 GB random, 4.4 GB text-like). On the file replica `lsr` wrote 8.5 GB and Go 9.1 GB. A text-like database to a file replica was not measured at this commit.
 
 ## Requests at a first start
@@ -45,7 +47,7 @@ One counted run per row, through a proxy in front of MinIO, at 27a41bd04.
 
 ## Not measured at the current code
 
-- **Restore.** Last measured on 3c384ab27, from a file replica only. 1314261bd since changed how a restore reads each file (one GET per file instead of ranged reads), and a file of 16 MiB or more is now read through a window of 8 MiB ranged GETs side by side (docs/decisions/D309.md), so those numbers are not repeated here.
+- **Restore.** Last measured on 3c384ab27, from a file replica only. 1314261bd since changed how a restore reads each file (one GET per file instead of ranged reads), and a file of 16 MiB or more is now read through a window of 8 MiB ranged GETs side by side (docs/decisions/D312.md), so those numbers are not repeated here.
 - **Steady state** (20 commits a second to MinIO). Last measured on c5c8f9817, before later changes to the upload and compaction paths, so its CPU, memory and request counts are not repeated here.
 - **Other machines and real providers.** Every row above is one Linux VM against MinIO on loopback. A provider's latency changes the balance: this run hides the cost of a round trip that a real bucket charges.
 - **Larger databases**, and an `lsr` that has run for days.

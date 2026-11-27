@@ -91,7 +91,7 @@ impl<'s, S: ObjectStore> Window<'s, S> {
                 return;
             }
             // One GET per 8 MiB where one stream makes one GET per file: requests traded for wall
-            // time, as the owner approved (docs/decisions/D309.md). A 68 GB restore makes about
+            // time, as the owner approved (docs/decisions/D312.md). A 68 GB restore makes about
             // 8,500 of them, under a cent at S3's read price. One stream from Linode to Tigris ran
             // at a median 89 MiB/s, four at 276 and eight at 364.
             self.open.push_back(Open {

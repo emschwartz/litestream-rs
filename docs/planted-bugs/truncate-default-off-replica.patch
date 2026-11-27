@@ -1,8 +1,8 @@
 diff --git a/crates/replica/src/config.rs b/crates/replica/src/config.rs
-index 13818eb58..37f4963ff 100644
+index bfd9915fd..60683734f 100644
 --- a/crates/replica/src/config.rs
 +++ b/crates/replica/src/config.rs
-@@ -162,13 +162,17 @@ impl Config {
+@@ -184,13 +184,17 @@ impl Config {
  
      /// The engine's configuration.
      pub(crate) fn actor(&self) -> ActorConfig {
@@ -18,6 +18,6 @@ index 13818eb58..37f4963ff 100644
              sync_interval: self.poll_interval.get(),
 -            checkpoint: self.checkpoint,
 +            checkpoint,
-             upload: UploadConfig {
-                 files_per_tick: self.sync_limits.files_per_upload,
-                 ..UploadConfig::default()
+             upload: self.upload(),
+             maintenance: self.maintenance.clone(),
+             retry_interval: self.retry_interval.get(),

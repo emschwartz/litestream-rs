@@ -36,10 +36,10 @@ fn metric_name(index: usize) -> &'static str {
 
 fn medians_table(arms: &[(&ArmDef, Runs<'_>)]) {
     println!(
-        "\nmedians over rounds (p50 p99 p99.9 in ms during the copy window; pre p99 is the same run's own 20 s before it)"
+        "\nmedians over rounds (p50 p99 p99.9 in ms during the copy window, commit50 and commit99 the fsync'd commits' own; pre p99 is the same run's own 20 s before it)"
     );
     println!(
-        "{:<11} {:>3} {:>8} {:>8} {:>8} {:>8} {:>8} {:>9} {:>8} {:>9} {:>11} {:>6}",
+        "{:<11} {:>3} {:>8} {:>8} {:>8} {:>8} {:>8} {:>9} {:>8} {:>9} {:>11} {:>6} {:>8} {:>8}",
         "arm",
         "n",
         "p50",
@@ -51,12 +51,14 @@ fn medians_table(arms: &[(&ArmDef, Runs<'_>)]) {
         "WAL MiB",
         "current s",
         "app majflt",
-        "steal%"
+        "steal%",
+        "commit50",
+        "commit99"
     );
     for (arm, runs) in arms {
         let m = |i| medians(runs, i);
         println!(
-            "{:<11} {:>3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.1} {:>9.0} {:>8.1} {:>9.1} {:>11.0} {:>6.2}",
+            "{:<11} {:>3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.1} {:>9.0} {:>8.1} {:>9.1} {:>11.0} {:>6.2} {:>8.3} {:>8.3}",
             arm.label,
             runs.len(),
             m(at::P50),
@@ -69,6 +71,8 @@ fn medians_table(arms: &[(&ArmDef, Runs<'_>)]) {
             m(at::CURRENT_S),
             m(at::APP_FAULTS),
             m(at::STEAL),
+            m(at::WRITE_P50),
+            m(at::WRITE_P99),
         );
     }
 }

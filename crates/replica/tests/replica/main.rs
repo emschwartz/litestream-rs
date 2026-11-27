@@ -21,6 +21,8 @@ mod restored;
 #[cfg(test)]
 mod second_writer;
 #[cfg(test)]
+mod snapshot_limit;
+#[cfg(test)]
 mod verify;
 #[cfg(test)]
 mod waiting;

@@ -33,6 +33,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 lsr-replica = { workspace = true, features = ["rusqlite", "testing"] }
+proptest.workspace = true
 tempfile.workspace = true
 
 # Schedule exploration, compiled only under `--cfg shuttle` (`just shuttle`).
