@@ -43,6 +43,7 @@ pub(super) const fn source_op_name(op: SourceOp) -> &'static str {
         SourceOp::BeginWriteLock => "BeginWriteLock",
         SourceOp::EndWriteLock => "EndWriteLock",
         SourceOp::Sync => "Sync",
+        SourceOp::RenewRead => "RenewRead",
     }
 }
 

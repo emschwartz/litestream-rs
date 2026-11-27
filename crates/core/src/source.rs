@@ -223,6 +223,11 @@ pub enum CheckpointMode {
     /// real, so a caller can tell exactly which frames were copied. The cure after a failed WAL
     /// sync runs it to prove what it copied (issue #197).
     Full,
+    /// Copy what no reader needs, from the writer connection, and keep the read transaction:
+    /// the engine's own read holds the copy at or below its mark, so it copies only frames the
+    /// engine has staged and never lets the WAL restart. It takes no write lock, so the
+    /// application writes on while it runs (`docs/decisions/D307.md`).
+    Backlog,
 }
 
 /// What a checkpoint reported: SQLite's three result columns, plus the epoch
@@ -287,6 +292,14 @@ pub trait Checkpointer {
     /// [`SourceError::ReadTxLost`] when the retake fails; [`SourceError::WritesHeld`] while the
     /// replicator holds the application's writes; others on failure.
     fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointRun, SourceError>;
+
+    /// Ends the read transaction and takes it again, copying nothing: the new hold's mark is
+    /// the committed end. The checkpoint protocol calls it under the barrier, so that end is
+    /// the one its seal staged.
+    ///
+    /// # Errors
+    /// [`SourceError::ReadTxLost`] when the retake fails; others on failure.
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError>;
 
     /// Writes the frame that moves the WAL past the checkpoint (Go `db.go:1667`).
     ///
