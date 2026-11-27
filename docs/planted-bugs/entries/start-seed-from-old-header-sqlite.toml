@@ -1,6 +1,6 @@
 name = "start-seed-from-old-header-sqlite"
 patch = "start-seed-from-old-header"
-fix = "1c818f58"
+fix = "3b78c876f"
 package = "lsr-sqlite"
 test_bin = "sqlite"
 tests = [

@@ -1,6 +1,6 @@
 # Fail-stop false trips on lag the replica did not have: one plant per rule the fix added.
 name = "failstop-dates-the-run"
-fix = "87cd10d"
+fix = "143c17132"
 package = "lsr-core"
 tests = [
     "lag::a_steady_writer_whose_uploads_trail_by_a_tick_never_trips",
