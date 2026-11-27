@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/restore.rs b/crates/core/src/restore.rs
-index e7edd781..ea2e7bc5 100644
+index e1e2b68e5..eab775478 100644
 --- a/crates/core/src/restore.rs
 +++ b/crates/core/src/restore.rs
-@@ -635,7 +635,7 @@ impl Retries {
-             }
-             Abort::Gap(outcome) => {
-                 self.gaps = self.gaps.saturating_add(1);
--                if self.gaps >= self.limit {
-+                if self.gaps >= 1 {
-                     return Err(RestoreError::NoPlan(NoPlan(outcome)));
-                 }
-                 Ok(())
+@@ -702,7 +702,7 @@ impl Retries {
+     /// Counts one listing that planned a gap.
+     fn gap(&mut self, outcome: PlanOutcome) -> Result<(), RestoreError> {
+         self.gaps = self.gaps.saturating_add(1);
+-        if self.gaps >= self.limit {
++        if self.gaps >= 1 {
+             return Err(RestoreError::NoPlan(NoPlan(outcome)));
+         }
+         Ok(())

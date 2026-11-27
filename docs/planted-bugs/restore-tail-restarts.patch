@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/restore.rs b/crates/core/src/restore.rs
+index f7f7f6ce6..866302d2b 100644
+--- a/crates/core/src/restore.rs
++++ b/crates/core/src/restore.rs
+@@ -891,7 +891,7 @@ async fn apply_chain<S: ObjectStore, K: DatabaseSink>(
+             Ok(verified) => last = verified,
+             // Nothing of the missing file reached the sink, which holds exactly the files
+             // before it; a file gone part-way leaves pages no file vouches for.
+-            Err(Abort::Vanished(missing)) if *bytes_read == before => {
++            Err(Abort::Vanished(missing)) if *bytes_read == before && index == 0 => {
+                 let Some(applied) = chain.first(index) else {
+                     return Err(Abort::Vanished(missing));
+                 };

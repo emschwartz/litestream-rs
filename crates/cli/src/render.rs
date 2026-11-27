@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use lsr_core::{
     ContiguousChain, Depth, FileInfo, FileKey, Finding, Inventory, Level, LevelSummary,
-    PlanOutcome, Report, Restored, Severity,
+    PlanOutcome, Replan, Report, Restored, Severity,
 };
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
@@ -193,6 +193,24 @@ pub fn paths(paths: &[PathBuf]) -> String {
 
 fn key_path(key: &FileKey) -> String {
     format!("ltx/{}/{}", key.level(), key.file_name())
+}
+
+/// One line saying why a restore reads again ([Replan]).
+pub fn replan_line(replan: &Replan) -> String {
+    match replan {
+        Replan::Tail { missing, kept } => format!(
+            "restore: {} is gone (compacted or past retention); keeping the database through transaction {kept} and planning only the files after it\n",
+            key_path(missing)
+        ),
+        Replan::Restart { missing } => format!(
+            "restore: {} is gone (compacted or past retention); starting the restore over\n",
+            key_path(missing)
+        ),
+        Replan::NoTail { kept, outcome, .. } => format!(
+            "restore: the files after transaction {kept} are gone too ({}); starting the restore over\n",
+            plan_outcome(outcome)
+        ),
+    }
 }
 
 /// Why a replica has (or has not) an exact answer, as one clause.
@@ -1021,7 +1039,34 @@ fn files_json(inventory: &Inventory, created_at_fallbacks: Option<u64>) -> Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{LEVEL_HEADERS, databases_json, go_platform, levels_table, version_line};
+    use super::{
+        LEVEL_HEADERS, databases_json, go_platform, levels_table, replan_line, version_line,
+    };
+    use lsr_core::{FileKey, Level, PlanOutcome, Replan};
+    use lsr_ltx::{Txid, TxidRange};
+
+    /// Each reason a restore reads again names the file, or the transaction, it turned on.
+    #[test]
+    fn a_restore_that_reads_again_says_why() {
+        let txid = |n| Txid::new(n).unwrap();
+        let missing = FileKey::new(Level::ZERO, TxidRange::new(txid(2), txid(3)).unwrap());
+        let tail = replan_line(&Replan::Tail {
+            missing,
+            kept: txid(1),
+        });
+        assert!(
+            tail.contains("ltx/0/") && tail.contains("through transaction"),
+            "{tail}"
+        );
+        let restart = replan_line(&Replan::Restart { missing });
+        assert!(restart.contains("starting the restore over"), "{restart}");
+        let no_tail = replan_line(&Replan::NoTail {
+            missing,
+            kept: txid(1),
+            outcome: PlanOutcome::EmptyReplica,
+        });
+        assert!(no_tail.contains("after transaction"), "{no_tail}");
+    }
 
     /// Go prints the bare version and, with `-verbose`, labelled lines whose values start in
     /// one column (`cmd/litestream/version.go`).

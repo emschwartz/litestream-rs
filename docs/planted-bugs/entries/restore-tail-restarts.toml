@@ -1,0 +1,13 @@
+# A restore whose files after the snapshot were deleted by the writer's compaction started over from
+# the snapshot, which on a database of tens of GB with steady writes meant three snapshot downloads
+# and a failure; the fix keeps the applied files and plans only the rest.
+name = "restore-tail-restarts"
+fix = "81aa67141"
+package = "lsr-core"
+tests = [
+    "a_file_compacted_away_while_the_snapshot_downloads_keeps_the_snapshot",
+    "a_txid_restore_keeps_the_snapshot_when_files_after_it_are_compacted",
+    "an_as_of_restore_keeps_the_snapshot_and_the_transaction_its_plan_reached",
+    "a_file_deleted_between_plan_and_read_is_replanned_once",
+]
+unaided_miss = "The plant costs requests, memory or bytes and changes no restored page; the swarm's oracles judge pages and needless snapshots, not request counts or buffer sizes, and only the cost tests count those."
