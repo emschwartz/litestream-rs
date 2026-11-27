@@ -128,10 +128,9 @@ fn after_the_boot_a_steady_writer_never_lists_the_empty_levels_above_the_top() {
     let mark = rig.remote.requests_made();
     drive(&mut rig, &mut actor, start + 20, start + 480_000);
     let bill = bill(&rig, mark);
-    assert!(
-        bill.get(&(Request::List, 9)).is_some_and(|n| *n >= 3),
-        "{bill:?}"
-    );
+    // The boot's own listing is before the mark: what follows is one whole listing per snapshot
+    // window, and none of them reads a level above the top.
+    assert_eq!(bill.get(&(Request::List, 9)), Some(&2), "{bill:?}");
     for level in 4..=8 {
         assert_eq!(bill.get(&(Request::List, level)), None, "{bill:?}");
     }
@@ -514,7 +513,8 @@ fn a_steady_writer_with_short_intervals_pays_the_bill_and_no_more() {
 }
 
 /// A first start lists the replica whole twice: at boot, and after its first snapshot (the
-/// snapshot moves the floor retention reads). The snapshot is planned from the boot's listing
+/// snapshot moves the floor retention reads); the second leaves out the levels above the top
+/// the boot found empty (`docs/decisions/D294.md`). The snapshot is planned from the boot's listing
 /// and the level-0 file this engine put since, as Go plans it from one listing of level 9
 /// (`store.go`, `CompactDB`). It once listed the whole replica again for it, ten more
 /// requests on every first start (and one more whole listing for each pass made while the
@@ -527,9 +527,9 @@ fn a_first_start_lists_the_replica_at_boot_and_after_its_first_snapshot_only() {
     drive(&mut rig, &mut actor, start, start + 5_000);
     assert_eq!(Rig::files(&rig.remote, Level::SNAPSHOT).len(), 1);
     let bill = bill(&rig, 0);
-    // Level 5 is listed by whole listings alone.
-    assert_eq!(bill.get(&(Request::List, 5)), Some(&2), "{bill:?}");
-    assert_eq!(count(&bill, Request::List), 20, "{bill:?}");
+    // Level 5 is listed by the boot alone.
+    assert_eq!(bill.get(&(Request::List, 5)), Some(&1), "{bill:?}");
+    assert_eq!(count(&bill, Request::List), 15, "{bill:?}");
 }
 
 /// A boot that finds files on the replica plans maintenance from a listing, as before: what
@@ -544,8 +544,8 @@ fn a_restart_lists_the_replica_before_its_first_maintenance_pass() {
     let mut restarted = Actor::new(short_intervals());
     drive(&mut rig, &mut restarted, now, now + 3_000);
     let bill = bill(&rig, mark);
-    // The boot's listing and the first pass's.
-    assert_eq!(bill.get(&(Request::List, 5)), Some(&2), "{bill:?}");
+    // The boot's listing alone: the first pass leaves out the levels it found empty.
+    assert_eq!(bill.get(&(Request::List, 5)), Some(&1), "{bill:?}");
 }
 
 /// The level schedule of the head-to-head's overlay: a 60 second level 1, then Go's 5 minutes

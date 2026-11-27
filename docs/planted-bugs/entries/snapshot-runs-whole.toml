@@ -1,8 +1,12 @@
 # A level-9 snapshot read from the database is one unit of work again: its first slice reads
 # and hands the replica the whole database, so nothing else runs until it ends. The simulator's
-# per-tick bound sees it at the large profile.
+# large profile no longer reaches this path (its first snapshot is the staged first sync, and no
+# other snapshot is taken from the database file there), so the engine's own tests of a
+# snapshot part-way are the ones that see it.
 name = "snapshot-runs-whole"
 fix = "plant"
-package = "lsr-sim"
-test_bin = "sim"
-tests = ["liveness::commits_made_during_a_large_compaction_reach_the_replica_in_time"]
+package = "lsr-core"
+tests = [
+    "actor::tests::sliced_snapshot::a_commit_made_during_a_long_snapshot_reaches_the_replica_before_it_ends",
+    "actor::tests::sliced_snapshot::a_snapshot_goes_first_for_exactly_its_share_while_commits_wait",
+]
