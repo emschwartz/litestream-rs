@@ -975,11 +975,7 @@ impl Worker {
                 .ok()
                 .flatten()
                 .map_or(0, lsr_core::WalFileLen::bytes),
-            None => {
-                let mut path = self.database.clone().into_os_string();
-                path.push("-wal");
-                std::fs::metadata(path).map_or(0, |meta| meta.len())
-            }
+            None => std::fs::metadata(&self.shared.wal).map_or(0, |meta| meta.len()),
         }
     }
 
