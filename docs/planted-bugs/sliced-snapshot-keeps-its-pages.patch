@@ -1,7 +1,8 @@
 diff --git a/crates/core/src/snapshot.rs b/crates/core/src/snapshot.rs
+index 4cd15ed0a..7bf18a8f1 100644
 --- a/crates/core/src/snapshot.rs
 +++ b/crates/core/src/snapshot.rs
-@@ -163,6 +163,7 @@
+@@ -164,6 +164,7 @@ pub(crate) struct Snapshotting {
      open: Option<Open>,
      pub(crate) handoff: Handoff,
      pinned: bool,
@@ -9,7 +10,7 @@ diff --git a/crates/core/src/snapshot.rs b/crates/core/src/snapshot.rs
  }
  
  impl Snapshotting {
-@@ -218,6 +219,7 @@
+@@ -219,6 +220,7 @@ impl Snapshotting {
              open: Some(open),
              handoff: Handoff::default(),
              pinned,
@@ -17,11 +18,11 @@ diff --git a/crates/core/src/snapshot.rs b/crates/core/src/snapshot.rs
          })
      }
  
-@@ -262,6 +264,7 @@
+@@ -263,6 +265,7 @@ impl Snapshotting {
              }
              self.filling
                  .encode(&plan, &mut reader, db, pages, self.pinned)?;
 +            self.kept.push(self.filling.out().clone());
              let sent = self.handoff.send(open, self.filling.out(), room);
              left = sent.await.map_err(|err| S::fault(&err))?;
-             let drained = left.is_none() || self.filling.out().is_empty();
+             // A pass hands over a byte, and all that waits while room is left: else the loop spins.
