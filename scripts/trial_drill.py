@@ -103,6 +103,16 @@ def parse_size(text: str) -> int:
     return int(m.group(1)) * mult[m.group(2) or "B"]
 
 
+def burst_bytes(conf: dict, burst_mib: int) -> int:
+    """The one large transaction, sized from the part-size the binaries read (after the overlay), so its level 0
+    file is a multipart upload to kill. Three parts of raw rows: half the rows compress, and the file must still
+    be past one part once compressed. One level 0 file holds a whole transaction, whatever max-sync-wal-bytes says."""
+    if burst_mib:
+        return burst_mib << 20
+    part = conf["dbs"][0]["replica"].get("part-size")
+    return parse_size(str(part)) * 3 if part else 64 << 20
+
+
 def mib(n: float) -> float:
     return round(n / (1 << 20), 1)
 
@@ -922,7 +932,7 @@ class Drill:
         return out
 
     def burst_bytes(self) -> int:
-        return self.args.burst_mib << 20 if self.args.burst_mib else int(parse_size(self.args.part_size) * 1.5) if self.args.part_size else 64 << 20
+        return burst_bytes(self.conf, self.args.burst_mib)
 
     # -- reporting
 
@@ -1581,6 +1591,10 @@ def run_canary(_a: argparse.Namespace) -> int:
             problems.append("a state newer than the instant was not reported")
         if files_differ(db, flipped)[0]:
             problems.append("the page comparison did not see a flipped byte")
+        # The burst must be a multipart upload under the part-size an overlay sets, not only under --part-size.
+        over = {"dbs": [{"replica": {"part-size": "100MB"}}]}
+        if burst_bytes(over, 0) < 2 * parse_size("100MB"):
+            problems.append(f"a 100MB part-size from the overlay gives a burst of {burst_bytes(over, 0)} bytes")
         # A restarted writer must not read the whole table before its first commit (a minute at 24 GiB).
         plan = " ".join(str(r[-1]) for r in sqlite3.connect(db).execute("EXPLAIN QUERY PLAN " + RELOAD_BOUNDS))
         if re.search(r"\bSCAN t\b", plan):
@@ -1621,7 +1635,7 @@ def main() -> int:
     g.add_argument("--mix", default="50,40,10", help="insert,update,delete percent of operations")
     g.add_argument("--weights", default="85,15", help="share of transactions for the large and the small database")
     g.add_argument("--ratio", type=float, default=0.5, help="fraction of rows that are incompressible")
-    g.add_argument("--burst-mib", type=int, default=0, help="size of the one large transaction (default 1.5 x part-size, or 64 when part-size is unset)")
+    g.add_argument("--burst-mib", type=int, default=0, help="size of the one large transaction (default 3 x the configured part-size, or 64 when none is set)")
     t = run.add_argument_group("durations")
     t.add_argument("--go-seconds", type=float, default=120, help="how long each Go phase runs after it is replicating")
     t.add_argument("--min-run", type=float, default=90, help="minutes lsr runs under load at least (compaction to level 3 needs the last level's interval)")
