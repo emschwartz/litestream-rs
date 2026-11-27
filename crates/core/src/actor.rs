@@ -3514,7 +3514,7 @@ async fn boot_staged<L: Role, R: Role, W: std::io::Read + std::io::Seek>(
     } = scan(
         staging,
         Base::Replica(remote, tip),
-        boot_wal_again(&mut wal),
+        wal.as_mut().map(BootWal::reborrow),
     )
     .await?;
     let (lost, refused) = match bad {
@@ -3560,14 +3560,6 @@ async fn boot_staged<L: Role, R: Role, W: std::io::Read + std::io::Seek>(
         tokens,
         scanned,
         seeding,
-    })
-}
-
-/// The boot's WAL lent once more, for a second read under the same committed end.
-fn boot_wal_again<'a, R>(wal: &'a mut Option<BootWal<'_, R>>) -> Option<BootWal<'a, R>> {
-    wal.as_mut().map(|wal| BootWal {
-        reader: &mut *wal.reader,
-        committed: wal.committed,
     })
 }
 

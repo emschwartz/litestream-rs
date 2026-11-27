@@ -185,10 +185,7 @@ impl NewestStagedFile {
         };
         let txid = newest.key.range().max();
         let known = scanned.get(&txid);
-        let header = match known {
-            Some((header, _)) => Some(*header),
-            None => read_header(staging, &newest.key, L::fault).await?,
-        };
+        let header = header_known_or_read(staging, known, &newest.key).await?;
         let unreadable = Self::Unreadable { txid };
         let Some(header) = header.filter(|_| newest.key.range().min() == txid) else {
             return Ok(Some(unreadable));
@@ -196,20 +193,10 @@ impl NewestStagedFile {
         let Some(origin) = Origin::of(&header) else {
             return Ok(Some(unreadable));
         };
-        let file = NewestStagedFileSource {
-            store: staging,
-            key: newest.key,
-            fault: L::fault,
-        };
         let mut wal = wal;
-        let older = wal.as_mut().map(|wal| BootWal {
-            reader: &mut *wal.reader,
-            committed: wal.committed,
-        });
-        let view = match known {
-            Some((_, view)) => Some(*view),
-            None => Self::checked(&file, None, &header, origin, older).await?,
-        };
+        let older = wal.as_mut().map(BootWal::reborrow);
+        let view =
+            view_known_or_checked(staging, known, newest.key, &header, origin, older).await?;
         let Some(Self::Readable {
             last_page: LastPageCheck::Match { .. },
             ..
@@ -258,7 +245,9 @@ impl NewestStagedFile {
     /// given, is the file's first [`NEWEST_STAGED_READ`] bytes, already read. `None` when
     /// the file does not decode and verify whole.
     async fn checked<S: ObjectStore, R: Read + Seek>(
-        file: &NewestStagedFileSource<'_, S>,
+        store: &S,
+        key: FileKey,
+        fault: fn(&StoreError) -> Fault,
         first: Option<Vec<u8>>,
         header: &Header,
         at: Origin,
@@ -266,11 +255,11 @@ impl NewestStagedFile {
     ) -> Result<Option<Self>, Fault> {
         let mut compare = Compare::begin(at, wal)?;
         let mut read = match first {
-            Some(bytes) => LtxRead::with_first(file.key, NEWEST_STAGED_READ, bytes),
-            None => LtxRead::new(file.key, NEWEST_STAGED_READ),
+            Some(bytes) => LtxRead::with_first(key, NEWEST_STAGED_READ, bytes),
+            None => LtxRead::new(key, NEWEST_STAGED_READ),
         };
         let verified: Result<_, ReadFault> = read
-            .read_verified(file.store, |event| {
+            .read_verified(store, |event| {
                 if let Event::Page(page) = event {
                     compare.page(page.pgno(), page.checksum());
                 }
@@ -279,7 +268,7 @@ impl NewestStagedFile {
             .await;
         match verified {
             Ok(_) => compare.end(header).map(Some),
-            Err(ReadFault::Store(err)) => Err((file.fault)(&err)),
+            Err(ReadFault::Store(err)) => Err(fault(&err)),
             Err(ReadFault::Decode(_)) => Ok(None),
             Err(ReadFault::Rejected(never)) => match never {},
         }
@@ -453,11 +442,7 @@ async fn rewritten_below<L: Role, R: Read + Seek>(
     // already answered, and comparing it would raise the same alarm at every boot.
     for key in keys.into_iter().rev() {
         let known = scanned.get(&key.range().max());
-        let header = match known {
-            Some((header, _)) => Some(*header),
-            None => read_header(staging, &key, L::fault).await?,
-        };
-        let Some(header) = header else {
+        let Some(header) = header_known_or_read(staging, known, &key).await? else {
             break;
         };
         let Some(at) = Origin::of(&header).filter(|at| {
@@ -467,19 +452,8 @@ async fn rewritten_below<L: Role, R: Read + Seek>(
             break;
         };
         starts = at.origin.offset();
-        let file = NewestStagedFileSource {
-            store: staging,
-            key,
-            fault: L::fault,
-        };
-        let reborrow = BootWal {
-            reader: &mut *wal.reader,
-            committed: wal.committed,
-        };
-        let view = match known {
-            Some((_, view)) => Some(*view),
-            None => NewestStagedFile::checked(&file, None, &header, at, Some(reborrow)).await?,
-        };
+        let view =
+            view_known_or_checked(staging, known, key, &header, at, Some(wal.reborrow())).await?;
         if let Some(NewestStagedFile::Readable { last_page, .. }) = view
             && matches!(
                 last_page,
@@ -502,6 +476,16 @@ pub struct BootWal<'a, R> {
     pub reader: &'a mut WalReader<R>,
     /// The wal-index's committed end, read with it.
     pub committed: CommittedEnd,
+}
+
+impl<R> BootWal<'_, R> {
+    /// This WAL lent once more, for another read under the same committed end.
+    pub(crate) fn reborrow(&mut self) -> BootWal<'_, R> {
+        BootWal {
+            reader: &mut *self.reader,
+            committed: self.committed,
+        }
+    }
 }
 
 #[cfg(any(test, feature = "testing"))]
@@ -544,14 +528,6 @@ impl Origin {
             commit,
         })
     }
-}
-
-/// The newest staged file and the store it is read from. `fault` names a store error as
-/// staging's or the replica's.
-struct NewestStagedFileSource<'a, S> {
-    store: &'a S,
-    key: FileKey,
-    fault: fn(&StoreError) -> Fault,
 }
 
 /// What a decode of the newest staged file saw of the pages it was asked about.
@@ -732,6 +708,33 @@ async fn newest_listed<S: ObjectStore>(
             Some(next) => at = next,
             None => return Ok(newest),
         }
+    }
+}
+
+/// The header the boot's pass already read (`known`), else read from `store`.
+async fn header_known_or_read<L: Role>(
+    store: &L,
+    known: Option<&(Header, NewestStagedFile)>,
+    key: &FileKey,
+) -> Result<Option<Header>, Fault> {
+    match known {
+        Some((header, _)) => Ok(Some(*header)),
+        None => read_header(store, key, L::fault).await,
+    }
+}
+
+/// The view the boot's pass already took (`known`), else the file checked against `wal`.
+async fn view_known_or_checked<L: Role, R: Read + Seek>(
+    store: &L,
+    known: Option<&(Header, NewestStagedFile)>,
+    key: FileKey,
+    header: &Header,
+    origin: Origin,
+    wal: Option<BootWal<'_, R>>,
+) -> Result<Option<NewestStagedFile>, Fault> {
+    match known {
+        Some((_, view)) => Ok(Some(*view)),
+        None => NewestStagedFile::checked(store, key, L::fault, None, header, origin, wal).await,
     }
 }
 

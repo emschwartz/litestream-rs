@@ -571,10 +571,7 @@ pub(crate) async fn scan<L: Role, S: Role, R: Read + Seek>(
                     .and_then(|file| link_of(&file.header));
                 linked = true;
             }
-            let borrowed = wal.as_mut().map(|wal| BootWal {
-                reader: &mut *wal.reader,
-                committed: wal.committed,
-            });
+            let borrowed = wal.as_mut().map(BootWal::reborrow);
             let Some(read) = read_staged(staging, info.key, borrowed).await? else {
                 scan.bad = Some((info.key, Bad::Unreadable));
                 return Ok(scan);
