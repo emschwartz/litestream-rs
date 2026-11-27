@@ -1147,7 +1147,8 @@ fn a_whole_copy_candidate_is_the_newest_file_of_three_quarters_the_base_or_more(
 
 #[test]
 fn a_base_under_the_floor_has_no_whole_copy_candidate() {
-    let floor = WHOLE_BASE_MIN_BYTES;
+    // 16 MiB, written out: a base of a few reads is never worth a guess.
+    let floor = 16 * 1024 * 1024;
     assert_eq!(sized_chain(floor, [floor, 1, 1]).whole_candidate(), Some(1));
     assert_eq!(
         sized_chain(floor - 1, [floor, 1, 1]).whole_candidate(),
