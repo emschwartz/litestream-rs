@@ -22,8 +22,8 @@ fn short(
         &MaintainState::default(),
         &ResolvedCreatedAt::default(),
     ) {
-        Resolve::Done(zero) => zero,
-        Resolve::Need(file) => panic!("a stored listing asked for a created-at time: {file:?}"),
+        Ok(zero) => zero,
+        Err(file) => panic!("a stored listing asked for a created-at time: {file:?}"),
     }
 }
 
@@ -212,7 +212,7 @@ fn a_pinned_restore_point_leaves_level_zero_to_the_whole_listing() {
         &state,
         &ResolvedCreatedAt::default(),
     );
-    let Resolve::Done(zero) = got else {
+    let Ok(zero) = got else {
         panic!("asked for a created-at time");
     };
     assert!(zero.keys.is_empty());
