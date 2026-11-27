@@ -16,36 +16,14 @@
 //! [`StoreError::ObjectTooLarge`].
 //!
 //! Memory: an upload that buffers its parts (one with no file behind it, `upload.rs`) holds
-//! the parts it has in flight and one more. How many are in flight is [`held_width`]: the
-//! `concurrency` setting, cut so that what is held fits [`HELD_BUDGET`]. At the default
-//! 5 MiB part and a concurrency of 5 that is six parts, 30 MiB; at a 100 MiB part it is two
-//! parts whatever the concurrency. A part larger than half the budget is still sent, one in
-//! flight and one filling: the bound is then `2 * part`, which is 1 GiB for the 524 MB parts
-//! of a 5 TiB object.
+//! the `concurrency` parts it has in flight and one more, as Go's uploader does: `part size x
+//! (concurrency + 1)`, with no further cap (`docs/decisions/D307.md`). The sidecar logs that
+//! figure for each S3 replica at startup. The upload of a staged file holds no part.
 //!
 //! [`ObjectStore::begin_sized_upload`]: lsr_core::ObjectStore::begin_sized_upload
 //! [`StoreError::ObjectTooLarge`]: lsr_core::StoreError::ObjectTooLarge
 
-use std::num::NonZeroUsize;
-
 use crate::config::PartSize;
-
-/// The bytes one upload may hold in parts that are buffers: the ones in flight and the one
-/// more that fills or waits (`upload.rs`, `docs/decisions/D232.md`).
-pub(crate) const HELD_BUDGET: u64 = 256 * 1024 * 1024;
-
-/// How many parts of `part` bytes that hold their bytes one upload has in flight at once:
-/// `concurrency`, or as many as leave room in [`HELD_BUDGET`] for one more part that fills
-/// or waits, and never fewer than one. With one in flight the upload holds two parts, which
-/// passes the budget only for a part larger than half of it.
-pub(crate) fn held_width(concurrency: NonZeroUsize, part: u64) -> NonZeroUsize {
-    let fit = HELD_BUDGET
-        .checked_div(part)
-        .unwrap_or(u64::MAX)
-        .saturating_sub(1);
-    let fit = NonZeroUsize::new(usize::try_from(fit).unwrap_or(usize::MAX));
-    fit.map_or(NonZeroUsize::MIN, |fit| fit.min(concurrency))
-}
 
 /// The most parts S3 takes in one multipart upload.
 pub(crate) const MAX_PARTS: u64 = 10_000;
@@ -81,36 +59,6 @@ mod tests {
 
     fn parts(len: u64, part: PartSize) -> u64 {
         len.div_ceil(part.get())
-    }
-
-    fn width(concurrency: usize, part: u64) -> usize {
-        held_width(NonZeroUsize::new(concurrency).unwrap(), part).get()
-    }
-
-    /// The setting stands while the parts in flight and one more fit the budget: the default
-    /// five 5 MiB parts and ten, and the last part size at which each still fits.
-    #[test]
-    fn parts_that_fit_the_budget_keep_the_configured_concurrency() {
-        assert_eq!(width(5, 5 * MIB), 5);
-        assert_eq!(width(10, 5 * MIB), 10);
-        assert_eq!(width(1, 100 * MIB), 1);
-        // Six parts held: the largest part is a sixth of the budget.
-        assert_eq!(width(5, HELD_BUDGET / 6), 5);
-        assert_eq!(width(5, HELD_BUDGET / 6 + 1), 4);
-    }
-
-    /// A large part cuts how many are in flight to what the budget holds with one more
-    /// filling, whatever the setting, and never below one.
-    #[test]
-    fn large_parts_are_cut_to_what_the_budget_holds() {
-        assert_eq!(width(10, 100 * MIB), 1);
-        assert_eq!(width(10, 64 * MIB), 3);
-        assert_eq!(width(10, 32 * MIB), 7);
-        assert_eq!(width(10, HELD_BUDGET / 2), 1);
-        // Past half the budget one is still in flight: the bound is then two parts.
-        assert_eq!(width(10, HELD_BUDGET), 1);
-        assert_eq!(width(10, MAX_PART), 1);
-        assert_eq!(width(1, u64::MAX), 1);
     }
 
     #[test]
@@ -152,22 +100,6 @@ mod tests {
     }
 
     proptest! {
-        /// Never more in flight than the setting, never fewer than one, and what is held
-        /// (the parts in flight and one more) fits the budget unless one in flight already
-        /// does not; the cut is the least that fits.
-        #[test]
-        fn the_width_is_the_most_within_the_setting_that_the_budget_holds(
-            concurrency in 1_usize..64,
-            part in 1_u64..=6 * GIB,
-        ) {
-            let got = u64::try_from(width(concurrency, part)).unwrap();
-            let most = u64::try_from(concurrency).unwrap();
-            prop_assert!((1..=most).contains(&got));
-            let held = |width: u64| width.saturating_add(1).saturating_mul(part);
-            prop_assert!(held(got) <= HELD_BUDGET || got == 1);
-            prop_assert!(got == most || held(got.saturating_add(1)) > HELD_BUDGET);
-        }
-
         /// Every length up to S3's limit gets at most 10000 parts, at a legal part
         /// size, and never one below the configured size.
         #[test]

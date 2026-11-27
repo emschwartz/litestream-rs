@@ -24,6 +24,8 @@ The time from start until the first snapshot is on the replica. "Large parts" is
 | MinIO, text-like, large parts | 3 | 62.7 / 28.9 s | -54% [-57, -50] | -52% [-66, -32] | 810 / 197 MiB (-76% [-83, -65]) |
 | File, random | 1 | 67.6 / 30.5 s | -55% | -74% | 120 / 23 MiB (-81%) |
 
+The two large-parts rows predate `docs/decisions/D307.md`, which removed the 256 MiB cap on the parts a buffered upload holds. On a Mac Studio against local MinIO at 100 MB parts, `lsr`'s peak for the same first start rose from 225 to 320 MiB with ten parts at once and from 225 to 320 MiB with two (a 4 GiB random database, six pairs each, +42% [+41, +43]); Go's 824 MiB was measured on the Linux VM and has not been re-measured with the new code there.
+
 Bytes written to the replica are equal on MinIO (8.5 GB random, 4.4 GB text-like). On the file replica `lsr` wrote 8.5 GB and Go 9.1 GB. A text-like database to a file replica was not measured at this commit.
 
 ## Requests at a first start
