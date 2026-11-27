@@ -5,6 +5,8 @@
 """
 
 import importlib.util
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -85,6 +87,55 @@ class Fields(unittest.TestCase):
 
     def test_canaries_are_exempt(self):
         self.assertEqual(pb.unaided_problems([self.entry(canary="killed")]), [])
+
+
+class Fixes(unittest.TestCase):
+    """`dangling_fixes` over a scratch repository: `main` holds one commit, a branch one more."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.TemporaryDirectory()
+        cls.repo = Path(cls.dir.name)
+
+        def git(*args: str) -> str:
+            env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+                   "GIT_COMMITTER_EMAIL": "t@t", "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"}
+            return subprocess.run(["git", *args], cwd=cls.repo, check=True, text=True, env=env,
+                                  capture_output=True).stdout.strip()
+
+        git("init", "-q", "-b", "main")
+        git("commit", "-q", "--allow-empty", "-m", "on main")
+        cls.landed = git("rev-parse", "HEAD")
+        git("checkout", "-q", "-b", "claude/work")
+        git("commit", "-q", "--allow-empty", "-m", "on a branch only")
+        cls.branch_only = git("rev-parse", "HEAD")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.dir.cleanup()
+
+    def flagged(self, fix: str, main: str = "main") -> list[str]:
+        return pb.dangling_fixes([{"name": "e", "fix": fix}], main, self.repo)
+
+    def test_a_commit_on_main_passes_in_short_and_full_form(self):
+        self.assertEqual(self.flagged(self.landed[:9]), [])
+        self.assertEqual(self.flagged(self.landed), [])
+
+    def test_a_commit_only_a_branch_holds_is_flagged_though_HEAD_has_it(self):
+        self.assertEqual(self.flagged(self.branch_only[:9]), [f"e: {self.branch_only[:9]}"])
+
+    def test_a_commit_no_repository_holds_is_flagged(self):
+        self.assertEqual(self.flagged("0123456789abcdef"), ["e: 0123456789abcdef"])
+
+    def test_the_forms_that_name_no_commit_are_not_looked_up(self):
+        for fix in ("plant", "none", "claude/work", "checker-holes (stall liveness)", "abc123"):
+            with self.subTest(fix=fix):
+                self.assertEqual(self.flagged(fix), [])
+
+    def test_a_missing_main_is_one_line_saying_so(self):
+        got = self.flagged(self.landed, "origin/main")
+        self.assertEqual(len(got), 1)
+        self.assertIn("origin/main is missing", got[0])
 
 
 if __name__ == "__main__":

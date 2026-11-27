@@ -1,5 +1,5 @@
 name = "witness-trailer-compare"
-fix = "39ac68b"
+fix = "5654f2a6a"
 package = "lsr-core"
 tests = [
     "a_staged_file_replaced_under_a_running_engine_is_never_uploaded",

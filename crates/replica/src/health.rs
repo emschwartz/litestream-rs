@@ -11,7 +11,8 @@ use std::fmt;
 
 use lsr_core::{
     AppCheckpoint, AppCheckpoints, Degraded, DegradedCause, FinalRetention, FinalSnapshot, Gate,
-    Severity, SnapshotCause, SnapshotCounts, StopCause, Task, Trip, WhyBlocked, WorkCounts,
+    Severity, SnapshotCause, SnapshotCounts, StopCause, Task, Trip, Unfinished, WhyBlocked,
+    WorkCounts,
 };
 use lsr_ltx::{Timestamp, Txid};
 
@@ -68,12 +69,7 @@ pub enum StopOutcome {
     },
     /// Time ran out with work left. The wal-index gives a frame offset, not a txid, so what is
     /// left is measured in bytes and files.
-    DeadlineReached {
-        /// Committed WAL bytes not yet staged.
-        unsynced_wal_bytes: u64,
-        /// Staged files the replica was not confirmed to hold.
-        staged_not_uploaded: u32,
-    },
+    DeadlineReached(Unfinished),
     /// Already stopped by a cause (another writer, or a configured stop) before the drain.
     Stopped(StopCause),
     /// The thread is not there.

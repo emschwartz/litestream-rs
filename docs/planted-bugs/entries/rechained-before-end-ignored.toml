@@ -2,7 +2,7 @@
 # (same salts, another seed) continues on the old running checksum; the next scan meets the
 # regrown chain as damage below the committed end.
 name = "rechained-before-end-ignored"
-fix = "6305fb48"
+fix = "3b78c876f"
 package = "lsr-core"
 tests = [
     "frames_regrown_from_a_header_written_again_are_a_rewind",

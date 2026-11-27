@@ -1,7 +1,7 @@
 # The runner's judge of a boot's refusal calls staging intact when the refused tip's file is gone
 # from it, so a refusal after an operation emptied staging is reported as an engine bug.
 name = "refusal-judge-ignores-a-missing-staged-tip"
-fix = "62268c853"
+fix = "feae726f4"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["restored_staging::staging_emptied_by_an_operation_is_a_cause_for_a_refusal_after_a_newer_snapshot"]

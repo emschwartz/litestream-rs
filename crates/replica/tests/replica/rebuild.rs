@@ -16,7 +16,7 @@ use common::{Site, config, fake, moved_until, stopped, wait};
 use lsr_replica::StartOptions;
 use lsr_replica::{
     Config, DegradedCause, DynStore, Health, NonZeroDuration, Phase, Replicator, Response,
-    Responses, SnapshotCause, StopCause, StopFuture, StopOutcome, Task,
+    Responses, SnapshotCause, StopCause, StopFuture, StopOutcome, Task, Unfinished,
 };
 use rusqlite::Connection;
 
@@ -96,10 +96,10 @@ fn a_panic_keeps_what_is_left_in_health_and_the_deadline_report() {
     let stop = replicator.stop(Duration::from_secs(5));
     clock.advance(Duration::from_secs(5));
     let stopped = ended(stop);
-    let Some(StopOutcome::DeadlineReached {
+    let Some(StopOutcome::DeadlineReached(Unfinished {
         staged_not_uploaded,
         ..
-    }) = stopped
+    })) = stopped
     else {
         panic!("{stopped:?}");
     };
@@ -173,10 +173,10 @@ fn a_deadline_report_after_a_panic_counts_the_staged_files_past_the_replica() {
     let stop = replicator.stop(Duration::from_secs(5));
     clock.advance(Duration::from_secs(5));
     let stopped = ended(stop);
-    let Some(StopOutcome::DeadlineReached {
+    let Some(StopOutcome::DeadlineReached(Unfinished {
         staged_not_uploaded,
         ..
-    }) = stopped
+    })) = stopped
     else {
         panic!("{stopped:?}");
     };
@@ -215,7 +215,7 @@ fn a_panic_during_a_drain_still_stops_at_the_deadline() {
     clock.advance(Duration::from_secs(5));
     let stopped = ended(stop);
     assert!(
-        matches!(stopped, Some(StopOutcome::DeadlineReached { .. })),
+        matches!(stopped, Some(StopOutcome::DeadlineReached(_))),
         "{stopped:?}"
     );
 }
@@ -247,7 +247,7 @@ fn a_database_removed_after_a_panic_still_stops_at_the_deadline() {
     }
     let stopped = ended(stop);
     assert!(
-        matches!(stopped, Some(StopOutcome::DeadlineReached { .. })),
+        matches!(stopped, Some(StopOutcome::DeadlineReached(_))),
         "{stopped:?}"
     );
 }
@@ -468,7 +468,7 @@ fn a_database_replaced_after_a_panic_is_degraded_and_not_reopened() {
     );
     assert!(matches!(
         replicator.stop(Duration::ZERO).wait(),
-        StopOutcome::DeadlineReached { .. }
+        StopOutcome::DeadlineReached(_)
     ));
 }
 
@@ -506,7 +506,7 @@ fn a_database_deleted_after_a_panic_is_degraded_and_not_reopened() {
     assert!(!site.db.exists(), "not reopened, which would create it");
     assert!(matches!(
         replicator.stop(Duration::ZERO).wait(),
-        StopOutcome::DeadlineReached { .. }
+        StopOutcome::DeadlineReached(_)
     ));
 }
 

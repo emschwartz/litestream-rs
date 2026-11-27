@@ -1,5 +1,5 @@
 name = "staged-window-one-mebibyte-core"
-fix = "52b7ff1ea"
+fix = "20eb65cc6"
 package = "lsr-core"
 tests = [
     "compact::tests::staged_inputs_are_read_in_the_staging_window",

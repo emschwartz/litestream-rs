@@ -15,7 +15,8 @@ current tree, or retire the entry with a reason), a test does not run, or a buil
     uv run scripts/planted-bugs.py --changed BASE [--list] [--shard K/N]
 
 `--names` checks, without building anything, that every entry's tests exist as `fn <name>` in its
-package (a renamed test leaves its entry unable to run). `--changed BASE` keeps the entries a pull
+package (a renamed test leaves its entry unable to run), and that every `fix` written as a commit
+is an ancestor of `origin/main` (a branch's commit is gone once the squash merge lands). `--changed BASE` keeps the entries a pull
 request against BASE can have affected: the diff touches the entry file, its patch, a file the
 patch edits or a file that defines a named test, or the patch no longer applies. `--list` prints
 their names and exits.
@@ -46,6 +47,7 @@ plant runs exactly its budget; found later or never is a failure. A plant marked
 import argparse
 import fcntl
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -351,6 +353,24 @@ def unaided_verdict(bug: dict, got: str, clean: str) -> tuple[str, str]:
     return "ok", f"first failure at seed {k} of budget {budget}"
 
 
+# A `fix` that names a commit: seven to forty hex digits. The other forms (`plant`, `none`, a
+# `claude/<branch>`, a free-text note) name no commit and are not looked up.
+COMMIT_REF = re.compile(r"[0-9a-f]{7,40}")
+MAIN = "origin/main"
+
+
+def dangling_fixes(bugs: list[dict], main: str = MAIN, cwd: Path = ROOT) -> list[str]:
+    """`entry: fix` for each entry whose `fix` is a commit that `main` does not hold, one line
+    saying how when `main` itself is missing. Only `main` counts, not HEAD: a branch's commit is
+    an ancestor of the pull request's HEAD, and the squash merge then drops it, which left
+    restore-tail-restarts pointing at nothing (docs/decisions/D301.md)."""
+    if git("rev-parse", "--verify", "--quiet", main, cwd=cwd, check=False).returncode != 0:
+        return [f"{main} is missing here (fetch it): the commits `fix` names are checked against it"]
+    return [f"{b['name']}: {b['fix']}" for b in bugs
+            if COMMIT_REF.fullmatch(b.get("fix", ""))
+            and git("merge-base", "--is-ancestor", b["fix"], main, cwd=cwd, check=False).returncode != 0]
+
+
 def missing_tests(bugs: list[dict]) -> list[str]:
     """`entry: test` for each named test that no `fn` defines."""
     return [f"{b['name']}: {t}" for b in bugs for t in test_files(b)[1]]
@@ -408,10 +428,15 @@ def main() -> int:
         unjudged = unaided_problems(bugs)
         for line in unjudged:
             print(f"planted-bugs: unaided field: {line}", file=sys.stderr)
-        if not gone and not unjudged:
+        dangling = dangling_fixes(bugs)
+        for line in dangling:
+            print(f"planted-bugs: fix is not on {MAIN} (use the squash commit on main, or a "
+                  f"claude/<branch> name until it lands): {line}", file=sys.stderr)
+        if not gone and not unjudged and not dangling:
             print(f"planted-bugs: every named test of {len(bugs)} entries is defined, "
-                  "every swarm-reachable plant has its unaided budget or miss")
-        return 1 if gone or unjudged else 0
+                  "every swarm-reachable plant has its unaided budget or miss, "
+                  f"every commit a fix names is on {MAIN}")
+        return 1 if gone or unjudged or dangling else 0
     unknown = [n for n in opts.only if n not in names]
     if unknown:
         print(f"planted-bugs: no such entry: {unknown}", file=sys.stderr)

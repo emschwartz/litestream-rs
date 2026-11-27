@@ -43,8 +43,8 @@ use lsr_core::Clock;
 use lsr_replica::StartOptions;
 use lsr_replica::{
     Config, DynStore, FinalRetention, FinalSnapshot, FinalSnapshotFailure, Gate, IfMissing,
-    IfReplicationStops, Replicator, RestoreError, Runtime, StartError, StopOutcome, Trip, lock,
-    restore_if_missing,
+    IfReplicationStops, Replicator, RestoreError, Runtime, StartError, StopOutcome, Trip,
+    Unfinished, lock, restore_if_missing,
 };
 
 use crate::exec::ChildEnd;
@@ -104,9 +104,7 @@ impl Finished {
         let dbs = self.dbs.iter().all(|(_, end)| match end {
             End::Stopped(StopOutcome::Drained { .. }) | End::NeverAppeared => true,
             End::Stopped(
-                StopOutcome::DeadlineReached { .. }
-                | StopOutcome::Stopped(_)
-                | StopOutcome::Gone(_),
+                StopOutcome::DeadlineReached(_) | StopOutcome::Stopped(_) | StopOutcome::Gone(_),
             )
             | End::DidNotStart
             | End::SnapshotNotWritten { .. }
@@ -611,10 +609,10 @@ impl Daemon {
                 self.log
                     .info("database drained", &[at, ("txid", txid.into())]);
             }
-            End::Stopped(StopOutcome::DeadlineReached {
+            End::Stopped(StopOutcome::DeadlineReached(Unfinished {
                 unsynced_wal_bytes,
                 staged_not_uploaded,
-            }) => {
+            })) => {
                 let replicated = replicated.map_or_else(|| "none".to_owned(), |t| t.to_string());
                 let fields = [
                     at,
@@ -914,10 +912,10 @@ mod tests {
             Board::default(),
             Mode::Serving,
         );
-        let end = End::Stopped(StopOutcome::DeadlineReached {
+        let end = End::Stopped(StopOutcome::DeadlineReached(Unfinished {
             unsynced_wal_bytes: 115_009_832,
             staged_not_uploaded: 0,
-        });
+        }));
         daemon.ended(Path::new("/data/big.db"), &end, lsr_ltx::Txid::new(0xa67));
         let out = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
         assert!(

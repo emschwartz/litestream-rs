@@ -1,5 +1,5 @@
 name = "staged-window-one-mebibyte-s3"
-fix = "52b7ff1ea"
+fix = "20eb65cc6"
 package = "lsr-store-s3"
 tests = [
     # Only a merge of four inputs or fewer has a share of the staging budget over 128 KiB, so

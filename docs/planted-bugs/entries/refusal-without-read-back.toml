@@ -1,6 +1,6 @@
 # A refused upload is taken as the engine's own earlier commit without reading the object back.
 name = "refusal-without-read-back"
-fix = "92613ce"
+fix = "27936dd33"
 package = "lsr-core"
 tests = [
     "a_refused_upload_of_other_verifying_bytes_is_never_written_over",
