@@ -151,8 +151,8 @@ jobs:
       - run: just shuttle 500000
 
   # Every planted-bug patch still applies (`just planted-bugs-apply`): seconds, and a stale patch is
-  # named here even when the full run below times out. Not in the land gate, so a moved line near a
-  # planted site does not block every land; re-express the patch (docs/planted-bugs.md).
+  # named here even when the full run below times out. `just check` runs it too on every pull
+  # request; re-express a stale patch (docs/planted-bugs.md).
   planted-bugs-apply:
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -125,7 +125,7 @@ pub(super) struct ArmDef {
 /// the paced arm takes half the rate B's calibration copy read at (a quarter and an eighth were
 /// dropped before any counted run: see the frame's last paragraph);
 /// [`read-twice`] is the known-bad control and must lose to B clearly.
-pub(super) const ARMS: [ArmDef; 8] = [
+pub(super) const ARMS: [ArmDef; 7] = [
     ArmDef {
         label: "A",
         patch: None,
@@ -163,12 +163,6 @@ pub(super) const ARMS: [ArmDef; 8] = [
         idle: false,
     },
     ArmDef {
-        label: "fadvise",
-        patch: Some("fadvise-dontneed"),
-        pace_divisor: None,
-        idle: false,
-    },
-    ArmDef {
         label: "read-twice",
         patch: Some("read-twice"),
         pace_divisor: None,
@@ -177,7 +171,7 @@ pub(super) const ARMS: [ArmDef; 8] = [
 ];
 
 /// The patches the arms run, each [`crates/compat/bench-patches/<name>.patch`].
-pub(super) const PATCHES: [&str; 3] = ["read-pace", "fadvise-dontneed", "read-twice"];
+pub(super) const PATCHES: [&str; 2] = ["read-pace", "read-twice"];
 
 /// The environment variable the [`read-pace`] patch reads its rate from, in MiB a second.
 pub(super) const PACE_ENV: &str = "LSRBENCH_PACE_MIB_S";
@@ -197,9 +191,6 @@ pub(super) const IMPACT_FRAME: &str = "frame of snapshot-impact (written before 
       passes) still pass through the cache. It helps if the kernel keeps twice-referenced pages (the hottest tenth
       is re-read every few seconds) and the disk queue was the cost; it does little if volume was.
       It costs a copy twice as long, so a read transaction held that much longer.
-    fadvise(DONTNEED) on the pages the copy read (fadvise-dontneed, through SQLite's own descriptor,
-      in runs of 1 MiB) attacks the volume: the copy leaves nothing behind. It also drops hot pages the
-      copy happens to read (about one page in sixteen is hot), which the application must read again.
     read-twice (control): reads every page twice, one full sweep before the copy. It must lose to B
       clearly: if it does not, the harness cannot see this axis and nothing else is believed.
   primary metric: application p99 read latency during the copy (from lsr's start to the snapshot's
@@ -213,7 +204,7 @@ pub(super) const IMPACT_FRAME: &str = "frame of snapshot-impact (written before 
     times B's. A remedy below the bar on p99 but above it on copy time trades a longer read
     transaction for latency and is reported as that trade, with the WAL it grew.
   arms: A (no copy), B (lsr takes the boot snapshot of an empty replica), pace-1/2,
-    fadvise, read-twice; A is also run against itself (the gate). Rounds: one run of every
+    read-twice; A is also run against itself (the gate). Rounds: one run of every
     arm per round, the order rotated each round, cold page cache before every run (drop_caches), the
     hot set warmed and referenced twice, MinIO emptied after. A's window is as long as the copy of B's
     calibration run. The rates of the paced arms are fixed from that calibration run and recorded.
@@ -236,9 +227,6 @@ pub(super) const IMPACT_FRAME: &str = "frame of snapshot-impact (written before 
     paced copy: wall time is 34.4 GB / rate, so 2 times B if reading is what B waited on. WAL growth is the application's
       0.1 MB/s times the copy: about 60 MB for a 10 minute copy, small beside the database; the cost of
       throttling at this write rate is time (the read transaction, a stale replica), not disk.
-    fadvise: the copy's cache footprint of the database reads falls from 34.4 GB to about 1 MiB (the
-      staging file and MinIO's writes are not advised); syscall cost 1 call per 256 pages is noise. Prediction: p99 within 2 times A; the hot pages
-      it drops cost a burst of misses at its start.
     read-twice: 3 times the bytes read of B (a full sweep first) and 1.5 to 2 times the copy time;
       p99 not better than B.
   changed before any counted run (2026-11-24): the first calibration on the box (4 dedicated cores,
