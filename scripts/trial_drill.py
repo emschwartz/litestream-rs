@@ -69,6 +69,7 @@ PAGE = 4096
 SNAPSHOT_LEVEL = 9
 KEY = re.compile(r"/(\d{4})/([0-9a-f]{16})-([0-9a-f]{16})\.ltx$")
 SIZES = (120, 480, 1000, 1900, 3200)
+RELOAD_BOUNDS = "SELECT (SELECT min(id) FROM t), (SELECT max(id) FROM t)"  # what a restarted writer reads first
 RUN_ROWS = 64  # rows of one kind in a row, so most pages are wholly compressible or wholly not
 
 
@@ -270,7 +271,10 @@ class DbWriter:
     def reload(self) -> None:
         self.seq, _ts, xs = self.c.execute("SELECT seq, ts_ms, xor FROM drill_state").fetchone()
         self.xor = int(xs, 16)
-        lo, hi = self.c.execute("SELECT min(id), max(id) FROM t").fetchone()
+        # One aggregate per query: SQLite answers a lone min() or max() from the rowid b-tree's ends, but
+        # scans the whole table when both share a query, which held each restarted writer for a minute
+        # on a 24 GiB database.
+        lo, hi = self.c.execute(RELOAD_BOUNDS).fetchone()
         self.lo, self.hi = lo or 1, hi or 0
 
     def pick(self):
@@ -1577,6 +1581,10 @@ def run_canary(_a: argparse.Namespace) -> int:
             problems.append("a state newer than the instant was not reported")
         if files_differ(db, flipped)[0]:
             problems.append("the page comparison did not see a flipped byte")
+        # A restarted writer must not read the whole table before its first commit (a minute at 24 GiB).
+        plan = " ".join(str(r[-1]) for r in sqlite3.connect(db).execute("EXPLAIN QUERY PLAN " + RELOAD_BOUNDS))
+        if re.search(r"\bSCAN t\b", plan):
+            problems.append(f"the writer's restart reads the whole table: {plan}")
         if problems:
             print("canary FAILED:\n  " + "\n  ".join(problems))
             return 1
