@@ -14,7 +14,8 @@
 //! the single read reports the failure then.
 //!
 //! A step that asks for the same file twice is a bug in the step, and
-//! [`resolve`] fails closed with [`ResolveError::Repeated`] instead of looping.
+//! the resolving loop (`drive`, under every `resolve*` entry point) fails closed with
+//! [`ResolveError::Repeated`] instead of looping.
 //!
 //! What a process wrote is not something it must read back. The engine lends each
 //! maintenance decision the created-at times of the files it put itself ([`Known`],
