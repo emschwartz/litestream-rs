@@ -34,7 +34,7 @@ leave a test's child process running, and an orphan must not outlive the run.
 
 `--unaided` asks another question: would the simulator's swarm find each planted bug with no
 test written for it? The named tests are not run. Each patch is applied and the swarm runs from
-`--base` (disjoint from the fixed seed set), and the run judges (D297): an entry of the swarm's
+`--base` (disjoint from the fixed seed set), and the run judges (D299): an entry of the swarm's
 reach (UNAIDED_PACKAGES) carries `unaided = <seeds>`, a budget the swarm must fail within, or
 `unaided_miss = "<why it cannot>"`; an entry with neither is refused by `--names`. A budgeted
 plant runs exactly its budget; found later or never is a failure. A plant marked a miss runs

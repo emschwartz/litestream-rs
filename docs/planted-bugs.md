@@ -28,7 +28,7 @@ that caught it must fail.
 - `just planted-bugs-names` (part of `just check`) fails when an entry names a test no `fn` defines, the renamed-test case that left an entry unable to run until the nightly. `just planted-bugs-diff BASE [K/N]` runs only the entries a pull request can have affected (its diff touches the entry, the patch, a file the patch edits or a file that defines a named test, or the patch no longer applies); CI runs it on pull requests in up to four shards of 12 entries, about 5 minutes for 12 entries and about 30 minutes a shard for the whole ledger.
 - `just planted-bugs --shard K/N` runs every N-th entry from the K-th, plus the canaries; the nightly runs eight shards.
 - `just planted-bugs-unaided [seeds] [--shard K/N]` asks a different question and judges it
-  (docs/decisions/D297.md): with no named test run, does the swarm still fail on each plant within
+  (docs/decisions/D299.md): with no named test run, does the swarm still fail on each plant within
   the entry's `unaided` budget? An entry in lsr-sim or lsr-core carries `unaided = <seeds>` or
   `unaided_miss = "<why>"`; `just planted-bugs-names` (in `just check`) refuses one with neither.
   Found later than its budget, or never, fails; a marked miss that the swarm now finds in `seeds`
