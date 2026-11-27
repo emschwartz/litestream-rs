@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/snapshot.rs b/crates/core/src/snapshot.rs
+index fbfb02a43..69278cbbe 100644
+--- a/crates/core/src/snapshot.rs
++++ b/crates/core/src/snapshot.rs
+@@ -381,7 +381,7 @@ pub(crate) const TORN_READS: u32 = 8;
+ /// began again from the first page, holding checkpoints back the whole time.
+ fn committed_untorn<W: WalSource>(wal: &mut W) -> Result<CommittedRead, Fault> {
+     let mut read = wal.committed();
+-    for _ in 1..TORN_READS {
++    for _ in TORN_READS..TORN_READS {
+         if read != Err(SourceError::Busy) {
+             break;
+         }

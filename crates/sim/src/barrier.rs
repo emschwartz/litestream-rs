@@ -8,11 +8,17 @@
 //! store while it held the barrier at [`Profile::DEFAULT`]: the application's wait. The
 //! runner judges it after every tick: no replica request under the barrier, the wait within
 //! one staging tick's bound, and no barrier still held when a tick ends without a crash.
+//!
+//! The store calls are not all of the wait: the PASSIVE under the barrier copies frames into the
+//! database file, and a WAL that a level-9 snapshot held back for its whole upload makes that
+//! copy as long as the snapshot (a drill's writer waited 5.9 s on one). So the wrapper also
+//! counts the frames the engine's own checkpoints copy while it holds the barrier, read from
+//! the model's `nBackfill` around each call, and the runner bounds them per barrier.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, SourceError};
+use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, ReadLockHold, SourceError};
 
 use crate::cost::Profile;
 use crate::resources::delta;
@@ -27,6 +33,8 @@ pub struct Held {
     pub remote_requests: u64,
     /// Microseconds of store calls made while one was held, at [`Profile::DEFAULT`].
     pub wait_micros: u64,
+    /// Frames the engine's checkpoints copied into the database file while one was held.
+    pub copied_frames: u64,
     /// A barrier is held now.
     pub open: bool,
 }
@@ -61,29 +69,40 @@ impl BarrierWatch {
     }
 }
 
+/// The model's `nBackfill` now.
+pub type Backfilled = Box<dyn Fn() -> u32>;
+
 /// A checkpointer that records what each barrier it takes is held across.
-#[derive(Debug)]
 pub struct Watching<C> {
     inner: C,
     watch: BarrierWatch,
     remote: RecorderLog,
     staging: RecorderLog,
+    backfilled: Backfilled,
+}
+
+impl<C> std::fmt::Debug for Watching<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Watching").finish_non_exhaustive()
+    }
 }
 
 impl<C> Watching<C> {
-    /// Wraps `inner`, recording into `watch` from the two stores' recorders.
+    /// Wraps `inner`, recording into `watch` from the two stores' recorders and the model's
+    /// `backfilled`.
     #[must_use]
-    pub const fn new(
+    pub fn new(
         inner: C,
         watch: BarrierWatch,
-        remote: RecorderLog,
-        staging: RecorderLog,
+        (remote, staging): (RecorderLog, RecorderLog),
+        backfilled: Backfilled,
     ) -> Self {
         Self {
             inner,
             watch,
             remote,
             staging,
+            backfilled,
         }
     }
 }
@@ -115,7 +134,20 @@ impl<C: Checkpointer> Checkpointer for Watching<C> {
     }
 
     fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointRun, SourceError> {
-        self.inner.checkpoint(mode)
+        if self.watch.0.borrow().open.is_none() {
+            return self.inner.checkpoint(mode);
+        }
+        let before = (self.backfilled)();
+        let run = self.inner.checkpoint(mode);
+        // Nothing restarts the WAL under the barrier, so the count only grows.
+        let copied = (self.backfilled)().saturating_sub(before);
+        let held = &mut self.watch.0.borrow_mut().held;
+        held.copied_frames = held.copied_frames.saturating_add(u64::from(copied));
+        run
+    }
+
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError> {
+        self.inner.renew_read()
     }
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {

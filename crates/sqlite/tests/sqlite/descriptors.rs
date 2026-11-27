@@ -195,6 +195,7 @@ impl Engine {
             &mut ck,
             &self.staging,
             &SyncConfig::default(),
+            &lsr_core::CheckpointConfig::default(),
             &lsr_core::FakeClock::new(Timestamp::from_unix_millis(self.now)),
         ))
         .unwrap();
