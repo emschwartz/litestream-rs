@@ -396,6 +396,9 @@ struct Runner {
     last_polls: u32,
     staging_seen: usize,
     max_tx_pages: u64,
+    /// Pages of the application's commit armed inside the tick running now, which lands before
+    /// the tick's own commits are counted in `max_tx_pages`.
+    in_tick_pages: u64,
     report: RunReport,
     trace: bool,
     /// The last tick waits on a WAL change alone: no timer is pending.
@@ -605,6 +608,7 @@ impl Runner {
             last_polls: 4,
             staging_seen: 0,
             max_tx_pages: 1,
+            in_tick_pages: 0,
             report: RunReport::default(),
             trace: false,
             quiet: false,
@@ -721,11 +725,15 @@ impl Runner {
     fn run_one(&mut self, plan: Option<CrashPlan>) -> TickEnd<Tick> {
         let mut wal = self.w.sqlite.source().with_modified(self.w.modified());
         let mut db = self.w.sqlite.pages();
+        let sqlite = self.w.sqlite.clone();
         let mut ck = crate::barrier::Watching::new(
             CountingCheckpointer::new(self.w.sqlite.checkpointer(), self.tally.clone()),
             self.barrier.clone(),
-            self.w.remote_recorder.clone(),
-            self.w.staging_recorder.clone(),
+            (
+                self.w.remote_recorder.clone(),
+                self.w.staging_recorder.clone(),
+            ),
+            Box::new(move || sqlite.backfilled()),
         );
         let staging = self.w.staging.clone();
         let remote = self.w.remote.clone();
@@ -1688,8 +1696,11 @@ impl Runner {
         self.report
             .reach
             .bump(format!("in_tick.{}", variant(&site)));
+        self.in_tick_pages = u64::try_from(all.len()).unwrap_or(u64::MAX);
         self.w.arm_commit_in_tick(all, size, site);
-        self.tick()
+        let ticked = self.tick();
+        self.in_tick_pages = 0;
+        ticked
     }
 
     fn page_bytes(&self, fill: u32, created_at: u64) -> Vec<u8> {

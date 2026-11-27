@@ -189,7 +189,7 @@ pub enum BugSite {
     /// An upload had bytes to send and no open upload to send them to.
     UploadNeverOpened,
     /// The checkpoint protocol was asked for a FULL checkpoint, which only the cure after a
-    /// failed WAL sync runs.
+    /// failed WAL sync runs, or for a backlog copy, which only the protocol itself runs.
     FullCheckpointInProtocol,
     /// The decoder took no byte of a non-empty chunk.
     DecoderStalled,

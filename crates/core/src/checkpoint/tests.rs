@@ -13,8 +13,8 @@ use crate::layout::Level;
 use crate::mem::MemStore;
 use crate::position::Continuity;
 use crate::source::{
-    CheckpointCall, CheckpointEffect, CheckpointScript, CommittedRead, FakeCheckpointer, FakeDb,
-    FakeWal, SourceError, SourceOp,
+    Barrier, CheckpointCall, CheckpointEffect, CheckpointScript, CommittedRead, FakeCheckpointer,
+    FakeDb, FakeWal, SourceError, SourceOp,
 };
 use crate::store::{ObjectStore, PageLimit, ReadLen};
 
@@ -412,6 +412,7 @@ impl Rig {
             &mut self.ck,
             &self.store,
             cfg,
+            &CheckpointConfig::default(),
             &crate::env::FakeClock::new(ts(5000)),
         ))
     }
@@ -521,6 +522,7 @@ fn a_seal_that_changes_no_page_is_reported_quiet() {
         &mut rig.ck,
         &rig.store,
         &SyncConfig::default(),
+        &CheckpointConfig::default(),
         &crate::env::FakeClock::new(ts(5000)),
     ))
     .unwrap();
@@ -1066,5 +1068,339 @@ fn a_checkpoint_returns_a_proof_only_after_a_step_through_the_end() {
     assert_eq!(
         run(Some(CheckpointEffect::Nothing), CheckpointMode::Truncate),
         (CheckpointOutcome::Busy, true)
+    );
+}
+
+// A backlog larger than the barrier may copy (docs/decisions/D307.md).
+
+/// The checkpointer the protocol runs on, counting the frames copied while a barrier is held:
+/// the application's writers wait for every one of them.
+struct UnderBarrier {
+    inner: FakeCheckpointer,
+    wal: FakeWal,
+    at: Option<u32>,
+    copied: u32,
+}
+
+impl UnderBarrier {
+    fn new(rig: &Rig) -> Self {
+        Self {
+            inner: FakeCheckpointer::new(rig.wal.clone()),
+            wal: rig.wal.clone(),
+            at: None,
+            copied: 0,
+        }
+    }
+}
+
+impl Checkpointer for UnderBarrier {
+    fn begin_barrier(&mut self) -> Result<Barrier, SourceError> {
+        let barrier = self.inner.begin_barrier()?;
+        self.at = Some(self.wal.backfilled());
+        Ok(barrier)
+    }
+
+    fn end_barrier(&mut self, barrier: Barrier) -> Result<(), SourceError> {
+        if let Some(at) = self.at.take() {
+            self.copied = self
+                .copied
+                .saturating_add(self.wal.backfilled().saturating_sub(at));
+        }
+        self.inner.end_barrier(barrier)
+    }
+
+    fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointRun, SourceError> {
+        self.inner.checkpoint(mode)
+    }
+
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError> {
+        self.inner.renew_read()
+    }
+
+    fn bump_seq(&mut self) -> Result<(), SourceError> {
+        self.inner.bump_seq()
+    }
+}
+
+/// A policy whose barrier copies at most `2 * min` frames.
+fn barrier_policy(min: u32) -> CheckpointConfig {
+    CheckpointConfig {
+        min_pages: NonZeroU32::new(min),
+        ..CheckpointConfig::default()
+    }
+}
+
+/// A proof under a read held at its mark, then `backlog` frames more, one commit each, that a
+/// snapshot held back: what the WAL holds when the snapshot ends.
+fn behind_a_snapshot(backlog: u32) -> (Rig, SyncedThrough) {
+    let mut rig = Rig::new();
+    let proof = rig.proof();
+    rig.wal.hold_reader();
+    for n in 0..backlog {
+        rig.commit(&[if n % 2 == 0 { 2 } else { 3 }]);
+    }
+    (rig, proof)
+}
+
+#[expect(
+    clippy::result_large_err,
+    reason = "the protocol's own result, returned as is"
+)]
+fn run_on(
+    rig: &mut Rig,
+    ck: &mut UnderBarrier,
+    proof: SyncedThrough,
+    mode: CheckpointMode,
+    policy: &CheckpointConfig,
+) -> Result<Checkpointed, CheckpointFailed> {
+    block_on(checkpoint(
+        proof,
+        mode,
+        &mut rig.wal,
+        &mut rig.db,
+        &mut PageChecksumTable::new(),
+        ck,
+        &rig.store,
+        &SyncConfig::default(),
+        policy,
+        &crate::env::FakeClock::new(ts(5000)),
+    ))
+}
+
+#[test]
+fn the_barrier_bound_is_twice_the_passive_threshold_or_go_s_and_at_least_64() {
+    assert_eq!(barrier_policy(40).barrier_frames(), 80);
+    assert_eq!(barrier_policy(32).barrier_frames(), 64);
+    assert_eq!(barrier_policy(31).barrier_frames(), 64);
+    assert_eq!(barrier_policy(1).barrier_frames(), 64);
+    assert_eq!(barrier_policy(0).barrier_frames(), 2000);
+    assert_eq!(CheckpointConfig::default().barrier_frames(), 2000);
+}
+
+/// A backlog past the bound: the read moves to the committed end under a barrier that copies
+/// nothing, the frames below it are copied with no barrier held, and the PASSIVE under the
+/// next barrier copies none. The checkpoint ends as one without a backlog does.
+#[test]
+fn a_backlog_past_the_bound_is_copied_with_no_barrier_held() {
+    for mode in [CheckpointMode::Passive, CheckpointMode::Truncate] {
+        let (mut rig, proof) = behind_a_snapshot(90);
+        let mut ck = UnderBarrier::new(&rig);
+        let done = run_on(&mut rig, &mut ck, proof, mode, &barrier_policy(40)).unwrap();
+        assert_eq!(ck.copied, 0, "{mode:?}");
+        let calls = ck.inner.calls();
+        assert_eq!(
+            calls.get(..4),
+            Some(
+                &[
+                    CheckpointCall::BeginBarrier,
+                    CheckpointCall::RenewRead,
+                    CheckpointCall::EndBarrier,
+                    CheckpointCall::Checkpoint(CheckpointMode::Backlog),
+                ][..]
+            ),
+            "{mode:?}: {calls:?}"
+        );
+        assert!(calls[4..].contains(&CheckpointCall::Checkpoint(CheckpointMode::Passive)));
+        let expected = match mode {
+            CheckpointMode::Passive => CheckpointOutcome::Restarted,
+            CheckpointMode::Truncate | CheckpointMode::Full | CheckpointMode::Backlog => {
+                CheckpointOutcome::Truncated
+            }
+        };
+        assert_eq!(done.outcome, expected, "{mode:?}");
+    }
+}
+
+/// The bound is inclusive: a backlog of exactly the bound is copied under the barrier as
+/// always, one frame more is not.
+#[test]
+fn a_backlog_at_the_bound_is_copied_under_the_barrier() {
+    for (backlog, moved) in [(80, false), (81, true)] {
+        // The proof's own frame is part of the backlog: 79 commits make 80 frames.
+        let (mut rig, proof) = behind_a_snapshot(backlog - 1);
+        let mut ck = UnderBarrier::new(&rig);
+        run_on(
+            &mut rig,
+            &mut ck,
+            proof,
+            CheckpointMode::Passive,
+            &barrier_policy(40),
+        )
+        .unwrap();
+        let renewed = ck.inner.calls().contains(&CheckpointCall::RenewRead);
+        assert_eq!(renewed, moved, "{backlog}");
+        assert_eq!(ck.copied, if moved { 0 } else { backlog }, "{backlog}");
+    }
+}
+
+/// The move's barrier refused: nothing ran, and the caller asks again.
+#[test]
+fn a_refused_barrier_before_the_backlog_is_lock_busy() {
+    let (mut rig, proof) = behind_a_snapshot(90);
+    let mut ck = UnderBarrier::new(&rig);
+    rig.wal.inject(SourceOp::BeginBarrier, SourceError::Busy);
+    let done = run_on(
+        &mut rig,
+        &mut ck,
+        proof,
+        CheckpointMode::Passive,
+        &barrier_policy(40),
+    )
+    .unwrap();
+    assert_eq!(done.outcome, CheckpointOutcome::LockBusy);
+    assert!(done.staged.files().is_empty());
+    assert_eq!(ck.inner.calls(), &[CheckpointCall::BeginBarrier]);
+}
+
+/// A lost retake of the read leaves the position unpinned and fails the checkpoint, with the
+/// barrier released and the seal's file kept.
+#[test]
+fn a_lost_read_at_the_move_fails_the_checkpoint() {
+    let (mut rig, proof) = behind_a_snapshot(90);
+    let mut ck = UnderBarrier::new(&rig);
+    rig.wal.inject(SourceOp::RenewRead, SourceError::ReadTxLost);
+    let failed = run_on(
+        &mut rig,
+        &mut ck,
+        proof,
+        CheckpointMode::Passive,
+        &barrier_policy(40),
+    )
+    .unwrap_err();
+    assert_eq!(failed.fault, Fault::ReadTxLost);
+    assert_eq!(failed.staged.position().continuity(), Continuity::Broken);
+    assert_eq!(failed.staged.files().len(), 1);
+    assert_eq!(ck.inner.calls().last(), Some(&CheckpointCall::EndBarrier));
+}
+
+/// Any other failure of the move leaves the read where it was: the position stays pinned to it.
+#[test]
+fn a_failed_move_keeps_the_read_it_had() {
+    let (mut rig, proof) = behind_a_snapshot(90);
+    let mut ck = UnderBarrier::new(&rig);
+    let epoch = rig.wal.epoch();
+    rig.wal.inject(
+        SourceOp::RenewRead,
+        SourceError::Io(std::io::ErrorKind::Other),
+    );
+    let failed = run_on(
+        &mut rig,
+        &mut ck,
+        proof,
+        CheckpointMode::Passive,
+        &barrier_policy(40),
+    )
+    .unwrap_err();
+    assert_eq!(failed.fault, Fault::LocalIo);
+    assert_eq!(
+        failed.staged.position().continuity(),
+        Continuity::Held(epoch)
+    );
+}
+
+/// Another connection holding the checkpoint lock: the PASSIVE under the barrier would copy
+/// the whole backlog once it let go, so the checkpoint is asked again later, the read already
+/// moved. Any other failure of the copy is the checkpoint's fault.
+#[test]
+fn a_backlog_copy_refused_is_lock_busy_and_a_failed_one_is_a_fault() {
+    let (mut rig, proof) = behind_a_snapshot(90);
+    let mut ck = UnderBarrier::new(&rig);
+    ck.inner.script(CheckpointScript {
+        busy: false,
+        effect: CheckpointEffect::Refused,
+    });
+    let done = run_on(
+        &mut rig,
+        &mut ck,
+        proof,
+        CheckpointMode::Passive,
+        &barrier_policy(40),
+    )
+    .unwrap();
+    assert_eq!(done.outcome, CheckpointOutcome::LockBusy);
+    assert_eq!(ck.copied, 0);
+    assert_eq!(
+        ck.inner.calls().last(),
+        Some(&CheckpointCall::Checkpoint(CheckpointMode::Backlog))
+    );
+
+    let (mut rig, proof) = behind_a_snapshot(90);
+    let mut ck = UnderBarrier::new(&rig);
+    rig.wal.inject(
+        SourceOp::Checkpoint,
+        SourceError::Io(std::io::ErrorKind::Other),
+    );
+    let failed = run_on(
+        &mut rig,
+        &mut ck,
+        proof,
+        CheckpointMode::Passive,
+        &barrier_policy(40),
+    )
+    .unwrap_err();
+    assert_eq!(failed.fault, Fault::LocalIo);
+    assert_eq!(
+        ck.inner.calls().last(),
+        Some(&CheckpointCall::Checkpoint(CheckpointMode::Backlog))
+    );
+}
+
+/// A writer that restarted the WAL after the move (every frame was backfilled and the read
+/// fell on mark 0) overtook the checkpoint: the position stays pinned to the new hold and
+/// nothing more runs.
+#[test]
+fn a_restart_after_the_move_is_an_overtaken_checkpoint() {
+    let (mut rig, proof) = behind_a_snapshot(90);
+    let mut ck = UnderBarrier::new(&rig);
+    ck.inner.script(CheckpointScript {
+        busy: false,
+        effect: CheckpointEffect::Restart,
+    });
+    let done = run_on(
+        &mut rig,
+        &mut ck,
+        proof,
+        CheckpointMode::Passive,
+        &barrier_policy(40),
+    )
+    .unwrap();
+    assert_eq!(done.outcome, CheckpointOutcome::Overtaken);
+    assert_eq!(
+        done.staged.position().continuity(),
+        Continuity::Held(rig.wal.epoch())
+    );
+    assert_eq!(
+        ck.inner.calls().last(),
+        Some(&CheckpointCall::Checkpoint(CheckpointMode::Backlog))
+    );
+}
+
+/// A seal that proves no end (the read lapsed under it) moves nothing: the read stays where it
+/// was, no backlog copy runs below it, and the PASSIVE under the barrier goes on as before.
+#[test]
+fn a_seal_short_of_the_end_moves_no_read_and_copies_nothing_first() {
+    let (mut rig, proof) = behind_a_snapshot(90);
+    let mut ck = UnderBarrier::new(&rig);
+    rig.wal.lapse_at_next_sync();
+    let outcome = run_on(
+        &mut rig,
+        &mut ck,
+        proof,
+        CheckpointMode::Passive,
+        &barrier_policy(40),
+    );
+    let calls = ck.inner.calls();
+    assert!(
+        !calls.contains(&CheckpointCall::RenewRead),
+        "{outcome:?}: {calls:?}"
+    );
+    assert!(
+        !calls.contains(&CheckpointCall::Checkpoint(CheckpointMode::Backlog)),
+        "{calls:?}"
+    );
+    assert_eq!(
+        calls.get(..2),
+        Some(&[CheckpointCall::BeginBarrier, CheckpointCall::EndBarrier][..]),
+        "{calls:?}"
     );
 }

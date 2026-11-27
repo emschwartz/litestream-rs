@@ -1,7 +1,7 @@
 diff --git a/crates/replica/src/readers.rs b/crates/replica/src/readers.rs
 --- a/crates/replica/src/readers.rs
 +++ b/crates/replica/src/readers.rs
-@@ -19,11 +19,88 @@
+@@ -19,11 +19,90 @@
  //! only meet the gate's lock.
  
  use std::sync::Arc;
@@ -9,8 +9,10 @@ diff --git a/crates/replica/src/readers.rs b/crates/replica/src/readers.rs
 +use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 +use std::time::Duration;
  
--use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, SourceError};
-+use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, PageSource, SourceError};
+-use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, ReadLockHold, SourceError};
++use lsr_core::{
++    Barrier, CheckpointMode, CheckpointRun, Checkpointer, PageSource, ReadLockHold, SourceError,
++};
 +use lsr_ltx::{DbPages, PageNo, Timestamp};
  use lsr_sqlite::{Sqlite, WritesHeld};
  
@@ -92,6 +94,13 @@ diff --git a/crates/replica/src/readers.rs b/crates/replica/src/readers.rs
  /// Held for the length of one long read. While any guard lives, the replicator runs no
  /// TRUNCATE checkpoint. Counted, so overlapping readers are safe; dropping it ends the read.
  #[derive(Debug)]
+@@ -126,4 +205,4 @@ mod tests {
+         drop(second);
+         assert_eq!(count.load(Ordering::SeqCst), 0);
+     }
+-}
++}
+\ No newline at end of file
 diff --git a/crates/replica/src/thread.rs b/crates/replica/src/thread.rs
 --- a/crates/replica/src/thread.rs
 +++ b/crates/replica/src/thread.rs
