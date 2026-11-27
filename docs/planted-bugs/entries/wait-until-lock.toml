@@ -1,5 +1,5 @@
 name = "wait-until-lock"
-fix = "2e60be33d"
+fix = "16501403b"
 package = "lsr-replica"
 tests = [
     "a_wait_until_predicate_may_call_health",

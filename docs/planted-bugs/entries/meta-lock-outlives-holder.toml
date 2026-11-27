@@ -1,6 +1,6 @@
 # The meta directory's lock is left to the close of its descriptor, so a copy of the descriptor (a child process between fork and exec) keeps it held after the replicator has gone.
 name = "meta-lock-outlives-holder"
-fix = "a815d42"
+fix = "ac1cccab6"
 package = "lsr-replica"
 tests = [
     "meta::tests::the_lock_goes_with_its_holder_not_with_the_last_copy_of_its_descriptor",

@@ -1,6 +1,6 @@
 # The same plant, seen by the simulator.
 name = "running-step-calls-a-shrunk-wal-rewound-sim"
-fix = "913d3dfba"
+fix = "feae726f4"
 package = "lsr-sim"
 test_bin = "sim"
 patch = "running-step-calls-a-shrunk-wal-rewound"

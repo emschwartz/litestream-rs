@@ -1,6 +1,6 @@
 # The same plant, seen by the simulator: a drain that never ends.
 name = "boot-fails-on-a-missing-newest-file-sim"
-fix = "c755dfbcf"
+fix = "feae726f4"
 package = "lsr-sim"
 test_bin = "sim"
 patch = "boot-fails-on-a-missing-newest-file"
