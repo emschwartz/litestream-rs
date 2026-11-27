@@ -585,9 +585,9 @@ fn a_snapshot_in_slices_hands_over_no_more_than_each_budget_and_publishes_once_w
             slices < limit,
             "the snapshot did not finish within {limit} slices of 100 bytes"
         );
-        let before = snapshot.sent;
+        let before = snapshot.handoff.sent;
         let sliced = slice(&mut rig, &mut snapshot, &mut pages, 100).unwrap();
-        assert!(snapshot.sent - before <= 100);
+        assert!(snapshot.handoff.sent - before <= 100);
         assert!(
             snapshot.filling.next() > 1,
             "the pin is moved past what was read"
@@ -600,7 +600,7 @@ fn a_snapshot_in_slices_hands_over_no_more_than_each_budget_and_publishes_once_w
     };
     assert!(slices > 5, "{slices}");
     assert_eq!(info.size, whole.size, "the same file as one written whole");
-    assert_eq!(snapshot.sent, info.size);
+    assert_eq!(snapshot.handoff.sent, info.size);
     assert_eq!(rig.remote_files(), 1);
 }
 
@@ -631,7 +631,7 @@ fn the_last_slice_publishes_only_once_no_part_is_in_flight() {
     let sources = (&mut rig.wal, &mut rig.db, &mut pages);
     let sliced = block_on(snapshot.slice(sources, &Replica(&store), u64::MAX, false)).unwrap();
     assert_eq!(sliced, None);
-    assert!(snapshot.filling.whole() && snapshot.waits);
+    assert!(snapshot.filling.whole() && snapshot.handoff.waits);
     assert_eq!(
         rig.remote_files(),
         0,

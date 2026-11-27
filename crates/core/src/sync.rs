@@ -26,8 +26,8 @@ use std::cmp::Ordering;
 use std::num::{NonZeroU32, NonZeroU64};
 
 use lsr_ltx::{
-    Encoder, FileChecksum, Header, HeaderFields, PageChecksum, PageNo, PageSize, Timestamp, Txid,
-    TxidRange, WalOrigin,
+    DbChecksum, EncodeError, Encoder, FileChecksum, Header, HeaderFields, PageChecksum, PageNo,
+    PageSize, Timestamp, Trailer, Txid, TxidRange, WalOrigin,
 };
 use lsr_wal::{
     FrameCursor, FrameRef, PageMap, ReadPageError, ScanLimit, TxOutcome, WalError, WalReader,
@@ -557,9 +557,13 @@ async fn fill<R: Read + Seek, P: PageSource, U: FileSink>(
     while !filling.whole() {
         filling.encode(plan, wal, db, pages, false)?;
         let out = filling.out();
+        // A file not yet whole has bytes waiting after every step, and the buffer handed over is
+        // the one `whole` reads: either failing would spin this loop forever.
+        crate::invariant!(!out.is_empty(), BugSite::Encode);
         upload.write(out).await.map_err(|err| map_store(&err))?;
         bytes.add(out);
         out.clear();
+        crate::invariant!(filling.out().is_empty(), BugSite::Encode);
     }
     Ok(Filled {
         last: filling.last,
@@ -568,14 +572,63 @@ async fn fill<R: Read + Seek, P: PageSource, U: FileSink>(
     })
 }
 
+/// An LTX file's bytes waiting to be handed over: the encoder's buffer while it encodes, then
+/// the tail it finished with. A staged or snapshot file ([`Filling`]) and a compaction's
+/// output (`crate::compact::Compacting`) both hold one.
+#[derive(Debug)]
+pub(crate) struct Outbound {
+    /// `None` once the trailer is written: what is left is in `tail`.
+    encoder: Option<Encoder<Vec<u8>>>,
+    tail: Vec<u8>,
+}
+
+impl Outbound {
+    pub(crate) const fn new(encoder: Encoder<Vec<u8>>) -> Self {
+        Self {
+            encoder: Some(encoder),
+            tail: Vec::new(),
+        }
+    }
+
+    /// The encoder, until the trailer is written.
+    pub(crate) const fn encoder(&mut self) -> Option<&mut Encoder<Vec<u8>>> {
+        self.encoder.as_mut()
+    }
+
+    /// Whether the file is encoded and every byte of it taken from [`Self::out`].
+    pub(crate) fn whole(&self) -> bool {
+        self.encoder.is_none() && self.tail.is_empty()
+    }
+
+    /// The encoded bytes not yet taken: the caller drains what it hands over.
+    pub(crate) fn out(&mut self) -> &mut Vec<u8> {
+        match self.encoder.as_mut() {
+            Some(encoder) => encoder.writer_mut(),
+            None => &mut self.tail,
+        }
+    }
+
+    /// Writes the trailer, which leaves the rest of the file in the tail. `None` when it
+    /// was written already.
+    pub(crate) fn finish(
+        &mut self,
+        post_apply: Option<DbChecksum>,
+    ) -> Result<Option<Trailer>, EncodeError> {
+        let Some(encoder) = self.encoder.take() else {
+            return Ok(None);
+        };
+        let (tail, trailer) = encoder.finish(post_apply)?;
+        self.tail = tail;
+        Ok(Some(trailer))
+    }
+}
+
 /// An LTX file being encoded from a [`Plan`], up to [`FLUSH_AT`] bytes a step, so its bytes
 /// can be handed over in as many steps as the caller likes: a staged file goes in one call, a
 /// level-9 snapshot a slice a tick (`crate::snapshot::Snapshotting`).
 #[derive(Debug)]
 pub(crate) struct Filling {
-    /// `None` once the trailer is written: what is left is in `tail`.
-    encoder: Option<Encoder<Vec<u8>>>,
-    tail: Vec<u8>,
+    buf: Outbound,
     /// The next page to encode; `u32::MAX` once every page of the plan is.
     next: u32,
     last: Option<LastPage>,
@@ -596,8 +649,7 @@ impl Filling {
                 .min(room),
         );
         Ok(Self {
-            encoder: Some(Encoder::new(out, header).map_err(|_err| BugSite::Encode.hit())?),
-            tail: Vec::new(),
+            buf: Outbound::new(Encoder::new(out, header).map_err(|_err| BugSite::Encode.hit())?),
             next: 1,
             last: None,
             checksum: None,
@@ -611,15 +663,12 @@ impl Filling {
 
     /// Whether the file is encoded and every byte of it taken from [`Self::out`].
     pub(crate) fn whole(&self) -> bool {
-        self.encoder.is_none() && self.tail.is_empty()
+        self.buf.whole()
     }
 
     /// The encoded bytes not yet taken: the caller drains what it hands over.
     pub(crate) fn out(&mut self) -> &mut Vec<u8> {
-        match self.encoder.as_mut() {
-            Some(encoder) => encoder.writer_mut(),
-            None => &mut self.tail,
-        }
+        self.buf.out()
     }
 
     /// Encodes `plan`'s pages from where the last step stopped, then the index and the
@@ -634,7 +683,7 @@ impl Filling {
         pages: &mut PageChecksumTable,
         pinned: bool,
     ) -> Result<(), Fault> {
-        let Some(encoder) = self.encoder.as_mut() else {
+        let Some(encoder) = self.buf.encoder() else {
             return Ok(());
         };
         if self.next != u32::MAX {
@@ -684,9 +733,11 @@ impl Filling {
                 return Ok(());
             }
         }
-        let encoder = self.encoder.take().ok_or_else(|| BugSite::Encode.hit())?;
-        let (rest, trailer) = encoder.finish(None).map_err(|_err| BugSite::Encode.hit())?;
-        self.tail = rest;
+        let trailer = (self
+            .buf
+            .finish(None)
+            .map_err(|_err| BugSite::Encode.hit())?)
+        .ok_or_else(|| BugSite::Encode.hit())?;
         self.checksum = Some(trailer.file_checksum());
         Ok(())
     }

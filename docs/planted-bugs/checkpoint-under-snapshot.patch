@@ -1,10 +1,10 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index c2b1e430a..7b8855c6a 100644
+index af5170dc9..dc26759c0 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1627,7 +1627,6 @@ impl Actor {
+@@ -1728,7 +1728,6 @@ impl Actor {
          // transaction the snapshot reads under (`crate::snapshot::Snapshotting`).
-         let snapshot = matches!(&self.engine.sliced, Some((_, sliced)) if matches!(**sliced, Sliced::Snapshot(_)));
+         let snapshot = self.engine.slicing().is_some_and(Sliced::is_snapshot);
          let free = self.engine.gate.open(now)
 -            && !snapshot
              && self.kept.tasks.ready(Task::Checkpoint, now)

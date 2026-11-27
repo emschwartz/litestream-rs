@@ -1579,7 +1579,7 @@ fn a_slice_reads_exactly_its_budget_of_input() {
     let sliced = block_on(job.slice(&Staging(&source), 4 * chunk, true)).unwrap();
     assert!(sliced.is_none());
     assert_eq!(job.merge.bytes_read, before + 4 * chunk);
-    assert_eq!(job.sent, 0, "nothing reached a flush");
+    assert_eq!(job.handoff.sent, 0, "nothing reached a flush");
     block_on(job.abort());
 }
 

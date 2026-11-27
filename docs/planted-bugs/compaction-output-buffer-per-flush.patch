@@ -1,12 +1,12 @@
 diff --git a/crates/core/src/compact.rs b/crates/core/src/compact.rs
-index 29d855c21..0b6be4f45 100644
+index c6668fe04..a13c29794 100644
 --- a/crates/core/src/compact.rs
 +++ b/crates/core/src/compact.rs
-@@ -865,6 +865,7 @@ impl Compacting {
-                 .await
-                 .map_err(CompactError::Dest)?;
-             out.drain(..n);
-+            out.shrink_to_fit();
-             let n = u64::try_from(n).unwrap_or(u64::MAX);
-             (left, self.sent) = (
-                 NonZeroU64::new(room.get().saturating_sub(n)),
+@@ -864,6 +864,7 @@ impl Compacting {
+             let out = self.buf.out();
+             let sent = self.handoff.send(&mut self.upload, out, room);
+             left = sent.await.map_err(CompactError::Dest)?;
++            self.buf.out().shrink_to_fit();
+             // A pass hands over all that waits while room is left, else the loop spins.
+             if left.is_some() && !self.buf.out().is_empty() {
+                 return Err(CompactError::Bug(BugSite::Encode.hit()));

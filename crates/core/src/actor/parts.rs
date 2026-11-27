@@ -39,6 +39,7 @@ use crate::layout::FileKey;
 use crate::maintain::{Job, Merging};
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
+use crate::publish::Handoff;
 use crate::snapshot::Snapshotting;
 use crate::store::Denied;
 use crate::takeover::TakeoverRecord;
@@ -529,19 +530,25 @@ pub(super) enum Sliced {
 }
 
 impl Sliced {
-    /// Whether its last slice stopped for its upload's parts.
-    pub(super) const fn waits(&self) -> bool {
+    /// Bytes handed to the replica so far, and whether its last slice stopped for its
+    /// upload's parts.
+    pub(super) const fn handoff(&self) -> Handoff {
         match self {
-            Self::Snapshot(snapshot) => snapshot.waits,
-            Self::Merge(merging) => merging.waits(),
+            Self::Snapshot(snapshot) => snapshot.handoff,
+            Self::Merge(merging) => merging.handoff(),
         }
     }
 
-    /// Bytes handed to the replica so far.
-    pub(super) const fn sent(&self) -> u64 {
+    /// Whether it is the level-9 snapshot read from the database.
+    pub(super) const fn is_snapshot(&self) -> bool {
+        matches!(self, Self::Snapshot(_))
+    }
+
+    /// Whether it reads staged copies, which the staging prune must leave alone.
+    pub(super) const fn reads_staging(&self) -> bool {
         match self {
-            Self::Snapshot(snapshot) => snapshot.sent,
-            Self::Merge(merging) => merging.sent(),
+            Self::Snapshot(_) => false,
+            Self::Merge(merging) => merging.reads_staging(),
         }
     }
 
@@ -555,6 +562,11 @@ impl Sliced {
 }
 
 impl Engine {
+    /// The job part-way to the replica, if any.
+    pub(super) fn slicing(&self) -> Option<&Sliced> {
+        self.sliced.as_ref().map(|(_, sliced)| &**sliced)
+    }
+
     /// An engine that knows nothing and boots on its first tick.
     pub(super) fn fresh() -> Self {
         Self {

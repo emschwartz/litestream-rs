@@ -55,7 +55,7 @@
 //! stream opened for each slice, at the offset the last one reached.
 
 use std::convert::Infallible;
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroU64;
 
 use lsr_ltx::{
     DbChecksum, DbPages, DecodeError, EncodeError, Encoder, Event, Header, HeaderFields, PageNo,
@@ -67,8 +67,9 @@ use crate::fault::role::{Replica, Role, SMALLEST_WINDOW};
 use crate::fault::{BugSite, Fault};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, Next, ReadFault, check_link};
-use crate::publish::{Open, Writer};
-use crate::store::{Flight, ObjectStore, ReadLen, ReadStream, Rest, StoreError, Upload, WriteMode};
+use crate::publish::{Handoff, Open, Writer};
+use crate::store::{ObjectStore, ReadLen, ReadStream, Rest, StoreError, Upload, WriteMode};
+use crate::sync::Outbound;
 
 #[cfg(test)]
 #[expect(
@@ -727,26 +728,21 @@ fn check_range(input: &Input) -> Result<(), CompactError> {
 pub(crate) struct Compacting {
     merge: Merge,
     header: Header,
-    /// `None` once the tail is written: `rest` holds the bytes still to hand over.
-    encoder: Option<Encoder<Vec<u8>>>,
-    rest: Vec<u8>,
+    buf: Outbound,
     trailer: Option<Trailer>,
     upload: Open,
     pages: u32,
     /// The first page the regrow check has not looked at.
     unchecked_from: u32,
     paged: bool,
-    /// Bytes handed to the destination.
-    pub(crate) sent: u64,
-    /// The last slice stopped for the upload's parts (`docs/decisions/D233.md`).
-    pub(crate) waits: bool,
+    pub(crate) handoff: Handoff,
 }
 
 impl std::fmt::Debug for Compacting {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Compacting")
             .field("header", &self.header)
-            .field("sent", &self.sent)
+            .field("sent", &self.handoff.sent)
             .finish_non_exhaustive()
     }
 }
@@ -809,15 +805,13 @@ impl Compacting {
         Ok(Self {
             merge,
             header,
-            encoder: Some(encoder),
-            rest: Vec::new(),
+            buf: Outbound::new(encoder),
             trailer: None,
             upload,
             pages: 0,
             unchecked_from: 1,
             paged: false,
-            sent: 0,
-            waits: false,
+            handoff: Handoff::default(),
         })
     }
 
@@ -847,73 +841,42 @@ impl Compacting {
         budget: u64,
         patient: bool,
     ) -> Result<Option<Trailer>, CompactError> {
-        self.waits = false;
+        self.handoff.waits = false;
         let read_until = self.merge.bytes_read.saturating_add(budget);
         // Zero once the budget is spent, as a snapshot's slice counts it (`crate::snapshot`).
         let mut left = NonZeroU64::new(budget);
         while let Some(room) = left {
             self.fill((source, &mut *slots), read_until).await?;
-            let (len, encoding) = (self.out().len(), self.encoder.is_some());
-            // Short of a flush, the slice read its share of the inputs.
-            if encoding && len < self.merge.budget.flush {
+            let len = self.buf.out().len();
+            // Short of a flush, the slice read its share of the inputs: the trailer is written
+            // once the encoder is gone.
+            if self.trailer.is_none() && len < self.merge.budget.flush {
                 break;
             }
-            // Every pass hands over a byte, so the count down cannot stand still.
-            let Some(n) =
-                NonZeroUsize::new(len.min(usize::try_from(room.get()).unwrap_or(usize::MAX)))
-            else {
+            // Every pass hands over a byte, so the count down cannot stand still (checked below).
+            if len == 0 {
                 break;
-            };
-            if !patient
-                && self
-                    .upload
-                    .flight(Rest::More)
-                    .await
-                    .map_err(CompactError::Dest)?
-                    == Flight::Full
-            {
-                self.waits = true;
+            }
+            let clear = self.handoff.clear(&mut self.upload, Rest::More, patient);
+            if !clear.await.map_err(CompactError::Dest)? {
                 return Ok(None);
             }
-            let n = n.get();
-            let out = match self.encoder.as_mut() {
-                Some(encoder) => encoder.writer_mut(),
-                None => &mut self.rest,
-            };
-            self.upload
-                .write(out.get(..n).unwrap_or_default())
-                .await
-                .map_err(CompactError::Dest)?;
-            out.drain(..n);
-            let n = u64::try_from(n).unwrap_or(u64::MAX);
-            (left, self.sent) = (
-                NonZeroU64::new(room.get().saturating_sub(n)),
-                self.sent.saturating_add(n),
-            );
+            let out = self.buf.out();
+            let sent = self.handoff.send(&mut self.upload, out, room);
+            left = sent.await.map_err(CompactError::Dest)?;
+            // A pass hands over all that waits while room is left, else the loop spins.
+            if left.is_some() && !self.buf.out().is_empty() {
+                return Err(CompactError::Bug(BugSite::Encode.hit()));
+            }
         }
-        let Some(trailer) = self.trailer.filter(|_| self.rest.is_empty()) else {
+        let Some(trailer) = self.trailer.filter(|_| self.buf.whole()) else {
             return Ok(None);
         };
-        if !patient
-            && self
-                .upload
-                .flight(Rest::None)
-                .await
-                .map_err(CompactError::Dest)?
-                != Flight::Idle
-        {
-            self.waits = true;
+        let clear = self.handoff.clear(&mut self.upload, Rest::None, patient);
+        if !clear.await.map_err(CompactError::Dest)? {
             return Ok(None);
         }
         Ok(Some(trailer))
-    }
-
-    /// The bytes waiting to be handed over: the encoder's, then the tail's.
-    fn out(&mut self) -> &mut Vec<u8> {
-        match self.encoder.as_mut() {
-            Some(encoder) => encoder.writer_mut(),
-            None => &mut self.rest,
-        }
     }
 
     /// Merges and encodes until a flush's worth waits to be handed over, the tail is written,
@@ -924,7 +887,7 @@ impl Compacting {
         read_until: u64,
     ) -> Result<(), CompactError> {
         let flush = self.merge.budget.flush;
-        while let Some(encoder) = self.encoder.as_mut()
+        while let Some(encoder) = self.buf.encoder()
             && encoder.writer_mut().len() < flush
             && self.merge.bytes_read < read_until
         {
@@ -963,14 +926,7 @@ impl Compacting {
                 .trailer()
                 .post_apply()
                 .filter(|_| self.header.tracked());
-            let finished = self
-                .encoder
-                .take()
-                .map(|encoder| encoder.finish(post_apply));
-            if let Some(finished) = finished {
-                let (tail, trailer) = finished.map_err(CompactError::Encode)?;
-                (self.rest, self.trailer) = (tail, Some(trailer));
-            }
+            self.trailer = self.buf.finish(post_apply).map_err(CompactError::Encode)?;
         }
         Ok(())
     }
