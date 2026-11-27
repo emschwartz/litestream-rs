@@ -1,7 +1,10 @@
 //! The restore executor: a planned chain of LTX files becomes one database.
 //!
 //! [restore] loads the inventory, plans, then applies the chain's files oldest
-//! first into a [DatabaseSink]. A file is read in bounded chunks through one
+//! first into a [DatabaseSink]. A fresh attempt may start past the base, at a file that holds
+//! every page of the database (`start`): a file of the chain as large as the snapshot is read
+//! first, kept as the start if its pages run from 1 to its commit with none missing, and
+//! otherwise cut off at its first missing page and applied in its turn. A file is read in bounded chunks through one
 //! decoder (the shared `LtxRead`); its header is checked before any of its pages
 //! are written, and nothing counts until the decoder returns [lsr_ltx::Verified].
 //! A sink takes a [PageRef], which is exactly one page of its page size, so
@@ -51,8 +54,8 @@
 use std::io;
 
 use lsr_ltx::{
-    DbChecksum, DbPages, DecodeError, Event, Header, PageRef, PageSize, Timestamp, Txid, TxidRange,
-    Verified,
+    DbChecksum, DbPages, DecodeError, Event, Header, PageNo, PageRef, PageSize, Timestamp, Txid,
+    TxidRange, Verified,
 };
 use thiserror::Error;
 
@@ -420,7 +423,8 @@ impl Restored {
     }
 
     /// Files in the chain that built the database, the ones kept from an earlier attempt
-    /// included.
+    /// included; not the files before a whole-database copy the restore started from, which
+    /// it never read.
     #[must_use]
     pub const fn files(&self) -> usize {
         self.files
@@ -493,6 +497,8 @@ struct Resume {
     applied: ContiguousChain,
     /// The last of them, which the next file must link to.
     last: Verified,
+    /// How many of them were never read ([`Applied::skipped`]).
+    skipped: usize,
     /// The file that was gone.
     missing: FileKey,
     /// What the rest is planned toward: the first plan's target, an instant fixed to the
@@ -515,6 +521,8 @@ struct Applied {
     chain: ContiguousChain,
     last: Verified,
     inside_file: Option<FileKey>,
+    /// The chain's files before the whole-database copy it started from, never read.
+    skipped: usize,
 }
 
 fn sink_fault(op: SinkOp) -> impl FnOnce(io::Error) -> RestoreError {
@@ -608,6 +616,7 @@ pub(crate) async fn restore_within<S: ObjectStore, K: DatabaseSink>(
                 chain,
                 last,
                 inside_file,
+                skipped,
             }) => {
                 verify_end_state(&mut sink, &last)?;
                 sink.publish().map_err(|err| RestoreError::Publish {
@@ -618,7 +627,7 @@ pub(crate) async fn restore_within<S: ObjectStore, K: DatabaseSink>(
                     reached: chain.reaches(),
                     page_size: last.header().page_size(),
                     commit: last.header().pages(),
-                    files: chain.files().len(),
+                    files: chain.files().len().saturating_sub(skipped),
                     bytes_read,
                     attempts: attempt,
                     created_at_read,
@@ -774,6 +783,7 @@ async fn attempt_tail<S: ObjectStore, K: DatabaseSink>(
     let Resume {
         applied,
         last,
+        skipped,
         missing,
         target,
         inside_file,
@@ -794,7 +804,7 @@ async fn attempt_tail<S: ObjectStore, K: DatabaseSink>(
     apply_chain(
         store,
         chain,
-        Some((done, last)),
+        Some((done, skipped, last)),
         target,
         inside_file,
         sink,
@@ -882,24 +892,22 @@ fn verify_end_state<K: DatabaseSink>(sink: &mut K, last: &Verified) -> Result<()
     }
 }
 
-/// Applies `chain` into `sink`, from its first file, or after the `kept` files already applied
-/// with the last of them. A file gone before any of it was read, after the first, ends the attempt
-/// with the files before it kept ([Abort::Kept]), planned on toward `rest`.
+/// Applies `chain` into `sink`, from its start ([`start`]), or after the `kept` files already
+/// settled (how many, how many of those were skipped, and the last applied). A file gone before
+/// any of it was read, after the first, ends the attempt with the files before it kept
+/// ([Abort::Kept]), planned on toward `rest`.
 async fn apply_chain<S: ObjectStore, K: DatabaseSink>(
     store: &S,
     chain: ContiguousChain,
-    kept: Option<(usize, Verified)>,
+    kept: Option<(usize, usize, Verified)>,
     rest: KeyTarget,
     inside_file: Option<FileKey>,
     sink: &mut K,
     bytes_read: &mut u64,
 ) -> Result<Applied, Abort> {
-    let (done, mut last) = match kept {
+    let (done, skipped, mut last) = match kept {
         Some(kept) => kept,
-        None => (
-            1,
-            apply_file(store, chain.snapshot(), None, sink, bytes_read).await?,
-        ),
+        None => start(store, &chain, sink, bytes_read).await?,
     };
     for (index, info) in chain.files().iter().enumerate().skip(done) {
         let before = *bytes_read;
@@ -914,6 +922,7 @@ async fn apply_chain<S: ObjectStore, K: DatabaseSink>(
                 return Err(Abort::Kept(Box::new(Resume {
                     applied,
                     last,
+                    skipped,
                     missing,
                     target: rest,
                     inside_file,
@@ -928,7 +937,106 @@ async fn apply_chain<S: ObjectStore, K: DatabaseSink>(
         chain,
         last,
         inside_file,
+        skipped,
     })
+}
+
+/// The first file of a fresh attempt: the newest file that may hold the whole database
+/// ([`ContiguousChain::whole_candidate`]) when it proves to, else the base. Such a file is the
+/// whole database at its transaction, so the files before it, the base included, add nothing.
+/// Go reads them all (its restore plan always starts from the snapshot, `replica.go`
+/// `CalcRestorePlan`); here a database restored past a copy the writer took when the WAL did not
+/// continue the replica reads it once, not twice. Returns how many files are settled, how many
+/// of them were skipped, and the last applied.
+async fn start<S: ObjectStore, K: DatabaseSink>(
+    store: &S,
+    chain: &ContiguousChain,
+    sink: &mut K,
+    bytes_read: &mut u64,
+) -> Result<(usize, usize, Verified), Abort> {
+    let candidate = chain
+        .whole_candidate()
+        .and_then(|index| Some((index, chain.files().get(index)?)));
+    if let Some((index, info)) = candidate {
+        if let Some(verified) = apply_whole(store, info, sink, bytes_read).await? {
+            return Ok((index.saturating_add(1), index, verified));
+        }
+        sink.reset().map_err(sink_fault(SinkOp::Reset))?;
+    }
+    let base = apply_file(store, chain.snapshot(), None, sink, bytes_read).await?;
+    Ok((1, 0, base))
+}
+
+/// Reads `info` as the start of the database. It is kept (`Some`) only when its pages are
+/// every page from 1 to its commit, so that no earlier file can add to it. The first page out
+/// of that sequence ends the read (`None`), at the cost of the bytes up to it and one read more
+/// than Go makes; the size gate in [`ContiguousChain::whole_candidate`] keeps that rare.
+async fn apply_whole<S: ObjectStore, K: DatabaseSink>(
+    store: &S,
+    info: &FileInfo,
+    sink: &mut K,
+    bytes_read: &mut u64,
+) -> Result<Option<Verified>, Abort> {
+    let key = info.key;
+    let mut pages = WholePages::default();
+    let mut read = LtxRead::new(key, chunk_len());
+    let applied = read
+        .read_verified(store, |event| match event {
+            Event::Header(header) if header.txids() != key.range() => {
+                Err(Some(RestoreError::File {
+                    key,
+                    fault: FileFault::RangeMismatch {
+                        header: header.txids(),
+                    },
+                }))
+            }
+            Event::Header(_) => Ok(()),
+            Event::Page(page) if pages.take(page.pgno(), page.size()) => sink
+                .write_page(page)
+                .map_err(|err| Some(sink_fault(SinkOp::WritePage)(err))),
+            Event::Page(_) => Err(None),
+        })
+        .await;
+    *bytes_read = bytes_read.saturating_add(read.bytes_read());
+    let verified = match applied {
+        Ok(verified) => verified,
+        Err(ReadFault::Rejected(None)) => return Ok(None),
+        Err(ReadFault::Rejected(Some(err))) => return Err(Abort::Fatal(err)),
+        Err(ReadFault::Store(err)) => return Err(read_abort(key, ReadFault::Store(err))),
+        Err(ReadFault::Decode(err)) => return Err(read_abort(key, ReadFault::Decode(err))),
+    };
+    let header = verified.header();
+    if !pages.reach(header.pages(), header.page_size()) {
+        return Ok(None);
+    }
+    end_file(sink, &verified)?;
+    Ok(Some(verified))
+}
+
+/// The pages of one file read so far, while they are 1, 2, 3 and on with none missing (the
+/// lock page, which no file holds, aside).
+#[derive(Default, Debug)]
+struct WholePages {
+    last: Option<PageNo>,
+}
+
+impl WholePages {
+    /// Takes the next page; false when it is not the one after the last taken.
+    fn take(&mut self, pgno: PageNo, size: PageSize) -> bool {
+        let after = self.last.map_or(0, PageNo::get);
+        let next = PageNo::new(after.saturating_add(1), size)
+            .or_else(|| PageNo::new(after.saturating_add(2), size));
+        let fits = next == Some(pgno);
+        if fits {
+            self.last = Some(pgno);
+        }
+        fits
+    }
+
+    /// Whether the pages taken are every page of a database of `pages`.
+    fn reach(&self, pages: DbPages, size: PageSize) -> bool {
+        self.last == pages.last_page(size)
+    }
 }
 
 /// A chain whose last file, `key`, leaves no database is refused.

@@ -7,12 +7,7 @@ use std::process::{Command, Output};
 use lsr_history::chain::{self, Chain};
 
 fn hex(chain: &Chain) -> String {
-    chain
-        .digest()
-        .bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    hex::encode(chain.digest().bytes())
 }
 
 fn judge(lines: &[String]) -> Output {

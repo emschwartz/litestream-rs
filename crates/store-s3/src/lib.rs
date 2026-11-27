@@ -75,7 +75,7 @@ pub use request::{OpenUpload, abandon_upload, abort_upload, open_uploads};
 #[cfg(feature = "reqwest")]
 pub use reqwest_transport::{ReqwestSetupError, ReqwestTransport};
 pub use response::{
-    Head, ListPage, ListedFile, ResponseError, Unrecognized, hex, parse_complete, parse_create,
+    Head, ListPage, ListedFile, ResponseError, Unrecognized, parse_complete, parse_create,
     parse_delete_failure_codes, parse_head, parse_list,
 };
 #[cfg(feature = "testing")]

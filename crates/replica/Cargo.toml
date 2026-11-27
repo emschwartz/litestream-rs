@@ -26,6 +26,8 @@ lsr-core.workspace = true
 lsr-ltx.workspace = true
 lsr-sqlite.workspace = true
 lsr-store-fs.workspace = true
+# The `file:` URI the integrity check opens a restored database by.
+percent-encoding.workspace = true
 rusqlite = { workspace = true, optional = true }
 thiserror.workspace = true
 
