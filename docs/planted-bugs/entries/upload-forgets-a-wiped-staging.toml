@@ -7,3 +7,4 @@ package = "lsr-sim"
 tests = [
     "an_upload_that_leaves_staging_empty_keeps_the_staging_edit",
 ]
+unaided_miss = "The plant sits in the simulator's own forcing window and needs staging wiped under an upload to the newest staged file, which the swarm draws too rarely; only its explicit test sets it up."

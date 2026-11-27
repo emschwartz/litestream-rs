@@ -11,3 +11,4 @@ tests = [
     "a_rejected_write_over_an_object_that_was_there_deletes_nothing",
     "a_part_rejected_during_the_commit_deletes_nothing",
 ]
+unaided_miss = "Needs a store that rejects an upload's bytes while the key already holds an earlier attempt's object, a fault pair the swarm does not draw; only the named core tests set it up."

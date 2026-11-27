@@ -4,3 +4,4 @@ name = "busy-truncate-taken-as-proof"
 fix = "claude/truncate-proof"
 package = "lsr-core"
 tests = ["a_busy_truncate_takes_no_snapshot"]
+unaided_miss = "Needs a fault or interleaving at one request or tick (a rejected part, a busy checkpoint, a slice boundary, a second SQLite in the process) that the swarm does not aim at; only a targeted test sets it up."

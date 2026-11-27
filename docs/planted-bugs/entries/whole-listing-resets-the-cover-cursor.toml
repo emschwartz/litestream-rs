@@ -8,3 +8,4 @@ tests = [
     "maintain::short::tests::a_whole_listing_keeps_the_cover_cursor_past_a_level_zero_file_that_stays",
     "actor::tests::listing::an_hour_with_a_level_zero_file_that_stays_lists_a_bounded_number_of_requests",
 ]
+unaided_miss = "The plant costs requests, memory or bytes and changes no restored page; the swarm's oracles judge pages and needless snapshots, not request counts or buffer sizes, and only the cost tests count those."

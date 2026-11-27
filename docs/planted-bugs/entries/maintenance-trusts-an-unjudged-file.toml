@@ -8,3 +8,4 @@ tests = [
     "a_whole_listing_between_slices_plans_nothing_over_another_writers_file_at_the_id_in_flight",
     "a_short_listing_between_slices_plans_nothing_over_another_writers_file_at_the_id_in_flight",
 ]
+unaided_miss = "Needs another writer at the id of an unsent file, a history the swarm draws only when a second writer is enabled at that moment; only the named scenario reaches it."

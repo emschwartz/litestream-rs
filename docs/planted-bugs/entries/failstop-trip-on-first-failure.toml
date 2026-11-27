@@ -7,3 +7,4 @@ tests = [
     "lag::a_failure_before_the_bound_never_trips",
     "failstop::tests::the_clock_never_trips_early",
 ]
+unaided = 50

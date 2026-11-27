@@ -4,3 +4,4 @@ name = "compaction-reads-a-request-per-chunk"
 fix = "claude/compact-stream"
 package = "lsr-core"
 tests = ["each_replica_input_is_one_stream_however_many_windows_it_spans"]
+unaided_miss = "The plant costs requests, memory or bytes and changes no restored page; the swarm's oracles judge pages and needless snapshots, not request counts or buffer sizes, and only the cost tests count those."

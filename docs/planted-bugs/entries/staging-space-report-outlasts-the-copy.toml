@@ -6,3 +6,4 @@ package = "lsr-core"
 tests = [
     "actor::tests::staging_space::a_copy_that_may_not_fit_is_reported_and_still_runs",
 ]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

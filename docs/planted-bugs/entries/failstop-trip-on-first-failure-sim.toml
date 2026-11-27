@@ -9,3 +9,4 @@ tests = [
     "fixed_seeds::fixed::seeds_49_to_56",
     "faults::store_flaky_5pct",
 ]
+unaided = 50

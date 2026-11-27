@@ -6,3 +6,4 @@ package = "lsr-core"
 tests = [
     "actor::tests::newest_replica_file::with_a_staged_file_a_replica_newest_staged_file_that_reads_badly_at_boot_does_not_fail_the_boot",
 ]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

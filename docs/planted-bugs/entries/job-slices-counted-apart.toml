@@ -7,3 +7,4 @@ package = "lsr-core"
 tests = [
     "actor::tests::sliced_snapshot::a_commit_waits_at_most_a_share_of_slices_of_a_file_and_a_snapshot_together",
 ]
+unaided_miss = "Needs a fault or interleaving at one request or tick (a rejected part, a busy checkpoint, a slice boundary, a second SQLite in the process) that the swarm does not aim at; only a targeted test sets it up."

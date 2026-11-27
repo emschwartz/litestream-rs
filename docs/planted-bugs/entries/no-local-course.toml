@@ -7,3 +7,4 @@ tests = [
     "a_restart_during_an_outage_stages_and_checkpoints_from_local_state",
     "the_course_begins_at_the_bound_and_not_before",
 ]
+unaided_miss = "The local course needs staging behind the replica with the store down across two restarts and lying reads on return, a history the swarm does not draw; only its explicit scenarios reach it."

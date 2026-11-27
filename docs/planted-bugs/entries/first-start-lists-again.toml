@@ -7,3 +7,4 @@ package = "lsr-core"
 tests = [
     "a_first_start_lists_the_replica_at_boot_and_after_its_first_snapshot_only",
 ]
+unaided_miss = "Costs extra LISTs on a first start and changes no restored page; the swarm does not count requests, and only the first-start count test does."

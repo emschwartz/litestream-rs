@@ -6,3 +6,4 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["faults::writes_held_after_a_stop"]
+unaided_miss = "The plant sits in the simulator's own judge or model, so the swarm only meets it when a seed makes that judge's exempted case happen; the judge's unit test feeds the case directly."

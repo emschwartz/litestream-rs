@@ -5,3 +5,4 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["requests::a_steady_sync_puts_each_level_zero_file_once_and_asks_nothing_else"]
+unaided = 300

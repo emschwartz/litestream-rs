@@ -4,3 +4,4 @@ package = "lsr-core"
 tests = [
     "upload::tests::a_verifying_listed_key_unlike_the_staged_file_is_never_written_over",
 ]
+unaided = 50

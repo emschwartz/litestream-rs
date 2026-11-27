@@ -5,3 +5,4 @@ package = "lsr-core"
 tests = [
     "actor::tests::steady::a_drain_does_not_wait_for_the_interval",
 ]
+unaided_miss = "Needs a fault or interleaving at one request or tick (a rejected part, a busy checkpoint, a slice boundary, a second SQLite in the process) that the swarm does not aim at; only a targeted test sets it up."

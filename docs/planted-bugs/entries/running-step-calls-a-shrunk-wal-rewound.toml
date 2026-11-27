@@ -4,3 +4,4 @@ name = "running-step-calls-a-shrunk-wal-rewound"
 fix = "913d3dfba"
 package = "lsr-core"
 tests = ["actor::tests::wal_truncated_mid_step::a_wal_shrinking_between_the_length_and_the_frames_is_retried"]
+unaided_miss = "Needs a fault or interleaving at one request or tick (a rejected part, a busy checkpoint, a slice boundary, a second SQLite in the process) that the swarm does not aim at; only a targeted test sets it up."

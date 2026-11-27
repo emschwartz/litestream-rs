@@ -3,3 +3,4 @@ name = "boot-gate-takeover-ignored"
 fix = "aa1165d"
 package = "lsr-core"
 tests = ["vouch::a_vm_restore_stops_until_a_takeover_covers_the_replica"]
+unaided = 50

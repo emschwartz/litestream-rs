@@ -7,3 +7,4 @@ tests = [
     "faults::permission_revoked_mid_run",
     "faults::bucket_rolled_back",
 ]
+unaided = 50

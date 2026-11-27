@@ -8,3 +8,4 @@ tests = [
     "actor::tests::sliced::a_file_in_flight_leaves_the_wal_step_a_tick_after_each_share_of_slices",
     "actor::tests::sliced::checkpoints_run_while_a_file_is_in_flight",
 ]
+unaided = 300

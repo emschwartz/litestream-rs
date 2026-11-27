@@ -2,3 +2,4 @@ name = "staging-enospc-local-io"
 fix = "cf6ca7f"
 package = "lsr-core"
 tests = ["fault::tests::a_full_staging_disk_is_disk_full"]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

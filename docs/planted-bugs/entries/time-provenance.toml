@@ -5,3 +5,4 @@ tests = [
     "plan::tests::a_fallback_created_at_does_not_date_the_next_transaction",
     "lazy::a_fallback_created_at_does_not_date_the_next_transaction",
 ]
+unaided = 300

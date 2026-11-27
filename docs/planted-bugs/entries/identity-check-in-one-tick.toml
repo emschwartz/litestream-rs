@@ -8,3 +8,4 @@ tests = [
     "vouch::the_identity_check_restores_the_replica_a_slice_a_tick",
     "vouch::a_replica_that_moves_under_a_sliced_identity_check_stops_the_boot",
 ]
+unaided_miss = "Costs a boot that reads the whole replica inside one tick and changes no restored page; found at seed 300 only by luck at an earlier head and not at this one, so only the vouch tests reach it."

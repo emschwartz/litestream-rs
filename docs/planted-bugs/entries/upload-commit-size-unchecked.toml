@@ -9,3 +9,4 @@ tests = [
     "upload::tests::a_commit_that_answers_with_a_wrong_size_is_ambiguous_not_confirmed",
     "upload::tests::a_commit_that_answers_with_a_wrong_size_leaves_no_object",
 ]
+unaided = 50

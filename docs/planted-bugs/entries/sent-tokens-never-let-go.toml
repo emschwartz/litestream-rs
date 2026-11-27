@@ -5,3 +5,4 @@ package = "lsr-core"
 tests = [
     "actor::tests::steady::sent_tokens_are_let_go_when_their_staged_files_are_pruned",
 ]
+unaided_miss = "The plant costs requests, memory or bytes and changes no restored page; the swarm's oracles judge pages and needless snapshots, not request counts or buffer sizes, and only the cost tests count those."

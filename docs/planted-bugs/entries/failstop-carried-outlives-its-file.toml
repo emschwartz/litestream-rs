@@ -4,3 +4,4 @@ package = "lsr-core"
 tests = [
     "failstop::tests::staged_frames_carry_their_date_until_the_replica_holds_them",
 ]
+unaided_miss = "Fail-stop needs an outage or doubt held past the age bound with the write gate in play, a scenario longer than the swarm's draw; only the named failstop scenarios and lag tests reach it."

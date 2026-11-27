@@ -5,3 +5,4 @@ tests = [
     "lag::a_commit_after_a_file_that_changes_nothing_is_lag",
     "lag::a_store_down_past_the_bound_trips_at_the_probe",
 ]
+unaided_miss = "Fail-stop needs an outage or doubt held past the age bound with the write gate in play, a scenario longer than the swarm's draw; only the named failstop scenarios and lag tests reach it."

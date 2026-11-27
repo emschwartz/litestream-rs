@@ -6,3 +6,4 @@ name = "level-jumps-to-the-newest-input"
 fix = "claude/level-holes"
 package = "lsr-core"
 tests = ["actor::tests::level_holes::two_level_one_files_in_one_window_leave_no_hole_in_the_levels_above"]
+unaided = 300

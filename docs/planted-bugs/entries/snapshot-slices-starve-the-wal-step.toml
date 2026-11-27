@@ -8,3 +8,4 @@ tests = [
     "actor::tests::sliced_snapshot::a_snapshot_leaves_the_wal_step_a_tick_after_each_share_of_slices",
     "actor::tests::sliced_snapshot::a_commit_made_during_a_long_snapshot_reaches_the_replica_before_it_ends",
 ]
+unaided_miss = "Needs a fault or interleaving at one request or tick (a rejected part, a busy checkpoint, a slice boundary, a second SQLite in the process) that the swarm does not aim at; only a targeted test sets it up."

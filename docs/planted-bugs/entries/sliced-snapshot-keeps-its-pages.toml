@@ -4,3 +4,4 @@ name = "sliced-snapshot-keeps-its-pages"
 fix = "plant"
 package = "lsr-core"
 tests = ["a_sliced_job_carries_heap_linear_in_pages_at_the_pinned_coefficient"]
+unaided_miss = "Holds the database in RAM between ticks and changes no restored page; the swarm does not measure heap, and only the heap-coefficient test does."

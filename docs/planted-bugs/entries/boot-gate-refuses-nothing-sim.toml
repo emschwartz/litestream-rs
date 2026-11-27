@@ -7,3 +7,4 @@ tests = [
     "foreign_file_while_down_stops",
     "vm_restore_stops_until_trust_local",
 ]
+unaided_miss = "Failed only at seed 249 when measured at 4918e715e and in none of 300 seeds at f6c379c5d: a late find that nine core and sim changes moved off the base; the swarm reaches a boot that refuses nothing only by that luck."

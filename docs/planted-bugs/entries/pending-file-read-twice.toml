@@ -6,3 +6,4 @@ tests = [
     "a_boot_reads_each_pending_staged_file_once",
     "a_boot_after_a_confirmed_upload_reads_each_pending_staged_file_once",
 ]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

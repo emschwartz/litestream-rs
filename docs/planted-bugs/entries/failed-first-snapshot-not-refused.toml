@@ -2,3 +2,4 @@ name = "failed-first-snapshot-not-refused"
 fix = "plant"
 package = "lsr-core"
 tests = ["a_failed_first_snapshot_from_level_zero_is_read_from_the_database_next"]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

@@ -5,3 +5,4 @@ tests = [
     "pages::tests::a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop",
     "recover::tests::a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop",
 ]
+unaided_miss = "A listing whose cursor never advances is a store fault the simulator's fake store never produces; only the core tests feed that listing."

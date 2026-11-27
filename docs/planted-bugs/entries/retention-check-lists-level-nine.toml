@@ -5,3 +5,4 @@ package = "lsr-core"
 tests = [
     "actor::tests::steady::a_steady_writer_with_short_intervals_pays_the_bill_and_no_more",
 ]
+unaided_miss = "The plant costs requests, memory or bytes and changes no restored page; the swarm's oracles judge pages and needless snapshots, not request counts or buffer sizes, and only the cost tests count those."

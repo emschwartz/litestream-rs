@@ -4,3 +4,4 @@ package = "lsr-core"
 tests = [
     "a_torn_staged_file_the_replica_lacks_is_dropped_and_staged_again_from_the_wal",
 ]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

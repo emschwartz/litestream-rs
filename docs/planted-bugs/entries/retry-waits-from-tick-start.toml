@@ -6,3 +6,4 @@ package = "lsr-core"
 tests = [
     "actor::tests::retry_after_hang::a_retry_waits_from_when_the_failed_call_returned",
 ]
+unaided_miss = "Needs one call that hangs past the retry wait, which the swarm's fault durations do not reach; only the retry-after-hang test does."

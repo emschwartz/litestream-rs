@@ -2,3 +2,4 @@ name = "unlink-durable-at-once"
 fix = "checker-holes (staged unlinks)"
 package = "lsr-sim"
 tests = ["store::tests::an_unsynced_unlink_comes_back_or_stays_done_under_the_block_law"]
+unaided_miss = "The plant sits in the simulator's own judge or model, so the swarm only meets it when a seed makes that judge's exempted case happen; the judge's unit test feeds the case directly."

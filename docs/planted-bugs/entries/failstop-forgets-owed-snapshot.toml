@@ -5,3 +5,4 @@ package = "lsr-core"
 tests = [
     "lag::a_snapshot_owed_after_a_rewind_keeps_the_lag_once_the_replica_has_the_files",
 ]
+unaided_miss = "Fail-stop needs an outage or doubt held past the age bound with the write gate in play, a scenario longer than the swarm's draw; only the named failstop scenarios and lag tests reach it."

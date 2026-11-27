@@ -7,3 +7,4 @@ tests = [
     "compact::tests::the_replica_window_is_the_budget_shared_out",
     "compact::tests::a_full_staged_merge_holds_the_staging_budget",
 ]
+unaided_miss = "Holds four times the staging budget in read windows and changes no restored page; the swarm's databases are too small to fill a window, and only the window tests see it."

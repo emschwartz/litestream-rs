@@ -4,3 +4,4 @@ package = "lsr-core"
 tests = [
     "lag::a_timeout_at_boot_is_no_refusal",
 ]
+unaided = 50

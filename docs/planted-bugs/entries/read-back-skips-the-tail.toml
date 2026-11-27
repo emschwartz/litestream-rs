@@ -7,3 +7,4 @@ tests = [
     "audit::a_newest_file_cut_short_is_caught_and_rebuilt",
     "maintain::audit::tests::a_file_cut_short_fails",
 ]
+unaided_miss = "Needs a newest file cut short at its tail with the header intact, a damage the swarm's damage draw does not aim at; only the audit tests feed it."

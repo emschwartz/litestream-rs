@@ -8,3 +8,4 @@ package = "lsr-core"
 tests = [
     "recover::tests::rule_6_a_pinned_position_with_no_frames_follows_a_new_header_with_any_salts",
 ]
+unaided = 300

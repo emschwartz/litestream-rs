@@ -4,3 +4,4 @@ package = "lsr-core"
 tests = [
     "a_commit_after_the_tick_began_is_not_stamped_before_it_landed",
 ]
+unaided = 68

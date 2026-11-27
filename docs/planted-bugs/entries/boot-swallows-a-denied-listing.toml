@@ -4,3 +4,4 @@ fix = "claude/sweep-judge"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["remote_s3::only_a_permission_refusal_of_the_sweep_is_exempt"]
+unaided = 132

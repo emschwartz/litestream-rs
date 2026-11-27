@@ -4,3 +4,4 @@ name = "fill-waits-on-the-wrong-level"
 fix = "claude/level-holes"
 package = "lsr-core"
 tests = ["maintain::tests::a_fill_that_starts_two_levels_down_waits_for_the_level_it_writes"]
+unaided_miss = "The compaction, listing or retention state it breaks needs a backlog, a stale carried listing or a hole in a level that the swarm's short runs do not build; only core unit tests set that state directly."

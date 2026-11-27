@@ -5,3 +5,4 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["needless_snapshot::a_power_loss_between_ticks_that_takes_a_sent_staged_file_forces_the_snapshot"]
+unaided_miss = "The plant sits in the simulator's own judge or model, so the swarm only meets it when a seed makes that judge's exempted case happen; the judge's unit test feeds the case directly."

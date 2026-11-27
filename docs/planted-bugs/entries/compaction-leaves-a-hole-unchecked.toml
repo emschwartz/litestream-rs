@@ -4,3 +4,4 @@ name = "compaction-leaves-a-hole-unchecked"
 fix = "claude/level-holes"
 package = "lsr-core"
 tests = ["actor::tests::level_holes::a_short_pass_compaction_that_would_leave_a_hole_is_a_bug_and_writes_nothing"]
+unaided_miss = "The compaction, listing or retention state it breaks needs a backlog, a stale carried listing or a hole in a level that the swarm's short runs do not build; only core unit tests set that state directly."
