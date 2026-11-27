@@ -8,5 +8,5 @@ index 457fa3b23..6d81224c5 100644
          let ended = got < want;
 -        if read.is_err() || (ended && left.is_some_and(|left| left > 0)) {
 +        if read.is_err() || (ended && left.is_some_and(|left| left > u64::from(u32::MAX))) {
-              self.state = State::Done;
+             self.state = State::Done;
              read?;
