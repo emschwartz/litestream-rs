@@ -356,7 +356,7 @@ mod cases {
         assert_eq!(done.status(), 200);
         let mut digests = Md5::digest(&big).to_vec();
         digests.extend_from_slice(&Md5::digest(&tail));
-        let want = format!("\"{}-2\"", lsr_store_s3::hex(&Md5::digest(&digests)));
+        let want = format!("\"{}-2\"", hex::encode(Md5::digest(&digests)));
         assert_eq!(parse_complete(&done).unwrap(), want);
         assert_eq!(done.header("etag"), Some(want.as_str()));
         let head = parse_head(&send(&fake, builder().head(now(), &k).unwrap())).unwrap();
