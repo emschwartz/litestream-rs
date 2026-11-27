@@ -1,7 +1,8 @@
 //! The header-and-tail check of the boot read-back, one case per way a file fails it.
 
 use lsr_ltx::{
-    Encoder, HeaderFields, INDEX_TAIL_LEN, PageNo, PageSize, Timestamp, Txid, TxidRange,
+    Encoder, HEADER_LEN, Header, HeaderFields, INDEX_TAIL_LEN, PageNo, PageSize, Timestamp, Txid,
+    TxidRange,
 };
 
 use super::*;
@@ -70,7 +71,7 @@ fn index_size(mut bytes: Vec<u8>, size: u64) -> Vec<u8> {
 
 #[test]
 fn the_reads_are_a_header_and_the_tail_past_the_index() {
-    assert_eq!(HEAD.get(), u64::try_from(HEADER_LEN).unwrap());
+    assert_eq!(HEADER_READ.get(), u64::try_from(HEADER_LEN).unwrap());
     assert_eq!(TAIL.get(), u64::try_from(INDEX_TAIL_LEN + 1).unwrap());
 }
 

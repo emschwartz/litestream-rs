@@ -1,11 +1,11 @@
 diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
-index 581d4fbd2..3c0dc6774 100644
+index 09ce5ccde..78023ce5c 100644
 --- a/crates/core/src/upload.rs
 +++ b/crates/core/src/upload.rs
-@@ -907,7 +907,7 @@ async fn taken<L: Role, S: Role>(
-     // One read never condemns a file: the staged copy must verify on a read
-     // of its own before the replica's object is judged against it.
-     if !staged_verifies(staging, &key).await.map_err(relist)? {
+@@ -858,7 +858,7 @@ async fn taken<L: Role, S: Role>(
+         .map_err(relist)?
+         .is_none()
+     {
 -        return Err(fail(state, Fault::StagedLost));
 +        return Ok(Some(already));
      }

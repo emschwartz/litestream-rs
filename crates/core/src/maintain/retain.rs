@@ -103,7 +103,7 @@ use std::time::Duration;
 use lsr_ltx::{Timestamp, Txid};
 
 use super::{DeleteJob, L0Retention, MAX_DELETE, MaintainState, Maintenance, RetentionHold};
-use crate::created_at::{Need, Resolve, ResolvedCreatedAt};
+use crate::created_at::{Need, ResolvedCreatedAt};
 use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::{CreatedAt, FileInfo, FileKey, Level, NonZeroCreatedAt};
 use crate::plan::{KeyTarget, PlanOutcome, plan, plan_without};
@@ -144,17 +144,6 @@ type Needs<T> = Result<T, Need>;
 /// The next delete job, or why there is none, or the one created-at time needed before
 /// either is known. See the module docs.
 pub(super) fn retention(
-    inventory: &Inventory,
-    now: Timestamp,
-    config: &Maintenance,
-    published: Option<Txid>,
-    state: &MaintainState,
-    resolved: &ResolvedCreatedAt,
-) -> Resolve<Retention> {
-    decide(inventory, now, config, published, state, resolved).into()
-}
-
-fn decide(
     inventory: &Inventory,
     now: Timestamp,
     config: &Maintenance,
@@ -680,18 +669,6 @@ pub(super) struct ShortZero {
 /// caller runs this only while the last full listing passed that gate, and the module doc of
 /// `short` argues why that is enough.
 pub(super) fn short_level_zero(
-    listed: &Inventory,
-    known: &[FileInfo],
-    now: Timestamp,
-    config: &Maintenance,
-    published: Option<Txid>,
-    state: &MaintainState,
-    resolved: &ResolvedCreatedAt,
-) -> Resolve<ShortZero> {
-    short_decide(listed, known, now, config, published, state, resolved).into()
-}
-
-fn short_decide(
     listed: &Inventory,
     known: &[FileInfo],
     now: Timestamp,

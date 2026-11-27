@@ -51,8 +51,8 @@ fn retention_state(
         state,
         &ResolvedCreatedAt::default(),
     ) {
-        Resolve::Done(retention) => retention,
-        Resolve::Need(file) => panic!("a stored listing asked for a created-at time: {file:?}"),
+        Ok(retention) => retention,
+        Err(file) => panic!("a stored listing asked for a created-at time: {file:?}"),
     }
 }
 
@@ -1783,14 +1783,14 @@ impl Lazy {
         let inventory = crate::conformance::block_on(Inventory::load(&self.store)).unwrap();
         let mut asked = Vec::new();
         let mut step = |resolved: &ResolvedCreatedAt| {
-            let got = super::retention(
+            let got = Resolve::from(super::retention(
                 &inventory,
                 at(now),
                 cfg,
                 None,
                 &MaintainState::default(),
                 resolved,
-            );
+            ));
             if let Resolve::Need(file) = &got {
                 asked.push(file.first().key);
             }

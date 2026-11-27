@@ -30,7 +30,7 @@ use std::io::{Read, Seek};
 
 use lsr_ltx::{HEADER_LEN, Header, Txid};
 
-use super::{BootWal, NEWEST_STAGED_READ, NewestStagedFile, NewestStagedFileSource, Origin};
+use super::{BootWal, NEWEST_STAGED_READ, NewestStagedFile, Origin};
 use crate::fault::Fault;
 use crate::fault::role::{Replica, Role};
 use crate::layout::FileKey;
@@ -75,12 +75,7 @@ impl NewestStagedFile {
         let Some(origin) = Origin::of(&header) else {
             return Ok(None);
         };
-        let file = NewestStagedFileSource {
-            store: remote,
-            key,
-            fault: S::fault,
-        };
-        let view = Self::checked(&file, Some(first), &header, origin, wal).await?;
+        let view = Self::checked(remote, key, S::fault, Some(first), &header, origin, wal).await?;
         view.map(Some).ok_or(Fault::RemoteCorrupt)
     }
 }

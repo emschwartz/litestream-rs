@@ -1,13 +1,15 @@
 diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
-index 5c326fa..a395bea 100644
+index 09ce5ccde..e30f88088 100644
 --- a/crates/core/src/upload.rs
 +++ b/crates/core/src/upload.rs
-@@ -608,7 +608,7 @@ async fn judge_tail<L: ObjectStore, S: ObjectStore>(
+@@ -454,9 +454,7 @@ async fn judge_tail<L: Role, S: Role>(
      }
      // One read never condemns a file: a staged copy that fails to verify is
      // read again before it is taken as torn.
--    if !staged_verifies(staging, &key).await? && !staged_verifies(staging, &key).await? {
-+    if !staged_verifies(staging, &key).await? {
+-    if staged_verified(staging, &key).await?.is_none()
+-        && staged_verified(staging, &key).await?.is_none()
+-    {
++    if staged_verified(staging, &key).await?.is_none() {
          // Torn on two reads: it says nothing about the replica's object.
          return remote_decodes(remote, &key)
              .await

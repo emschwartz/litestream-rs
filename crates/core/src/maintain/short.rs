@@ -865,7 +865,7 @@ fn decide(
     if config.retention() == RetentionMode::Off || !tail.plan.retention {
         return Ok(ShortDecided::wait(until, quiet, snapshot_quiet));
     }
-    let zero = match short_level_zero(
+    let zero = short_level_zero(
         &tail.listed,
         &tail.newest_known(),
         now,
@@ -873,10 +873,7 @@ fn decide(
         published,
         state,
         resolved,
-    ) {
-        Resolve::Done(zero) => zero,
-        Resolve::Need(file) => return Err(file),
-    };
+    )?;
     let settled_min = zero.settled_min;
     let until = soonest(until, zero.wake);
     let mut decided = match DeleteJob::new(zero.keys) {

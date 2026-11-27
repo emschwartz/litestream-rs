@@ -169,14 +169,10 @@ pub(crate) fn once_retention(
         RetentionMode::Enforce => {
             let config = config.without_level_zero();
             match retention(inventory, now, &config, published, state, resolved) {
-                Resolve::Done(Retention::Delete(job)) => {
-                    Resolve::Done(Some(OnceRetention::Delete(job)))
-                }
-                Resolve::Done(Retention::Wait { .. }) => Resolve::Done(Some(OnceRetention::Done)),
-                Resolve::Done(Retention::Held(hold)) => {
-                    Resolve::Done(Some(OnceRetention::Held(hold)))
-                }
-                Resolve::Need(file) => Resolve::Need(file),
+                Ok(Retention::Delete(job)) => Resolve::Done(Some(OnceRetention::Delete(job))),
+                Ok(Retention::Wait { .. }) => Resolve::Done(Some(OnceRetention::Done)),
+                Ok(Retention::Held(hold)) => Resolve::Done(Some(OnceRetention::Held(hold))),
+                Err(file) => Resolve::Need(file),
             }
         }
     }
@@ -657,12 +653,7 @@ fn decide(
                 retention_wake: None,
             });
         }
-        RetentionMode::Enforce => {
-            match retention(inventory, now, config, published, state, resolved) {
-                Resolve::Done(retained) => retained,
-                Resolve::Need(file) => return Err(file),
-            }
-        }
+        RetentionMode::Enforce => retention(inventory, now, config, published, state, resolved)?,
     };
     Ok(match retained {
         Retention::Delete(job) => Decided {

@@ -1,12 +1,13 @@
 diff --git a/crates/core/src/created_at.rs b/crates/core/src/created_at.rs
+index 21c5975be..3fedcbb82 100644
 --- a/crates/core/src/created_at.rs
 +++ b/crates/core/src/created_at.rs
 @@ -75,7 +75,7 @@ impl Known {
-         } else {
-             let level = self.above.entry(info.key.level()).or_default();
-             level.insert(info.key.range().max(), info);
--            while level.len() > MAX_KNOWN_ABOVE {
-+            while level.len() > 1 {
-                 level.pop_first();
-             }
+         if info.created_at().is_none() {
+             return;
          }
+-        let cap = Self::cap(info.key.level());
++        let cap = if info.key.level() == Level::ZERO { MAX_KNOWN } else { 1 };
+         let files = self.levels.entry(info.key.level()).or_default();
+         files.insert(info.key.range().max(), info);
+         while files.len() > cap {

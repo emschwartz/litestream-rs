@@ -124,11 +124,7 @@ impl Inventory {
     /// The first failed page in level order, or a cursor that does not
     /// advance. Never a partial inventory.
     pub async fn load<S: ObjectStore>(store: &S) -> Result<Self, InventoryError> {
-        let all: Vec<ListAt> = Level::ALL
-            .iter()
-            .map(|&level| ListAt::first(level))
-            .collect();
-        Self::load_from(store, &all).await
+        Self::load_from(store, &Level::ALL.map(ListAt::first)).await
     }
 
     /// Lists each of `starts` to the end and returns what was listed: an inventory of those
@@ -262,7 +258,7 @@ impl Inventory {
     /// The last transaction any file covers.
     #[must_use]
     pub fn newest(&self) -> Option<Txid> {
-        self.files.iter().map(|info| info.key.range().max()).max()
+        Listed::all(self).newest()
     }
 
     /// Unrecognized names seen in one level.
@@ -283,11 +279,7 @@ impl Inventory {
     /// snapshot, always worth telling an operator about.
     #[must_use]
     pub fn malformed_snapshots(&self) -> Vec<FileKey> {
-        self.files
-            .iter()
-            .filter(|info| info.key.level().is_snapshot() && !is_snapshot_start(info))
-            .map(|info| info.key)
-            .collect()
+        Listed::all(self).malformed_snapshots()
     }
 }
 
@@ -335,11 +327,7 @@ impl Listing {
     /// # Errors
     /// As [`Inventory::load`].
     pub(crate) async fn begin<S: ObjectStore>(store: &S) -> Result<Self, InventoryError> {
-        let all: Vec<ListAt> = Level::ALL
-            .iter()
-            .map(|&level| ListAt::first(level))
-            .collect();
-        let mut listing = Self::new(&all);
+        let mut listing = Self::new(&Level::ALL.map(ListAt::first));
         while listing
             .going
             .iter()
