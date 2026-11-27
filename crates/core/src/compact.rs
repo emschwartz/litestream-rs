@@ -864,7 +864,8 @@ impl Compacting {
             let out = self.buf.out();
             let sent = self.handoff.send(&mut self.upload, out, room);
             left = sent.await.map_err(CompactError::Dest)?;
-            if left == Some(room) {
+            // A pass hands over all that waits while room is left, else the loop spins.
+            if left.is_some() && !self.buf.out().is_empty() {
                 return Err(CompactError::Bug(BugSite::Encode.hit()));
             }
         }

@@ -265,7 +265,9 @@ impl Snapshotting {
                 .encode(&plan, &mut reader, db, pages, self.pinned)?;
             let sent = self.handoff.send(open, self.filling.out(), room);
             left = sent.await.map_err(|err| S::fault(&err))?;
-            crate::invariant!(left != Some(room), BugSite::Encode);
+            // A pass hands over a byte, and all that waits while room is left: else the loop spins.
+            let drained = left.is_none() || self.filling.out().is_empty();
+            crate::invariant!(left != Some(room) && drained, BugSite::Encode);
         }
         pages.pin_past(self.filling.next());
         if !self.filling.whole() {
