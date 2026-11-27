@@ -11,7 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-# The provider the S3 store's TLS clients need: this crate's tests build a real `S3Store`.
+# A crypto provider for the S3 store's TLS clients, which enable none.
 rustls = { workspace = true, features = ["aws-lc-rs", "std"] }
 lsr-config.workspace = true
 lsr-core = { workspace = true, features = ["testing"] }
