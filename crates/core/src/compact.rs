@@ -841,7 +841,7 @@ impl Compacting {
         budget: u64,
         patient: bool,
     ) -> Result<Option<Trailer>, CompactError> {
-        self.handoff.restart();
+        self.handoff.waits = false;
         let read_until = self.merge.bytes_read.saturating_add(budget);
         // Zero once the budget is spent, as a snapshot's slice counts it (`crate::snapshot`).
         let mut left = NonZeroU64::new(budget);

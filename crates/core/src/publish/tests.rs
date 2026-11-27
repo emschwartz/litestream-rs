@@ -220,11 +220,10 @@ fn a_handoff_asks_the_parts_unless_patient_and_notes_when_it_waits() {
     assert!(!handoff.waits, "room for a write");
     assert!(!block_on(handoff.clear(&mut open, Rest::More, false)).unwrap());
     assert!(handoff.waits, "a whole part waits");
-    handoff.restart();
-    assert!(!handoff.waits);
+    handoff.waits = false;
     assert!(!block_on(handoff.clear(&mut open, Rest::None, false)).unwrap());
     assert!(handoff.waits, "a part is still out at the end");
-    handoff.restart();
+    handoff.waits = false;
     assert!(block_on(handoff.clear(&mut open, Rest::None, false)).unwrap());
     assert!(!handoff.waits);
     assert_eq!(

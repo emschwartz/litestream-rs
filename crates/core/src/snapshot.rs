@@ -242,7 +242,7 @@ impl Snapshotting {
         budget: u64,
         patient: bool,
     ) -> Result<Option<FileInfo>, Fault> {
-        self.handoff.restart();
+        self.handoff.waits = false;
         self.holds(wal, pages)?;
         let mut reader = self.reader(wal)?;
         let plan = Plan::new(&self.map, None, self.commit, self.page_size);

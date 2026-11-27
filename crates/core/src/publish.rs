@@ -71,11 +71,6 @@ pub(crate) struct Handoff {
 }
 
 impl Handoff {
-    /// Starts a slice: it has not stopped for the parts yet.
-    pub(crate) const fn restart(&mut self) {
-        self.waits = false;
-    }
-
     /// Whether a slice may go on handing over bytes (`rest`: [`Upload::flight`]). `patient`
     /// waits for the parts inside the write instead, so it never asks. When the parts are in
     /// the way, `waits` says the slice stopped for them.
