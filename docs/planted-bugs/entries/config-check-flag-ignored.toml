@@ -1,0 +1,7 @@
+name = "config-check-flag-ignored"
+fix = "claude/cli-version"
+package = "lsr-cli"
+bin = "lsr"
+tests = [
+    "args::tests::config_check_takes_the_file_positionally_or_as_config",
+]

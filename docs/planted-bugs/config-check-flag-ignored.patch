@@ -1,0 +1,13 @@
+diff --git a/crates/cli/src/args.rs b/crates/cli/src/args.rs
+index 4509b8a2f..741acafe6 100644
+--- a/crates/cli/src/args.rs
++++ b/crates/cli/src/args.rs
+@@ -842,7 +842,7 @@ fn parse_config(rest: &[String]) -> Result<Command, UsageError> {
+             let found = args.len();
+             let set = inspect::scan(&[goflag::value("config")], args)?
+                 .ok_or(UsageError::ConfigCheckArguments { found })?;
+-            let flag = set.value("config");
++            let flag = set.value("config").filter(|_| false);
+             match (set.positional(), flag) {
+                 ([file], None) => Ok(Command::ConfigCheck(PathBuf::from(file))),
+                 ([], Some(file)) if !file.is_empty() => {

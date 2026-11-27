@@ -1,0 +1,13 @@
+diff --git a/crates/cli/src/args.rs b/crates/cli/src/args.rs
+index 4509b8a2f..16d70166f 100644
+--- a/crates/cli/src/args.rs
++++ b/crates/cli/src/args.rs
+@@ -848,7 +848,7 @@ fn parse_config(rest: &[String]) -> Result<Command, UsageError> {
+                 ([], Some(file)) if !file.is_empty() => {
+                     Ok(Command::ConfigCheck(PathBuf::from(file)))
+                 }
+-                ([_, ..], Some(_)) => Err(UsageError::ConfigCheckBoth),
++                ([file, ..], Some(_)) => Ok(Command::ConfigCheck(PathBuf::from(file))),
+                 _ => Err(UsageError::ConfigCheckArguments { found }),
+             }
+         }

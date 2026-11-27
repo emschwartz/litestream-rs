@@ -77,16 +77,41 @@ pub fn done(done: &Done) -> String {
         Done::DaemonHelp(text) => (*text).to_owned(),
         Done::ConfigChecked(checked) => checked.to_string(),
         Done::Help => help(),
-        Done::Version => format!("lsr {}\n", env!("CARGO_PKG_VERSION")),
+        Done::Version => format!("lsr {}\n", version()),
         Done::VersionLine { verbose } => version_line(*verbose),
     }
 }
 
+/// Go's placeholder for a build that knows nothing of itself (`defaultVersion`).
+const DEVELOPMENT_BUILD: &str = "(development build)";
+
+/// Go's `resolveVersion` (`cmd/litestream/version.go`): a version the build was given
+/// (`LSR_VERSION`, Go's `-ldflags -X main.Version`), else the commit it was built from as
+/// `(development build <12 hex>)`, else the bare placeholder. Go also appends `-dirty` for a
+/// modified tree; this one names the commit only.
+fn resolve_version(injected: Option<&str>, commit: Option<&str>) -> String {
+    match (
+        injected.filter(|v| !v.is_empty() && *v != DEVELOPMENT_BUILD),
+        commit,
+    ) {
+        (Some(version), _) => version.to_owned(),
+        (None, Some(commit)) => {
+            format!("(development build {})", commit.get(..12).unwrap_or(commit))
+        }
+        (None, None) => DEVELOPMENT_BUILD.to_owned(),
+    }
+}
+
+/// This binary's version: `LSR_VERSION` at build time, else the commit `build.rs` found.
+fn version() -> String {
+    resolve_version(option_env!("LSR_VERSION"), option_env!("LSR_COMMIT"))
+}
+
 /// Go's `version` output (`cmd/litestream/version.go`): the bare version, or with `-verbose`
 /// labelled lines in Go's column. Go's Go-version, commit and commit-time lines are left out:
-/// this is not a Go build, and a script that reads the labelled lines gets the ones it has.
+/// this is not a Go build, and the version already names the commit.
 fn version_line(verbose: bool) -> String {
-    let version = env!("CARGO_PKG_VERSION");
+    let version = version();
     if !verbose {
         return format!("{version}\n");
     }
@@ -1034,7 +1059,8 @@ fn files_json(inventory: &Inventory, created_at_fallbacks: Option<u64>) -> Strin
 #[cfg(test)]
 mod tests {
     use super::{
-        LEVEL_HEADERS, databases_json, go_platform, levels_table, replan_line, version_line,
+        LEVEL_HEADERS, databases_json, go_platform, levels_table, replan_line, resolve_version,
+        version, version_line,
     };
     use lsr_core::{FileKey, Level, PlanOutcome, Replan};
     use lsr_ltx::{Txid, TxidRange};
@@ -1062,11 +1088,42 @@ mod tests {
         assert!(no_tail.contains("after transaction"), "{no_tail}");
     }
 
+    /// Go's `resolveVersion`: an injected version wins, then the commit as twelve hex digits,
+    /// then the bare placeholder; an empty or placeholder injection counts as none.
+    #[test]
+    fn the_version_names_the_commit_or_says_development_build() {
+        let commit = "3e0fdc0abcdef0123456789abcdef0123456789a";
+        assert_eq!(resolve_version(Some("v1.2.3"), Some(commit)), "v1.2.3");
+        assert_eq!(
+            resolve_version(None, Some(commit)),
+            "(development build 3e0fdc0abcde)"
+        );
+        for none in [None, Some(""), Some("(development build)")] {
+            assert_eq!(
+                resolve_version(none, Some(commit)),
+                "(development build 3e0fdc0abcde)"
+            );
+            assert_eq!(resolve_version(none, None), "(development build)");
+        }
+        assert_eq!(
+            resolve_version(None, Some("abc")),
+            "(development build abc)"
+        );
+    }
+
+    /// The version is never the manifest's placeholder, which said nothing of the build.
+    #[test]
+    fn the_built_version_is_not_the_manifest_placeholder() {
+        let version = version();
+        assert!(version.starts_with("(development build") || option_env!("LSR_VERSION").is_some());
+        assert_ne!(version, "0.0.0");
+    }
+
     /// Go prints the bare version and, with `-verbose`, labelled lines whose values start in
     /// one column (`cmd/litestream/version.go`).
     #[test]
     fn the_version_is_a_bare_line_and_verbose_is_go_s_labelled_lines() {
-        let version = env!("CARGO_PKG_VERSION");
+        let version = version();
         assert_eq!(version_line(false), format!("{version}\n"));
         let verbose = version_line(true);
         let lines: Vec<&str> = verbose.lines().collect();

@@ -577,9 +577,19 @@ fn help_and_version_print_to_stdout_and_exit_0() {
 #[test]
 fn the_version_command_prints_go_s_bare_line() {
     let run = lsr(&["version"]);
-    assert_eq!(
-        (run.code, run.stdout.as_str(), run.stderr.as_str()),
-        (0, concat!(env!("CARGO_PKG_VERSION"), "\n"), "")
+    let line = run.stdout.strip_suffix('\n').unwrap_or_default();
+    // What the build named: its `LSR_VERSION`, else Go's "(development build <commit>)".
+    let named = option_env!("LSR_VERSION")
+        .filter(|v| !v.is_empty())
+        .map_or_else(
+            || line.starts_with("(development build") && !line.contains('\n'),
+            |v| v == line,
+        );
+    assert!(
+        named && run.code == 0 && run.stderr.is_empty(),
+        "{line:?} {} {:?}",
+        run.code,
+        run.stderr
     );
     let verbose = lsr(&["version", "-verbose"]);
     assert_eq!(verbose.code, 0);
