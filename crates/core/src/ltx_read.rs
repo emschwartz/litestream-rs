@@ -1,7 +1,7 @@
 //! Reading one LTX object from a store, in bounded chunks, through one decoder.
 //!
 //! Every reader of whole files goes through [`LtxRead`]: restore, compaction,
-//! verify, the recovery check of the staged newest staged file and the page table's seeding.
+//! verify, the newest staged file's recovery check and the page table's seeding.
 //! It owns the three rules each of them used to repeat by hand:
 //! - The listed size is advisory: only the decoder knows where a file ends.
 //! - A chunk shorter than asked is the end of the object (the read contract
@@ -78,25 +78,9 @@ pub(crate) fn check_link(before: LinkEnd, header: &Header) -> Result<(), BrokenL
 #[cfg(test)]
 mod tests;
 
-/// Reads `key` through the decoder, `len` bytes at a time, and says whether it
-/// verifies whole and names exactly `key`. `store_fault` names a store error,
-/// which is never a verdict on the bytes.
-///
-/// # Errors
-/// The store's fault when a read fails.
-pub(crate) async fn verifies<S: ObjectStore>(
-    store: &S,
-    key: &FileKey,
-    len: ReadLen,
-    store_fault: fn(&StoreError) -> Fault,
-) -> Result<bool, Fault> {
-    verified(store, key, len, store_fault)
-        .await
-        .map(|summary| summary.is_some())
-}
-
-/// Reads `key` as [`verifies`] does and hands back what verified: the summary of a file that
-/// decoded whole and names exactly `key`, or `None`.
+/// Reads `key` through the decoder, `len` bytes at a time, and hands back what verified:
+/// the summary of a file that decoded whole and names exactly `key`, or `None`.
+/// `store_fault` names a store error, which is never a verdict on the bytes.
 ///
 /// # Errors
 /// The store's fault when a read fails.

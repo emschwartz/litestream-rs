@@ -103,7 +103,7 @@ use crate::fault::role::{Replica, Role, Staging};
 use crate::fault::{BugSite, Fault};
 use crate::inventory::{EmptyLevels, Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey, Level};
-use crate::ltx_read::{verified, verifies};
+use crate::ltx_read::verified;
 use crate::publish::{self, Open, Unpublished, Writer};
 use crate::store::{
     Again, BoxFuture, Flight, ListAt, ObjectStore, Opened, PageLimit, ReadLen, Reread, Rest, Seen,
@@ -457,7 +457,9 @@ async fn judge_tail<L: Role, S: Role>(
     }
     // One read never condemns a file: a staged copy that fails to verify is
     // read again before it is taken as torn.
-    if !staged_verifies(staging, &key).await? && !staged_verifies(staging, &key).await? {
+    if staged_verified(staging, &key).await?.is_none()
+        && staged_verified(staging, &key).await?.is_none()
+    {
         // Torn on two reads: it says nothing about the replica's object.
         return remote_decodes(remote, &key)
             .await
@@ -534,7 +536,9 @@ async fn remote_decodes<S: Role>(remote: &S, key: &FileKey) -> Result<(), Fault>
 /// # Errors
 /// The replica's fault when a read fails: that says nothing about the bytes.
 pub(crate) async fn remote_verifies<S: Role>(remote: &S, key: &FileKey) -> Result<bool, Fault> {
-    verifies(remote, key, CHUNK, S::fault).await
+    verified(remote, key, CHUNK, S::fault)
+        .await
+        .map(|summary| summary.is_some())
 }
 
 /// Whether the replica's object `key` fails verification on two reads in a
@@ -545,15 +549,8 @@ async fn remote_torn<S: Role>(remote: &S, key: &FileKey) -> Result<bool, Fault> 
     Ok(!remote_verifies(remote, key).await? && !remote_verifies(remote, key).await?)
 }
 
-/// Whether the staged file `key` verifies whole and names exactly `key`.
-/// A missing or unusable one does not; any other store error is the fault.
-async fn staged_verifies<L: Role>(staging: &L, key: &FileKey) -> Result<bool, Fault> {
-    staged_verified(staging, key)
-        .await
-        .map(|summary| summary.is_some())
-}
-
-/// What verified of the staged file `key`, as [`staged_verifies`] reads it.
+/// What verified of the staged file `key`: its summary when it verifies whole and names
+/// exactly `key`. A missing or unusable one does not; any other store error is the fault.
 async fn staged_verified<L: Role>(staging: &L, key: &FileKey) -> Result<Option<Verified>, Fault> {
     match verified(staging, key, CHUNK, L::fault).await {
         Err(Fault::StagedLost) => Ok(None),
@@ -859,7 +856,11 @@ async fn taken<L: Role, S: Role>(
     }
     // One read never condemns a file: the staged copy must verify on a read
     // of its own before the replica's object is judged against it.
-    if !staged_verifies(staging, &key).await.map_err(relist)? {
+    if staged_verified(staging, &key)
+        .await
+        .map_err(relist)?
+        .is_none()
+    {
         return Err(fail(state, Fault::StagedLost));
     }
     if remote_torn(remote, &key).await.map_err(relist)? {
