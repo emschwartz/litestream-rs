@@ -447,6 +447,7 @@ fn settings(
         verify_interval: config.validation_interval().and_then(positive),
         if_replication_stops: config.rust().if_replication_stops(),
         max_unreplicated_age: config.rust().max_unreplicated_age(),
+        snapshot_read_limit: config.rust().snapshot_read_limit(),
         write_behind: more_than_one_core(),
     })
 }

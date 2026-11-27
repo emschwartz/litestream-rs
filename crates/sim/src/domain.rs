@@ -70,7 +70,7 @@ pub enum SourceClass {
 }
 
 /// Every source operation, in declaration order ([`source_ordinal`] checks it).
-pub const SOURCE_OPS: [SourceOp; 12] = [
+pub const SOURCE_OPS: [SourceOp; 13] = [
     SourceOp::Open,
     SourceOp::Len,
     SourceOp::Committed,
@@ -83,6 +83,7 @@ pub const SOURCE_OPS: [SourceOp; 12] = [
     SourceOp::BeginWriteLock,
     SourceOp::EndWriteLock,
     SourceOp::Sync,
+    SourceOp::RenewRead,
 ];
 
 /// Every source error class, in declaration order ([`source_class`] checks it).
@@ -114,6 +115,7 @@ pub const fn source_ordinal(op: SourceOp) -> usize {
         SourceOp::BeginWriteLock => 9,
         SourceOp::EndWriteLock => 10,
         SourceOp::Sync => 11,
+        SourceOp::RenewRead => 12,
     }
 }
 
@@ -186,7 +188,8 @@ const fn io_cell(op: SourceOp) -> Cell {
         | SourceOp::Checkpoint
         | SourceOp::BumpSeq
         | SourceOp::BeginWriteLock
-        | SourceOp::EndWriteLock => Cell::Drawn,
+        | SourceOp::EndWriteLock
+        | SourceOp::RenewRead => Cell::Drawn,
     }
 }
 
@@ -204,7 +207,8 @@ const fn disk_full_cell(op: SourceOp) -> Cell {
         | SourceOp::Len
         | SourceOp::Committed
         | SourceOp::PageCount
-        | SourceOp::ReadPage => Cell::Impossible(WRITES_NOTHING),
+        | SourceOp::ReadPage
+        | SourceOp::RenewRead => Cell::Impossible(WRITES_NOTHING),
     }
 }
 
@@ -226,7 +230,8 @@ const fn fsync_cell(op: SourceOp) -> Cell {
         | SourceOp::Checkpoint
         | SourceOp::BumpSeq
         | SourceOp::BeginWriteLock
-        | SourceOp::EndWriteLock => Cell::Impossible(NOT_FSYNC),
+        | SourceOp::EndWriteLock
+        | SourceOp::RenewRead => Cell::Impossible(NOT_FSYNC),
     }
 }
 
@@ -243,13 +248,14 @@ const fn short_cell(op: SourceOp) -> Cell {
         | SourceOp::BumpSeq
         | SourceOp::BeginWriteLock
         | SourceOp::EndWriteLock
-        | SourceOp::Sync => Cell::Impossible(NOT_A_PAGE),
+        | SourceOp::Sync
+        | SourceOp::RenewRead => Cell::Impossible(NOT_A_PAGE),
     }
 }
 
 const fn read_tx_lost_cell(op: SourceOp) -> Cell {
     match op {
-        SourceOp::Checkpoint => Cell::Drawn,
+        SourceOp::Checkpoint | SourceOp::RenewRead => Cell::Drawn,
         SourceOp::Committed | SourceOp::Sync | SourceOp::PageCount | SourceOp::ReadPage => {
             Cell::Impossible(RETAKE_ONLY)
         }
@@ -275,6 +281,9 @@ const fn busy_cell(op: SourceOp) -> Cell {
         SourceOp::EndBarrier | SourceOp::EndWriteLock => {
             Cell::Impossible("a rollback releases locks and takes none")
         }
+        SourceOp::RenewRead => {
+            Cell::Impossible("lsr-sqlite reports a retake that fails as ReadTxLost")
+        }
         SourceOp::Open
         | SourceOp::Len
         | SourceOp::PageCount
@@ -297,7 +306,8 @@ const fn unlinked_cell(op: SourceOp) -> Cell {
         | SourceOp::BumpSeq
         | SourceOp::BeginWriteLock
         | SourceOp::EndWriteLock
-        | SourceOp::Sync => Cell::Impossible(NOT_THE_WAL_PATH),
+        | SourceOp::Sync
+        | SourceOp::RenewRead => Cell::Impossible(NOT_THE_WAL_PATH),
     }
 }
 

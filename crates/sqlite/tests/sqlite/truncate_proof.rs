@@ -112,6 +112,11 @@ impl Checkpointer for Hooked {
         run
     }
 
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError> {
+        hook(SourceOp::RenewRead);
+        self.0.renew_read()
+    }
+
     fn bump_seq(&mut self) -> Result<(), SourceError> {
         hook(SourceOp::BumpSeq);
         self.0.bump_seq()

@@ -9,9 +9,9 @@
 //! The page sources are the sync step's snapshot step ([`scan_whole`],
 //! [`plan_pages`], the shared `stage`): frames of the current generation up to
 //! the synced end win, the database file supplies the rest, and the page count is
-//! the proof's last commit. The read transaction pins the WAL at our mark, so
-//! another process may copy frames at or below the mark into the database file
-//! while the file is read. Every such frame is at or below the synced end, so it is in the
+//! the proof's last commit. The read transaction pins the WAL at our mark, so a
+//! other process may copy frames at or below the mark into the database file while the
+//! file is read. Every such frame is at or below the synced end, so it is in the
 //! page map and the map wins: a page torn by a concurrent backfill is never read.
 //! That argument needs the synced end to be at or above the wal-index's
 //! `nBackfill`; a proof below it cannot be a proof from this read transaction and
@@ -34,7 +34,7 @@ use crate::layout::{FileInfo, FileKey};
 use crate::pages::PageChecksumTable;
 use crate::position::{Continuity, ReadLockHold, SyncedThrough};
 use crate::publish::{Handoff, Open, Writer};
-use crate::source::{CommittedRead, PageSource, WalSource};
+use crate::source::{CommittedRead, PageSource, SourceError, WalSource};
 use crate::store::{Rest, WriteMode};
 use crate::sync::{Filling, PageFrom, Plan, clamp, scan_whole};
 use crate::verify::LivePages;
@@ -99,8 +99,9 @@ struct Whole {
     page_size: PageSize,
 }
 
-/// The checks a whole-database read makes before it reads a page, and its plan (see the module
-/// doc for which source wins).
+/// The checks a whole-database read makes before it reads a page, and its plan: the WAL
+/// frames of the current generation up to the synced end win, the database file supplies
+/// the rest, and the page count is the proof's last commit.
 fn whole<W: WalSource>(proof: &SyncedThrough, wal: &mut W) -> Result<Whole, Fault> {
     let position = proof.position();
     let mut reader = open_wal(wal)?;
@@ -144,7 +145,7 @@ fn whole<W: WalSource>(proof: &SyncedThrough, wal: &mut W) -> Result<Whole, Faul
 /// read transaction the proof was taken under is held throughout, and SQLite copies no frame
 /// past its read mark into the database file: the mark is at or below the synced end, whose
 /// frames the page map holds and which win over the file. Each slice first reads the
-/// wal-index again: another hold of the read transaction, another WAL generation or a
+/// wal-index again (a torn read is read again, up to [`TORN_READS`] reads): another hold of the read transaction, another WAL generation or a
 /// backfill past the synced end ends the snapshot before it reads a page, and so does the
 /// table's pin let go (a snapshot step emptied it). A database-file page is checked against
 /// the table as it stood when the snapshot began ([`PageChecksumTable::pin`]).
@@ -264,6 +265,7 @@ impl Snapshotting {
                 .encode(&plan, &mut reader, db, pages, self.pinned)?;
             let sent = self.handoff.send(open, self.filling.out(), room);
             left = sent.await.map_err(|err| S::fault(&err))?;
+            // A pass hands over a byte, and all that waits while room is left: else the loop spins.
             let drained = left.is_none() || self.filling.out().is_empty();
             crate::invariant!(left != Some(room) && drained, BugSite::Encode);
         }
@@ -299,7 +301,7 @@ impl Snapshotting {
     /// transaction, the same WAL generation, nothing copied into the database file past the
     /// synced end, and, for a snapshot the engine syncs beside, the table's pin.
     fn holds<W: WalSource>(&self, wal: &mut W, pages: &PageChecksumTable) -> Result<(), Fault> {
-        let committed = wal.committed().map_err(Fault::from_source)?;
+        let committed = committed_untorn(wal)?;
         if committed.epoch() != self.epoch {
             return Err(Fault::ReadTxLost);
         }
@@ -369,6 +371,26 @@ pub(crate) fn read_live<W: WalSource, P: PageSource>(
     ))
 }
 
+/// Reads of the wal-index header one check makes before a torn read ends the snapshot.
+pub(crate) const TORN_READS: u32 = 8;
+
+/// The committed end, read again while the read is torn: a writer was between the header's two
+/// copies (the source's `SourceError::Busy`, about one read in thirty under write load), a window
+/// of a few hundred nanoseconds. Each slice of a snapshot reads it, so a snapshot of a large
+/// database meets one every few seconds; taken as a fault, it threw away every byte sent and
+/// began again from the first page, holding checkpoints back the whole time.
+fn committed_untorn<W: WalSource>(wal: &mut W) -> Result<CommittedRead, Fault> {
+    let mut read = wal.committed();
+    for _ in 1..TORN_READS {
+        if read != Err(SourceError::Busy) {
+            break;
+        }
+        read = wal.committed();
+    }
+    read.map_err(Fault::from_source)
+}
+
+/// The WAL opened and its header read.
 fn open_wal<W: WalSource>(wal: &mut W) -> Result<WalReader<W::Wal>, Fault> {
     let file = wal
         .open()

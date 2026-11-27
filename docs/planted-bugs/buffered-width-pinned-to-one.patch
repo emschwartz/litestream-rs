@@ -1,0 +1,13 @@
+diff --git a/crates/store-s3/src/upload.rs b/crates/store-s3/src/upload.rs
+index 230053959..8afabde10 100644
+--- a/crates/store-s3/src/upload.rs
++++ b/crates/store-s3/src/upload.rs
+@@ -544,7 +544,7 @@ impl<T: Transport> S3Upload<T> {
+ 
+     /// Starts the part that waits when a lane is free; whether it did.
+     fn start_ready(&mut self) -> Result<bool, StoreError> {
+-        let width = self.inner.concurrency.get();
++        let width = if self.filling.sourced() { self.inner.concurrency.get() } else { 1 };
+         let Some(multi) = &mut self.multi else {
+             return Ok(false);
+         };

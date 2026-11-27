@@ -8,7 +8,9 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, Event, SourceError};
+use lsr_core::{
+    Barrier, CheckpointMode, CheckpointRun, Checkpointer, Event, ReadLockHold, SourceError,
+};
 use lsr_ltx::Timestamp;
 
 use crate::oracle::{Bound, Violation, within};
@@ -40,6 +42,7 @@ pub struct CheckpointTally {
     passive: Rc<Cell<u32>>,
     truncate: Rc<Cell<u32>>,
     full: Rc<Cell<u32>>,
+    backlog: Rc<Cell<u32>>,
 }
 
 impl CheckpointTally {
@@ -50,6 +53,7 @@ impl CheckpointTally {
             CheckpointMode::Passive => self.passive.get(),
             CheckpointMode::Truncate => self.truncate.get(),
             CheckpointMode::Full => self.full.get(),
+            CheckpointMode::Backlog => self.backlog.get(),
         }
     }
 
@@ -60,6 +64,7 @@ impl CheckpointTally {
             .get()
             .saturating_add(self.truncate.get())
             .saturating_add(self.full.get())
+            .saturating_add(self.backlog.get())
     }
 }
 
@@ -92,9 +97,15 @@ impl<C: Checkpointer> Checkpointer for CountingCheckpointer<C> {
             CheckpointMode::Passive => &self.tally.passive,
             CheckpointMode::Truncate => &self.tally.truncate,
             CheckpointMode::Full => &self.tally.full,
+            // Not a PASSIVE under the barrier, which the per-tick bound counts: the copy before it.
+            CheckpointMode::Backlog => &self.tally.backlog,
         };
         cell.set(cell.get().saturating_add(1));
         self.inner.checkpoint(mode)
+    }
+
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError> {
+        self.inner.renew_read()
     }
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {

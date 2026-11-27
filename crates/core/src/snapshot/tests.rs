@@ -680,6 +680,46 @@ fn a_slice_after_the_read_moved_ends_the_snapshot() {
     }
 }
 
+/// A wal-index header read that meets a writer between its two copies (the source's
+/// `SourceError::Busy`) is read again: the slice hands its bytes over and the snapshot goes on,
+/// instead of ending and starting again from its first page.
+#[test]
+fn a_torn_wal_index_read_does_not_end_the_snapshot() {
+    let mut rig = noisy();
+    let mut pages = PageChecksumTable::new();
+    pages.pin();
+    let mut snapshot = begun(&mut rig);
+    assert_eq!(slice(&mut rig, &mut snapshot, &mut pages, 100), Ok(None));
+    rig.wal.inject(SourceOp::Committed, SourceError::Busy);
+    let before = snapshot.handoff.sent;
+    assert_eq!(slice(&mut rig, &mut snapshot, &mut pages, 100), Ok(None));
+    assert!(snapshot.handoff.sent > before);
+}
+
+/// Torn reads are read again up to [`TORN_READS`] in all; one more ends the snapshot, as a
+/// wal-index that never reads whole must.
+#[test]
+fn torn_wal_index_reads_end_the_snapshot_only_past_the_bound() {
+    for (torn, ends) in [(TORN_READS - 1, false), (TORN_READS, true)] {
+        let mut rig = noisy();
+        let mut pages = PageChecksumTable::new();
+        pages.pin();
+        let mut snapshot = begun(&mut rig);
+        assert_eq!(slice(&mut rig, &mut snapshot, &mut pages, 100), Ok(None));
+        for _ in 0..torn {
+            rig.wal.inject(SourceOp::Committed, SourceError::Busy);
+        }
+        let sliced = slice(&mut rig, &mut snapshot, &mut pages, 100);
+        let expected = if ends {
+            Err(Fault::SqliteBusy)
+        } else {
+            Ok(None)
+        };
+        assert_eq!(sliced, expected, "{torn} torn reads");
+        block_on(snapshot.abort());
+    }
+}
+
 /// A database read that retakes the read transaction under the snapshot, as a checkpoint
 /// that slipped in would.
 struct Retaking {

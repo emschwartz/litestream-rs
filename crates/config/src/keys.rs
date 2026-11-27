@@ -324,6 +324,7 @@ const RUST: &[Key] = &[
     key("responses", Map(Section::Responses), Implemented),
     key("if-replication-stops", Str, Implemented),
     key("max-unreplicated-age", Duration, Implemented),
+    key("snapshot-read-limit", Bytes, Implemented),
 ];
 
 /// One per field of the replicator's responses.

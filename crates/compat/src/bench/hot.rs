@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OpenFlags};
 
 use super::app::App;
-use super::clock::{now, pause, pause_until, slot};
+use super::clock::{now, pause, pause_until_spinning, slot};
 use super::sys;
 use crate::error::CompatError;
 use crate::workload::SplitMix;
@@ -247,7 +247,7 @@ fn reader(job: &Job, hot: HotSet, index: u32) -> Result<Vec<Sample>, CompatError
             return Ok(samples);
         }
         let due = slot(base_instant, period, u32::try_from(k).unwrap_or(u32::MAX));
-        pause_until(due);
+        pause_until_spinning(due);
         let _len: i64 = stmt.query_row([hot.id(hot.pick(&mut rng))], |r| r.get(0))?;
         let late = now().saturating_duration_since(due);
         let due_ns = base_unix.saturating_add(
@@ -278,7 +278,7 @@ fn writer(job: &Job, hot: HotSet) -> Result<Vec<Sample>, CompatError> {
             return Ok(samples);
         }
         let due = slot(base_instant, period, u32::try_from(k).unwrap_or(u32::MAX));
-        pause_until(due);
+        pause_until_spinning(due);
         let began = now();
         let started_unix = unix_ns();
         let tx = conn.transaction()?;

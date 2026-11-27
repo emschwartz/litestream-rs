@@ -372,6 +372,7 @@ const fn source_op(op: SourceOp) -> &'static str {
         SourceOp::BeginWriteLock => "SourceOp::BeginWriteLock",
         SourceOp::EndWriteLock => "SourceOp::EndWriteLock",
         SourceOp::Sync => "SourceOp::Sync",
+        SourceOp::RenewRead => "SourceOp::RenewRead",
     }
 }
 

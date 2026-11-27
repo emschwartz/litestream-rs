@@ -1,0 +1,10 @@
+# An upload whose parts hold their bytes starts one part at a time whatever the concurrency
+# setting, as the 256 MiB budget did at a large part size, so 100 MiB parts at a concurrency of 2
+# have one part in flight.
+name = "buffered-width-pinned-to-one"
+fix = "plant"
+package = "lsr-store-s3"
+tests = [
+    "flight::large_parts_still_have_the_configured_number_in_flight",
+    "flight::an_upload_that_holds_its_parts_holds_those_in_flight_and_one_more",
+]

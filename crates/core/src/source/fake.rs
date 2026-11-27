@@ -69,6 +69,8 @@ pub enum SourceOp {
     EndWriteLock,
     /// `WalSource::sync`.
     Sync,
+    /// `Checkpointer::renew_read`.
+    RenewRead,
 }
 
 /// One-shot errors, consumed oldest first by the next call of their operation.
@@ -544,9 +546,11 @@ impl FakeWal {
         script: Option<CheckpointScript>,
     ) -> CheckpointRun {
         let mut state = lock(&self.state);
-        // A TRUNCATE runs on the writer connection and keeps the read transaction.
+        // A TRUNCATE and a backlog copy run on the writer connection and keep the read
+        // transaction.
         let truncate = mode == CheckpointMode::Truncate;
-        if !truncate {
+        let held = truncate || mode == CheckpointMode::Backlog;
+        if !held {
             state.read_mark = None;
         }
         let effect = script.map_or(CheckpointEffect::Natural, |s| s.effect);
@@ -584,7 +588,7 @@ impl FakeWal {
         }
         let log = state.mx_frame;
         let checkpointed = state.backfilled;
-        if !truncate {
+        if !held {
             state.epoch = state.epoch.next();
             state.take_read_lock();
         }
@@ -692,6 +696,8 @@ pub enum CheckpointCall {
     Checkpoint(CheckpointMode),
     /// `bump_seq`.
     BumpSeq,
+    /// `renew_read`.
+    RenewRead,
 }
 
 /// Records its calls and applies scripted checkpoint outcomes to a [`FakeWal`].
@@ -772,6 +778,15 @@ impl Checkpointer for FakeCheckpointer {
             return Err(SourceError::Busy);
         }
         Ok(self.wal.checkpoint_run(mode, script))
+    }
+
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError> {
+        self.enter(CheckpointCall::RenewRead, SourceOp::RenewRead)?;
+        let mut state = lock(&self.wal.state);
+        state.read_mark = None;
+        state.epoch = state.epoch.next();
+        state.take_read_lock();
+        Ok(state.epoch)
     }
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {

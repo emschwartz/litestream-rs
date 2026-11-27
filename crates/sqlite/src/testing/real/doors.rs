@@ -131,6 +131,10 @@ impl Checkpointer for RealCheckpointer {
         self.0.before(Some(SourceOp::Checkpoint))?.checkpoint(mode)
     }
 
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError> {
+        self.0.before(Some(SourceOp::RenewRead))?.renew_read()
+    }
+
     fn bump_seq(&mut self) -> Result<(), SourceError> {
         self.0.before(Some(SourceOp::BumpSeq))?.bump_seq()
     }

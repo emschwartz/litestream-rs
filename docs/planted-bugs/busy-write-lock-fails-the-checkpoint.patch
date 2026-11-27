@@ -1,10 +1,10 @@
 diff --git a/crates/core/src/checkpoint.rs b/crates/core/src/checkpoint.rs
-index 59870002b..2bc669d99 100644
+index 625a05363..edcb1c2fd 100644
 --- a/crates/core/src/checkpoint.rs
 +++ b/crates/core/src/checkpoint.rs
-@@ -630,9 +630,6 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
-     async fn checkpoint(&mut self, truncate: bool) -> Result<CheckpointOutcome, Fault> {
-         let before = self.header()?;
+@@ -673,9 +673,6 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
+             }
+         }
          let barrier = self.ck.begin_barrier();
 -        if barrier == Err(SourceError::Busy) {
 -            return Ok(CheckpointOutcome::LockBusy);
@@ -12,8 +12,3 @@ index 59870002b..2bc669d99 100644
          let barrier = barrier.map_err(Fault::from_source)?;
          let sealed = self.seal_and_checkpoint().await;
          let released = self.ck.end_barrier(barrier);
-@@ -821,3 +818,4 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
- 
- #[cfg(test)]
- mod tests;
-+

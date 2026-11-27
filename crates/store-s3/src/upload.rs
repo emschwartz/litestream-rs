@@ -15,8 +15,7 @@
 //! part of the result.
 //!
 //! Two bounds hold, whatever the lanes do:
-//! - **Count.** At most `width` parts of one upload are started and not yet collected: the
-//!   `concurrency` setting, or fewer for parts that hold their bytes (below).
+//! - **Count.** At most `concurrency` parts of one upload are started and not yet collected.
 //! - **One part waits.** A whole part that finds every lane taken waits in the upload, one at
 //!   most. A write that would make a second waits for a part to end, on this thread, helping
 //!   the lanes when they have no thread of their own. A buffered write that fills a part with
@@ -25,9 +24,9 @@
 //!   than a write of [`ReadLen::CHUNK`]: a caller that asks first never waits.
 //!
 //! **Parts that hold their bytes.** A part written with [`Upload::write`] is a buffer, so
-//! the upload holds `width` parts in flight and one more, filling or waiting: no byte goes
-//! into a new buffer while a whole part still waits. `width` is cut so that this fits a fixed
-//! budget (`part_plan.rs`, `docs/decisions/D232.md`).
+//! the upload holds `concurrency` parts in flight and one more, filling or waiting: no byte goes
+//! into a new buffer while a whole part still waits, so `part size x (concurrency + 1)` is the
+//! most it holds, as in Go (`docs/decisions/D309.md`).
 //!
 //! **Parts written from a source.** An upload whose first write is [`Upload::write_from`]
 //! keeps no part buffer: of each part it keeps what was seen of every 256 KiB and a reader of
@@ -84,7 +83,7 @@ use crate::again::{Run, Sealed};
 use crate::classify::{classify, transient_other};
 use crate::lanes::{Condvar, Mutex, MutexGuard, lock};
 use crate::multipart::{PAYLOAD_TOO_LARGE, Sent, completed_etag_fits, judge_part};
-use crate::part_plan::{MAX_OBJECT, held_width, plan_part_size};
+use crate::part_plan::{MAX_OBJECT, plan_part_size};
 use crate::request::{HttpRequest, Precondition, RequestBuilder, RequestError, UploadId};
 use crate::sigv4::PayloadHash;
 use crate::store::Inner;
@@ -97,6 +96,7 @@ pub(crate) enum Bytes {
 }
 
 impl Bytes {
+    /// The memory the part holds while it waits or is sent.
     fn held(&self) -> usize {
         match self {
             Self::Held(buf) => buf.capacity(),
@@ -106,10 +106,11 @@ impl Bytes {
 
     /// Sends the write `build` makes for these bytes, with them as its body, and returns the
     /// answer and the length the request declared. A buffer's SHA-256 is taken as the request
-    /// is built, after the clock and the credentials are read, and the buffer is moved into it.
-    /// A part written from a source carries the SHA-256 of what it was handed and streams its
-    /// body from the bytes it kept or from a second read (`again.rs`); a read that gave nothing
-    /// is the result, whatever the request came to. Nothing is sent once `stop` is set.
+    /// is built, after the clock and the credentials are read, and the buffer is moved into it,
+    /// never copied. A part written from a source carries the SHA-256 of what it was handed
+    /// and streams its body from the bytes it kept or from a second read (`again.rs`); a read
+    /// that gave nothing is the result, whatever the request came to.
+    /// Nothing is sent once `stop` is set.
     fn send_with<T: Transport>(
         &mut self,
         inner: &Inner<T>,
@@ -151,6 +152,7 @@ impl Bytes {
     }
 }
 
+/// The part being filled.
 #[expect(
     clippy::large_enum_variant,
     reason = "one per upload, moved only when a part is sealed; the size is the checksum state \
@@ -312,6 +314,7 @@ struct Multi<T> {
     shared: Arc<Shared<T>>,
     /// The ETag of part n is the (n - 1)th entry, once its answer was collected.
     etags: Vec<Option<String>>,
+    /// A whole part waiting for a lane.
     ready: Option<Bytes>,
     /// Parts started whose answers are not collected, and the memory they hold.
     flying: usize,
@@ -408,17 +411,9 @@ impl<T> S3Upload<T> {
         self.multi.as_ref().map_or(0, |multi| multi.flying)
     }
 
+    /// The part size as an object offset.
     fn part_len(&self) -> u64 {
         u64::try_from(self.part).unwrap_or(u64::MAX)
-    }
-
-    fn width(&self) -> usize {
-        let most = self.inner.concurrency;
-        if self.filling.sourced() {
-            most.get()
-        } else {
-            held_width(most, self.part_len()).get()
-        }
     }
 
     /// Ends the upload on a failure of its own making; parts not yet on the wire are not sent.
@@ -448,6 +443,7 @@ fn ended() -> StoreError {
     }
 }
 
+/// Buffer size past which an upload reserves a whole part.
 const GROW_TO_PART: usize = 256 * 1024;
 
 /// Appends `bytes` (which fit under `part`) growing the buffer geometrically
@@ -546,8 +542,9 @@ impl<T: Transport> S3Upload<T> {
         }
     }
 
+    /// Starts the part that waits when a lane is free; whether it did.
     fn start_ready(&mut self) -> Result<bool, StoreError> {
-        let width = self.width();
+        let width = self.inner.concurrency.get();
         let Some(multi) = &mut self.multi else {
             return Ok(false);
         };
@@ -559,6 +556,7 @@ impl<T: Transport> S3Upload<T> {
         };
         let next = u16::try_from(multi.etags.len().saturating_add(1)).unwrap_or(0);
         let Some(number) = PartNumber::new(next) else {
+            // Past the part cap: nothing is sent for it.
             return Err(self.fail(StoreError::Refused {
                 op: StoreOp::Upload,
                 status: PAYLOAD_TOO_LARGE,
@@ -567,6 +565,7 @@ impl<T: Transport> S3Upload<T> {
         multi.etags.push(None);
         multi.flying = multi.flying.saturating_add(1);
         multi.flying_held = multi.flying_held.saturating_add(bytes.held());
+        // The part's answer is left with `shared`.
         let report = Report {
             _started: Started::new(Arc::clone(&multi.shared.inner)),
             shared: Arc::clone(&multi.shared),
@@ -579,6 +578,7 @@ impl<T: Transport> S3Upload<T> {
         Ok(true)
     }
 
+    /// Collects what ended and starts what fits, without waiting.
     fn pump(&mut self) -> Result<(), StoreError> {
         loop {
             self.collect()?;
@@ -617,6 +617,7 @@ impl<T: Transport> S3Upload<T> {
         }
     }
 
+    /// Waits until no whole part waits for a lane.
     fn until_none_waits(&mut self) -> Result<(), StoreError> {
         loop {
             self.pump()?;
@@ -740,6 +741,8 @@ impl<T: Transport> S3Upload<T> {
         self.complete(start)
     }
 
+    /// CompleteMultipartUpload for the parts sent, and the ETag check on the finished
+    /// object.
     fn complete(&mut self, start: Timestamp) -> Result<FileInfo, StoreError> {
         let Some(multi) = &self.multi else {
             return Err(ended());
@@ -832,7 +835,7 @@ impl<T: Transport> Upload for S3Upload<T> {
         // A buffered part that fills with every lane taken waits, and the rest of the write it
         // filled waits with it (`take`): with less room than one write left, that write could.
         let short = self.part_len().saturating_sub(self.filling.len()) < ReadLen::CHUNK.get();
-        let (width, buffered) = (self.width(), !self.filling.sourced());
+        let (width, buffered) = (self.inner.concurrency.get(), !self.filling.sourced());
         Ok(match &self.multi {
             Some(multi) if multi.ready.is_some() => Flight::Full,
             Some(multi) if buffered && short && multi.flying >= width => Flight::Full,
