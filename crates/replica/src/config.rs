@@ -44,18 +44,6 @@ impl NonZeroDuration {
     }
 }
 
-/// Whether the application says when it holds a long read.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ReaderTracking {
-    /// The application gives no signal. A TRUNCATE a reader blocks is asked of SQLite anyway: it
-    /// reports busy at once, leaves the WAL as it was, and the engine waits its backoff.
-    #[default]
-    Untracked,
-    /// The application holds a [`crate::ReaderGuard`] for every long read. TRUNCATE is not even
-    /// asked of SQLite while one is held; the checkpoint reports busy and waits its backoff.
-    Tracked,
-}
-
 /// What one sync step and one upload tick may do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SyncLimits {
@@ -99,8 +87,7 @@ pub struct Config {
     pub poll_interval: NonZeroDuration,
     /// The first retry wait, doubling to 5 minutes (Go's sync interval and backoff cap).
     pub retry_interval: NonZeroDuration,
-    /// Go: PASSIVE at 1,000 pages or every minute, TRUNCATE at 121,359 pages (`db.go:32-35`),
-    /// under every [`ReaderTracking`].
+    /// Go: PASSIVE at 1,000 pages or every minute, TRUNCATE at 121,359 pages (`db.go:32-35`).
     pub checkpoint: CheckpointConfig,
     /// Compaction levels, the snapshot interval and retention, and level 0 retention.
     pub maintenance: Maintenance,
@@ -109,8 +96,6 @@ pub struct Config {
     /// What each persistent failure does. Default [`Responses::GO_LIKE`]: keep trying,
     /// stop on another writer.
     pub responses: Responses,
-    /// Whether the application signals long reads.
-    pub readers: ReaderTracking,
     /// How long a drop may drain (Go's shutdown sync timeout, 30 s, `db.go:36`).
     pub shutdown_grace: Duration,
     /// The `wal_autocheckpoint` the application's connections run, in frames, or `None` when every
@@ -152,7 +137,6 @@ impl Default for Config {
             maintenance: Maintenance::go_default(),
             sync_limits: SyncLimits::default(),
             responses: Responses::GO_LIKE,
-            readers: ReaderTracking::Untracked,
             shutdown_grace: Duration::from_secs(30),
             app_autocheckpoint: Some(SQLITE_AUTOCHECKPOINT),
             verify_interval: None,
@@ -269,16 +253,10 @@ mod tests {
     }
 
     #[test]
-    fn every_reader_setting_truncates_at_go_s_threshold() {
-        for readers in [ReaderTracking::Untracked, ReaderTracking::Tracked] {
-            let cfg = Config {
-                readers,
-                ..Config::default()
-            };
-            assert_eq!(
-                cfg.actor().checkpoint.truncate_pages,
-                NonZeroU32::new(121_359)
-            );
-        }
+    fn the_default_truncates_at_go_s_threshold() {
+        assert_eq!(
+            Config::default().actor().checkpoint.truncate_pages,
+            NonZeroU32::new(121_359)
+        );
     }
 }
