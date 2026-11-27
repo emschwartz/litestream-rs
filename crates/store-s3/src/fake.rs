@@ -35,7 +35,7 @@ use percent_encoding::{AsciiSet, percent_decode_str, utf8_percent_encode};
 use crate::config::{S3Config, UrlStyle};
 use crate::fault::{Shape, error_response};
 use crate::request::HttpRequest;
-use crate::response::{hex, quoted_md5};
+use crate::response::quoted_md5;
 use crate::sigv4::{PayloadHash, UNRESERVED};
 use crate::transport::{HttpResponse, Transport, TransportError};
 
@@ -416,7 +416,7 @@ impl FakeS3 {
         if let (true, Some((last, _))) = (more, page.last()) {
             xml.push_str(&format!(
                 "<NextContinuationToken>{}</NextContinuationToken>",
-                hex(last.as_bytes())
+                hex::encode(last)
             ));
         }
         for (key, object) in &page {
@@ -725,7 +725,7 @@ fn join_parts(
             .get(number)
             .ok_or_else(|| invalid("InvalidPart"))?;
         let digest = Md5::digest(part);
-        if hex(&digest) != *etag {
+        if hex::encode(digest) != *etag {
             return Err(invalid("InvalidPart"));
         }
         let is_last = position.saturating_add(1) == listed.len();
@@ -735,7 +735,7 @@ fn join_parts(
         body.extend_from_slice(part);
         digests.extend_from_slice(&digest);
     }
-    let etag = format!("\"{}-{}\"", hex(&Md5::digest(&digests)), listed.len());
+    let etag = format!("\"{}-{}\"", hex::encode(Md5::digest(&digests)), listed.len());
     Ok(Joined { body, etag })
 }
 
@@ -777,12 +777,7 @@ fn r2_key(key: &str) -> Vec<u8> {
 }
 
 fn decode_token(token: &str) -> Option<String> {
-    let bytes: Option<Vec<u8>> = token
-        .as_bytes()
-        .chunks(2)
-        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
-        .collect();
-    String::from_utf8(bytes?).ok()
+    String::from_utf8(hex::decode(token).ok()?).ok()
 }
 
 /// Go's `url.QueryEscape` with `/` kept, which is how MinIO writes keys under

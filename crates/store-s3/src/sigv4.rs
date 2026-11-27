@@ -14,7 +14,6 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use sha2::{Digest as _, Sha256};
 use url::Url;
 
-use crate::response::hex;
 
 const ALGORITHM: &str = "AWS4-HMAC-SHA256";
 
@@ -44,7 +43,7 @@ impl PayloadHash {
     /// The lower-case hex form the header and the canonical request carry.
     #[must_use]
     pub fn to_hex(self) -> String {
-        hex(&self.0)
+        hex::encode(self.0)
     }
 }
 
@@ -130,13 +129,13 @@ pub(crate) fn authorization(
     let scope = format!("{day}/{}/s3/aws4_request", key.region);
     let to_sign = format!(
         "{ALGORITHM}\n{amz_date}\n{scope}\n{}",
-        hex(&Sha256::digest(canonical.as_bytes()))
+        hex::encode(Sha256::digest(canonical.as_bytes()))
     );
     let mut signing = hmac(format!("AWS4{}", key.secret).as_bytes(), day.as_bytes());
     for part in [key.region, "s3", "aws4_request"] {
         signing = hmac(&signing, part.as_bytes());
     }
-    let signature = hex(&hmac(&signing, to_sign.as_bytes()));
+    let signature = hex::encode(hmac(&signing, to_sign.as_bytes()));
     format!(
         "{ALGORITHM} Credential={}/{scope}, SignedHeaders={signed}, Signature={signature}",
         key.id
