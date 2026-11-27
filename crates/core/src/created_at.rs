@@ -54,43 +54,41 @@ pub(crate) const MAX_KNOWN_ABOVE: usize = 64;
 /// decision reads, and the older snapshots retention ages one by one.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Known {
-    /// Level-0 files by their last transaction.
-    zero: BTreeMap<Txid, FileInfo>,
-    /// The newest files put at each level above 0, by their last transaction.
-    above: BTreeMap<Level, BTreeMap<Txid, FileInfo>>,
+    /// The newest files put at each level, by their last transaction.
+    levels: BTreeMap<Level, BTreeMap<Txid, FileInfo>>,
 }
 
 impl Known {
+    /// The most files remembered at `level`.
+    const fn cap(level: Level) -> usize {
+        if level.get() == 0 {
+            MAX_KNOWN
+        } else {
+            MAX_KNOWN_ABOVE
+        }
+    }
+
     /// Remembers `info`, the store's answer to a put of this process, when it carries the
     /// created-at time stored; an answer with only a last-modified time is not remembered.
     pub(crate) fn put(&mut self, info: FileInfo) {
         if info.created_at().is_none() {
             return;
         }
-        if info.key.level() == Level::ZERO {
-            self.zero.insert(info.key.range().max(), info);
-            while self.zero.len() > MAX_KNOWN {
-                self.zero.pop_first();
-            }
-        } else {
-            let level = self.above.entry(info.key.level()).or_default();
-            level.insert(info.key.range().max(), info);
-            while level.len() > MAX_KNOWN_ABOVE {
-                level.pop_first();
-            }
+        let cap = Self::cap(info.key.level());
+        let files = self.levels.entry(info.key.level()).or_default();
+        files.insert(info.key.range().max(), info);
+        while files.len() > cap {
+            files.pop_first();
         }
     }
 
     /// The created-at time of the listed file `info`, when this process put that file:
     /// the same key, and the length the store acknowledged.
     pub(crate) fn exact(&self, info: &FileInfo) -> Option<CreatedAt> {
-        let known = if info.key.level() == Level::ZERO {
-            self.zero.get(&info.key.range().max())
-        } else {
-            self.above
-                .get(&info.key.level())?
-                .get(&info.key.range().max())
-        }?;
+        let known = self
+            .levels
+            .get(&info.key.level())?
+            .get(&info.key.range().max())?;
         if known.key == info.key && known.size == info.size {
             known.created_at()
         } else {
@@ -101,10 +99,8 @@ impl Known {
     /// Forgets the files among `keys`: they were deleted from the replica.
     pub(crate) fn deleted(&mut self, keys: &[FileKey]) {
         for key in keys {
-            if key.level() == Level::ZERO {
-                self.zero.remove(&key.range().max());
-            } else if let Some(level) = self.above.get_mut(&key.level()) {
-                level.remove(&key.range().max());
+            if let Some(files) = self.levels.get_mut(&key.level()) {
+                files.remove(&key.range().max());
             }
         }
     }
@@ -112,10 +108,7 @@ impl Known {
     /// How many files are remembered.
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.above
-            .values()
-            .map(BTreeMap::len)
-            .fold(self.zero.len(), usize::saturating_add)
+        self.levels.values().map(BTreeMap::len).sum()
     }
 }
 
