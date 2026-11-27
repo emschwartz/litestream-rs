@@ -1,7 +1,7 @@
 //! The fail-stop judge's place in the run loop (`crate::failstop`): after every tick it learns
 //! what fired, whether the replica now holds everything, and judges the engine's trip.
 
-use lsr_core::{Did, Event, RestoreTarget, SnapshotCause, Tick};
+use lsr_core::{Did, Event, RestoreTarget, Tick};
 use lsr_ltx::Timestamp;
 
 use super::Runner;
@@ -64,13 +64,6 @@ impl Runner {
                 })
             ),
             reads_lying: self.reads_lying,
-            unvouched_boot: matches!(
-                ended,
-                TickEnd::Done(Tick::Ran {
-                    event: Event::Booted { cause: Some(cause) },
-                    ..
-                }) if breaks_continuity(*cause)
-            ),
         };
         self.fail_stop.saw(tick);
         let believed = matches!(
@@ -118,11 +111,6 @@ impl Runner {
         }
         if now.unplaced_file > was.unplaced_file {
             self.report.reach.bump("failstop.excused.unplaced_file");
-        }
-        if now.unvouched_snapshot > was.unvouched_snapshot {
-            self.report
-                .reach
-                .bump("failstop.excused.unvouched_snapshot");
         }
     }
 
@@ -191,27 +179,5 @@ impl Runner {
     /// The bound the engines of this run are built with.
     fn actor_bound(&self) -> std::time::Duration {
         lsr_core::MaxUnreplicatedAge::DEFAULT.get()
-    }
-}
-
-/// Whether a boot's logged snapshot cause says continuity broke, so the snapshot may hold
-/// commits that were never staged and the engine has nothing to compare it with.
-const fn breaks_continuity(cause: SnapshotCause) -> bool {
-    match cause {
-        // The database ahead of the replica holds commits the lost meta directory had staged
-        // and this engine never saw.
-        SnapshotCause::StagedUnverified { .. }
-        | SnapshotCause::LocalRewound { .. }
-        | SnapshotCause::AheadOfReplica { .. } => true,
-        // No replica yet, or one ahead of us (D81 keeps it out); the rest the engine never
-        // counts as lag.
-        SnapshotCause::FirstSync
-        | SnapshotCause::BehindRemote { .. }
-        | SnapshotCause::OperatorRequested
-        | SnapshotCause::GenerationChanged
-        | SnapshotCause::WalMissing
-        | SnapshotCause::PrevFrameMismatch
-        | SnapshotCause::LastPageMismatch
-        | SnapshotCause::NewestStagedFileUnreadable => false,
     }
 }

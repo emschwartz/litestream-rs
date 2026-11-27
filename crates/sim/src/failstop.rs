@@ -29,7 +29,7 @@
 //!   degraded data-path task on that tick);
 //! - refused at boot: a store refusal fired in this life, and this life has not booted.
 //!
-//! Four exemptions, each excused and counted on its own ([`Excused`]), so a generator change that
+//! Three exemptions, each excused and counted on its own ([`Excused`]), so a generator change that
 //! makes any of them common shows.
 //!
 //! **Committed WAL frames the engine never read.** The engine is judged on
@@ -39,16 +39,6 @@
 //! took a snapshot or checkpointed), it cannot tell whether those frames hold commits the
 //! replica lacks, and an age trip is correct even if the simulator knows the
 //! replica holds every commit (a vacuum that rewrote identical pages, say).
-//!
-//! **A snapshot taken at a boot that broke continuity.** When this life booted with a logged
-//! cause that says continuity broke (staged files the live WAL could not vouch for were deleted,
-//! or the WAL rewound: `SnapshotCause::StagedUnverified`, `SnapshotCause::LocalRewound`), the
-//! snapshot it stages may hold commits that were never staged, and the engine has nothing to
-//! compare it with (Go writes LTX files without a checksum, so none is owed). Until the engine's
-//! own upload lands after that boot, that snapshot is lag it cannot rule out, and an age trip
-//! dated at or after the boot is correct even if the simulator knows the replica holds every
-//! commit. Only an age trip, only in the life that booted so, only before its first upload.
-
 //!
 //! **Reads of the replica that lie.** While `Hold::LyingReads` holds, every read the engine
 //! makes of the replica returns a flipped byte, so it cannot confirm that its newest upload
@@ -90,9 +80,6 @@ pub struct FailStopJudge {
     refused: bool,
     /// The latest tick on which the engine read the WAL successfully, on its clock.
     wal_read: Option<Timestamp>,
-    /// When this life booted with a cause that broke continuity, on the engine's clock; cleared
-    /// by the engine's first believed upload after it, and by a restart.
-    unvouched: Option<Timestamp>,
     /// Age trips excused, by exemption.
     excused: Excused,
     /// How many ticks have passed since the replica was last seen whole: an accepted trip may
@@ -140,8 +127,6 @@ pub struct TickSeen {
     /// The engine read the WAL successfully in it: it booted, synced, took a snapshot or
     /// checkpointed.
     pub read_wal: bool,
-    /// The engine booted in it with a logged cause that broke continuity.
-    pub unvouched_boot: bool,
     /// Every read of the replica lied in it (`Hold::LyingReads`).
     pub reads_lying: bool,
 }
@@ -151,8 +136,6 @@ pub struct TickSeen {
 pub struct Excused {
     /// On committed WAL frames the engine never read.
     pub unread_wal: u64,
-    /// While a snapshot taken at a boot that broke continuity was not uploaded.
-    pub unvouched_snapshot: u64,
     /// While every read of the replica lied.
     pub lying_reads: u64,
     /// On a pending staged file an earlier life left that the boot could not place.
@@ -222,9 +205,6 @@ impl FailStopJudge {
         } else if believed {
             self.doubt = false;
         }
-        if believed {
-            self.unvouched = None;
-        }
     }
 
     /// Whether anything may be off the replica.
@@ -236,7 +216,6 @@ impl FailStopJudge {
     /// A process start: refusals seen before it are the last life's.
     pub const fn started(&mut self) {
         self.refused = false;
-        self.unvouched = None;
     }
 
     /// Takes in what a tick showed.
@@ -256,9 +235,6 @@ impl FailStopJudge {
         }
         if tick.read_wal {
             self.wal_read = Some(tick.at);
-        }
-        if tick.unvouched_boot {
-            self.unvouched = Some(tick.at);
         }
     }
 
@@ -295,15 +271,6 @@ impl FailStopJudge {
             return false;
         };
         self.since.is_none() && self.unplaced == Some(since)
-    }
-
-    /// Whether `trip` is an age trip dated at or after a boot of this life that broke
-    /// continuity, before the engine's first upload since.
-    fn unvouched_snapshot(&self, trip: Option<Trip>) -> bool {
-        let Some(Trip::UnreplicatedTooLong { since }) = trip else {
-            return false;
-        };
-        self.unvouched.is_some_and(|booted| since >= booted)
     }
 
     /// The age of the first unreplicated commit at `tick`: the larger of the two clocks.
@@ -346,11 +313,6 @@ impl FailStopJudge {
                 }
                 Err(_) if self.unplaced_file(trip) => {
                     self.excused.unplaced_file = self.excused.unplaced_file.saturating_add(1);
-                    Ok(())
-                }
-                Err(_) if self.unvouched_snapshot(trip) => {
-                    self.excused.unvouched_snapshot =
-                        self.excused.unvouched_snapshot.saturating_add(1);
                     Ok(())
                 }
                 verdict => verdict,
@@ -513,7 +475,6 @@ mod tests {
             reported_failure: true,
             refusal_fired: false,
             read_wal,
-            unvouched_boot: false,
             reads_lying: false,
         }
     }
@@ -679,27 +640,16 @@ mod tests {
         assert_eq!(judge.excused(), Excused::default());
     }
 
-    fn booted(at: i64) -> TickSeen {
-        TickSeen {
-            unvouched_boot: true,
-            ..tick(at, true)
-        }
-    }
-
-    /// An age trip dated after a boot that broke continuity, before any upload: excused, and
-    /// counted apart from the unread-WAL exemption.
+    /// An age trip after a boot that broke continuity is a false trip like any other: the boot
+    /// no longer deletes staged files the WAL cannot vouch for, so its snapshot is no lag the
+    /// engine cannot rule out.
     #[test]
-    fn a_trip_on_an_unvouched_boot_snapshot_is_excused_and_counted() {
+    fn a_trip_after_a_boot_that_broke_continuity_is_not_excused() {
         let mut judge = caught_up();
-        judge.saw(booted(1_000));
-        judge
-            .judge(age_trip(1_000), tick(700_000, false), BOUND, true, false)
-            .unwrap();
-        let want = Excused {
-            unvouched_snapshot: 1,
-            ..Excused::default()
-        };
-        assert_eq!(judge.excused(), want);
+        judge.saw(tick(1_000, true));
+        let got = judge.judge(age_trip(1_000), tick(700_000, false), BOUND, true, false);
+        assert!(matches!(got, Err(Violation::FalseTrip { .. })), "{got:?}");
+        assert_eq!(judge.excused(), Excused::default());
     }
 
     /// An age trip while every read of the replica lies, over a replica the judge knows is
@@ -752,26 +702,6 @@ mod tests {
             matches!(behind, Err(Violation::FalseTrip { .. })),
             "{behind:?}"
         );
-        assert_eq!(judge.excused(), Excused::default());
-    }
-
-    /// A trip dated before that boot, after the engine's first upload since it, or in the next
-    /// life: not excused.
-    #[test]
-    fn an_older_trip_an_upload_or_a_restart_ends_the_unvouched_excuse() {
-        let false_trip = |judge: &mut FailStopJudge, since: i64| {
-            let got = judge.judge(age_trip(since), tick(700_000, false), BOUND, true, false);
-            assert!(matches!(got, Err(Violation::FalseTrip { .. })), "{got:?}");
-        };
-        let mut judge = caught_up();
-        judge.saw(booted(2_000));
-        false_trip(&mut judge, 1_000);
-        judge.put(false, true);
-        false_trip(&mut judge, 2_000);
-        let mut judge = caught_up();
-        judge.saw(booted(2_000));
-        judge.started();
-        false_trip(&mut judge, 2_000);
         assert_eq!(judge.excused(), Excused::default());
     }
 }
