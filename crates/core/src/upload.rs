@@ -340,10 +340,7 @@ pub(crate) async fn list_step<L: Role, S: Role>(
     remote: &S,
     newest_staged: Option<Txid>,
 ) -> Result<(Uploaded, EmptyLevels), UploadFailed> {
-    let starts: Vec<ListAt> = Level::ALL
-        .iter()
-        .map(|&level| ListAt::first(level))
-        .collect();
+    let starts = Level::ALL.map(ListAt::first);
     let inventory = Inventory::load_from(remote, &starts)
         .await
         .map_err(|err| fail(state, inventory_fault::<S>(&err)))?;
