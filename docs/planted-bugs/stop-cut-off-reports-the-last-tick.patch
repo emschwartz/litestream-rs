@@ -1,13 +1,13 @@
 diff --git a/crates/replica/src/replicator.rs b/crates/replica/src/replicator.rs
-index d1bfe6a2e..be90f44dc 100644
+index 575ed750c..996c96bba 100644
 --- a/crates/replica/src/replicator.rs
 +++ b/crates/replica/src/replicator.rs
-@@ -684,7 +684,7 @@ fn stop_answer(state: &State, died: bool, now: Timestamp, deadline: Timestamp) -
+@@ -683,7 +683,7 @@ fn stop_answer(state: &State, died: bool, now: Timestamp, deadline: Timestamp) -
  /// high, never low.
  fn cut_off(left: Unfinished, wal_len: u64) -> StopOutcome {
-     StopOutcome::DeadlineReached {
+     StopOutcome::DeadlineReached(Unfinished {
 -        unsynced_wal_bytes: left.unsynced_wal_bytes.max(wal_len),
 +        unsynced_wal_bytes: left.unsynced_wal_bytes.min(wal_len.max(left.unsynced_wal_bytes)),
-         staged_not_uploaded: left.staged_not_uploaded,
-     }
+         ..left
+     })
  }

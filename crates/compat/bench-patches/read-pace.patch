@@ -1,7 +1,7 @@
 diff --git a/crates/replica/src/readers.rs b/crates/replica/src/readers.rs
 --- a/crates/replica/src/readers.rs
 +++ b/crates/replica/src/readers.rs
-@@ -20,13 +20,89 @@
+@@ -19,11 +19,88 @@
  //! only meet the gate's lock.
  
  use std::sync::Arc;
@@ -14,9 +14,8 @@ diff --git a/crates/replica/src/readers.rs b/crates/replica/src/readers.rs
 +use lsr_ltx::{DbPages, PageNo, Timestamp};
  use lsr_sqlite::{Sqlite, WritesHeld};
  
- use crate::config::ReaderTracking;
 +use crate::runtime::{Runtime, later};
- 
++
 +/// BENCH PROTOTYPE (crates/compat/bench-patches/read-pace.patch, never in the engine): a page
 +/// source that spends a byte budget as it reads, so a copy proceeds at `bytes_per_s` and no
 +/// faster. It waits on the runtime's clock and park, between pages and never while the write
@@ -93,17 +92,10 @@ diff --git a/crates/replica/src/readers.rs b/crates/replica/src/readers.rs
  /// Held for the length of one long read. While any guard lives, the replicator runs no
  /// TRUNCATE checkpoint. Counted, so overlapping readers are safe; dropping it ends the read.
  #[derive(Debug)]
-@@ -134,4 +210,4 @@
-         drop(second);
-         assert_eq!(count.load(Ordering::SeqCst), 0);
-     }
--}
-+}
-\ No newline at end of file
 diff --git a/crates/replica/src/thread.rs b/crates/replica/src/thread.rs
 --- a/crates/replica/src/thread.rs
 +++ b/crates/replica/src/thread.rs
-@@ -482,7 +482,13 @@
+@@ -496,7 +496,13 @@ impl Worker {
      /// One engine tick, or why the closed connections could not be reopened.
      fn tick(&mut self, now: Timestamp) -> Result<Tick, Reopen> {
          let sqlite = self.connection()?;
@@ -117,4 +109,4 @@ diff --git a/crates/replica/src/thread.rs b/crates/replica/src/thread.rs
 +        );
          let mut ck = Guarded::new(
              sqlite,
-             self.config.readers,
+             Arc::clone(&self.shared.readers),
