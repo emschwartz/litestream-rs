@@ -30,13 +30,13 @@ use base64::engine::general_purpose::STANDARD;
 use lsr_core::Clock;
 use lsr_ltx::Timestamp;
 use md5::{Digest as _, Md5};
-use percent_encoding::percent_decode_str;
+use percent_encoding::{AsciiSet, percent_decode_str, utf8_percent_encode};
 
 use crate::config::{S3Config, UrlStyle};
 use crate::fault::{Shape, error_response};
 use crate::request::HttpRequest;
 use crate::response::{hex, quoted_md5};
-use crate::sigv4::PayloadHash;
+use crate::sigv4::{PayloadHash, UNRESERVED};
 use crate::transport::{HttpResponse, Transport, TransportError};
 
 /// S3's smallest part, the last one excepted.
@@ -788,17 +788,11 @@ fn decode_token(token: &str) -> Option<String> {
 /// Go's `url.QueryEscape` with `/` kept, which is how MinIO writes keys under
 /// `encoding-type=url`: a space is `+`, a literal `+` is `%2B`.
 fn url_encode(key: &str) -> String {
-    let mut out = String::new();
-    for byte in key.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
-                out.push(char::from(byte));
-            }
-            b' ' => out.push('+'),
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
+    const KEPT: &AsciiSet = &UNRESERVED.remove(b'/');
+    // A `%20` in the output is always an encoded space: a literal `%` encodes as `%25`.
+    utf8_percent_encode(key, KEPT)
+        .to_string()
+        .replace("%20", "+")
 }
 
 fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {

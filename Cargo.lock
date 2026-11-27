@@ -1111,6 +1111,7 @@ dependencies = [
  "lsr-replica",
  "lsr-sqlite",
  "lsr-store-fs",
+ "percent-encoding",
  "rusqlite",
  "shuttle",
  "tempfile",

@@ -10,7 +10,7 @@ publish.workspace = true
 [features]
 default = ["ureq"]
 # The in-memory S3 (FakeS3), the recorded-fault layer and test-only request edits.
-testing = ["dep:percent-encoding", "dep:md-5"]
+testing = ["dep:md-5"]
 # HTTP clients, any combination: `UreqTransport` (blocking, no runtime; the
 # default and what `S3Store::new` uses) and `ReqwestTransport` (for applications that
 # already build reqwest and Tokio). The clients the store builds itself trust
@@ -43,8 +43,8 @@ base64.workspace = true
 hmac.workspace = true
 jiff.workspace = true
 md-5 = { workspace = true, optional = true }
-# FakeS3 decodes listed keys.
-percent-encoding = { workspace = true, optional = true }
+# SigV4's query encoding; FakeS3 also decodes listed keys.
+percent-encoding.workspace = true
 rusty-s3.workspace = true
 # The JSON documents the container, instance-metadata and process sources answer with.
 serde_json.workspace = true

@@ -10,6 +10,7 @@
 //! The tests are AWS's own signature examples.
 
 use hmac::{Hmac, KeyInit as _, Mac as _};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use sha2::{Digest as _, Sha256};
 use url::Url;
 
@@ -58,17 +59,12 @@ fn hmac(key: &[u8], data: &[u8]) -> [u8; 32] {
     mac.finalize().into_bytes().into()
 }
 
-/// RFC 3986 percent-encoding of all but the unreserved characters, as SigV4 encodes a query.
-fn encode(text: &str, out: &mut String) {
-    for byte in text.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            out.push(char::from(byte));
-        } else {
-            out.push('%');
-            out.push_str(&hex(&[byte]).to_ascii_uppercase());
-        }
-    }
-}
+/// What SigV4 encodes in a query (RFC 3986): every byte but the unreserved characters.
+pub(crate) const UNRESERVED: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
 
 /// The query string as sent and as signed: each name and value encoded, sorted by name and
 /// then value after encoding, as AWS sorts them.
@@ -76,10 +72,10 @@ pub(crate) fn canonical_query(query: &[(&str, &str)]) -> String {
     let mut pairs: Vec<(String, String)> = query
         .iter()
         .map(|(name, value)| {
-            let (mut name_out, mut value_out) = (String::new(), String::new());
-            encode(name, &mut name_out);
-            encode(value, &mut value_out);
-            (name_out, value_out)
+            (
+                utf8_percent_encode(name, UNRESERVED).to_string(),
+                utf8_percent_encode(value, UNRESERVED).to_string(),
+            )
         })
         .collect();
     // By name, then value: sorting the joined pairs instead would put `a-b=` before `a=`.
