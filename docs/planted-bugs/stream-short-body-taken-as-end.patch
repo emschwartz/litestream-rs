@@ -2,12 +2,11 @@ diff --git a/crates/store-s3/src/store/stream.rs b/crates/store-s3/src/store/str
 index 457fa3b23..6d81224c5 100644
 --- a/crates/store-s3/src/store/stream.rs
 +++ b/crates/store-s3/src/store/stream.rs
-@@ -121,7 +121,7 @@ impl<T: Transport> S3Stream<T> {
+@@ -118,6 +118,6 @@ impl<T: Transport> S3Stream<T> {
          let got = u64::try_from(out.len()).unwrap_or(u64::MAX);
          *left = left.map(|left| left.saturating_sub(got));
          let ended = got < want;
 -        if read.is_err() || (ended && left.is_some_and(|left| left > 0)) {
 +        if read.is_err() || (ended && left.is_some_and(|left| left > u64::from(u32::MAX))) {
-             // The connection failed, or ended before the body did.
-             self.state = State::Done;
+              self.state = State::Done;
              read?;
