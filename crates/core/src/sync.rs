@@ -41,8 +41,8 @@ use crate::pages::{PageChecksumTable, snapshot_clears};
 use crate::position::{Continuity, LastPage, Position, ReachedEnd, ReadLockHold};
 use crate::publish::Writer;
 use crate::source::{CommittedRead, PageSource, WalSource};
-use crate::store::{ObjectStore, StoreError, Upload, WriteMode};
-use crate::witness::{ByteTally, Witnessed};
+use crate::store::{ObjectStore, Seeing, StoreError, Upload, WriteMode};
+use crate::witness::Witnessed;
 
 /// Go's default cap on the WAL bytes one file covers (`db.go:33-40`).
 const DEFAULT_CAP: u64 = 64 << 20;
@@ -525,7 +525,7 @@ fn unscanned<R: Read + Seek>(wal: &mut WalReader<R>, start: &Start) -> Result<Sc
 /// What [`fill`] wrote: the last page, the bytes and the trailer's checksum.
 struct Filled {
     last: Option<LastPage>,
-    bytes: ByteTally,
+    bytes: Seeing,
     checksum: FileChecksum,
 }
 
@@ -553,7 +553,7 @@ async fn fill<R: Read + Seek, P: PageSource, U: FileSink>(
     map_store: fn(&StoreError) -> Fault,
 ) -> Result<Filled, Fault> {
     let mut filling = Filling::new(header, plan)?;
-    let mut bytes = ByteTally::new();
+    let mut bytes = Seeing::new();
     while !filling.whole() {
         filling.encode(plan, wal, db, pages, false)?;
         let out = filling.out();

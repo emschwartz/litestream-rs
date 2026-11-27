@@ -691,7 +691,8 @@ pub trait Opened: Send + fmt::Debug {
 
 /// How many bytes a store was handed and their CRC-64: what it keeps of bytes it lets go
 /// of, and what a second read of them must equal before a byte of it is used
-/// ([`Again::read`]). The CRC is the LTX format's polynomial on carry-less multiply
+/// ([`Again::read`]); a witness token keeps one of the staged file it vouches for
+/// ([`crate::Witnessed`]). The CRC is the LTX format's polynomial on carry-less multiply
 /// (`docs/decisions/D223.md`), so taking it costs the engine's first read next to nothing,
 /// and two different runs of bytes of one length share it once in 2^64 by accident and
 /// never when they differ in a burst of 64 bits or fewer (`docs/decisions/D233.md`).
