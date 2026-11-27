@@ -59,7 +59,7 @@
 //! pinned by a gate that fails when the buffer grows (the tests are named). The configuration
 //! terms are: part size `P` (`S3Config::with_part_size`, 5 MiB by default and 16 MiB on
 //! Tigris), upload concurrency `C` (`S3Config::with_concurrency`, 5), and the compaction fan-in
-//! `F` (`MAX_INPUTS`, 32).
+//! `F` (`MAX_INPUTS`, 128).
 //! Larger parts or more concurrency raise `C x P`, and nothing else.
 //!
 //! - **Upload:** `C x P` plus 4 MiB, the parts of the batch being sent. For a file over 10000
@@ -71,16 +71,21 @@
 //!   must hold whole (its SHA-256 is signed before the body goes out), so this term
 //!   grows with the part size the operator sets; see `docs/decisions/D212.md`.
 //! - **Compaction:** the inputs' windows plus a 256 KiB output buffer that is kept for the
-//!   file. A level-1 compaction reads each staged file in a 128 KiB window: 5 MiB at `F` = 32
-//!   (`crates/store-fs/tests/store-fs/memory.rs`, `a_level_one_compaction_holds_a_staging_window_per_input`).
+//!   file. A level-1 compaction reads the staged files with a 4 MiB budget shared by its
+//!   inputs, at most 128 KiB and at least 32 KiB each: 6 MiB at `F` = 128
+//!   (`crates/store-fs/tests/store-fs/memory.rs`, `a_full_level_one_compaction_holds_the_staging_budget`).
 //!   A compaction above level 1 reads the replica with a 16 MiB budget shared by its inputs,
-//!   at most a mebibyte each: 17 MiB at `F` = 32, and a merge of 16 or fewer inputs still reads
+//!   at most a mebibyte each: 18 MiB at `F` = 128, and a merge of 16 or fewer inputs still reads
 //!   a mebibyte at a time (`a_compaction_holds_its_share_of_the_budget_per_replica_input`).
+//!   Over S3 each input also holds its GET's connection, about 165 KiB: 39 MiB at `F` = 128,
+//!   28 MiB at 64 (`crates/store-s3/tests/store-s3/memory.rs`,
+//!   `a_compaction_from_s3_holds_its_budget_and_a_connection_per_input`; `docs/decisions/D295.md`).
 //!   The output buffer is allocated once, not per flush (`a_compaction_allocates_few_large_blocks`).
 //! - **Replicating:** the compaction and the upload of its output at once, the busiest moment:
 //!   about 30 MiB with the defaults (`a_compaction_into_s3_holds_its_inputs_and_one_batch_of_parts`).
-//!   A compaction above level 1 holds its 17 MiB of windows instead of 5, to about 42 MiB (the
-//!   sum of the two gates above).
+//!   A compaction above level 1 of `F` inputs from S3 holds its 39 MiB instead of 6, to about
+//!   65 MiB (the sum of the two gates above); a steady writer's merges above level 1 take
+//!   a few inputs each.
 //! - **Restore:** one 4 MiB chunk of the file being read plus 3 MiB: 7 MiB, whatever the
 //!   database's size or the chain's length, since each file is one GET whose body is read as the
 //!   decoder takes it (`a_restore_through_the_real_client_holds_one_chunk`; the same law at one

@@ -1,0 +1,22 @@
+diff --git a/crates/core/src/compact.rs b/crates/core/src/compact.rs
+index 9ceeb383a..e1912fe31 100644
+--- a/crates/core/src/compact.rs
++++ b/crates/core/src/compact.rs
+@@ -63,7 +63,7 @@ use lsr_ltx::{
+ };
+ use thiserror::Error;
+ 
+-use crate::fault::role::{Replica, Role, SMALLEST_WINDOW};
++use crate::fault::role::{Replica, Role, STAGING_WINDOW};
+ use crate::fault::{BugSite, Fault};
+ use crate::layout::{FileInfo, FileKey, Level};
+ use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, Next, ReadFault, check_link};
+@@ -359,7 +359,7 @@ impl Budget {
+         let share = S::COMPACT_BUDGET
+             .checked_div(u64::try_from(inputs).unwrap_or(u64::MAX))
+             .unwrap_or(most);
+-        let window = share.clamp(SMALLEST_WINDOW.get().min(most), most);
++        let window = share.clamp(STAGING_WINDOW.get().min(most), most);
+         Self {
+             chunk: u32::try_from(window)
+                 .ok()
