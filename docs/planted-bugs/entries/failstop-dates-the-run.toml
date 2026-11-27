@@ -5,3 +5,4 @@ package = "lsr-core"
 tests = [
     "lag::a_steady_writer_whose_uploads_trail_by_a_tick_never_trips",
 ]
+unaided_miss = "Fail-stop needs an outage or doubt held past the age bound with the write gate in play, a scenario longer than the swarm's draw; only the named failstop scenarios and lag tests reach it."

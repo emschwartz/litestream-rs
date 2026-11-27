@@ -12,3 +12,4 @@ tests = [
 # A failed sync of the WAL taken as a success: the frames it covered are staged, though the
 # kernel may never write them. The simulator's lost writeback and its staged-durability check
 # see it too (`wal_fsync_fails`), as does the actor's unit test.
+unaided = 50

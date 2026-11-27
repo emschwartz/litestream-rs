@@ -6,3 +6,4 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["liveness::a_job_behind_its_parts_goes_on_from_where_it_stood"]
+unaided = 116

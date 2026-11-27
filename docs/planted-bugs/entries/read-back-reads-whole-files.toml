@@ -6,3 +6,4 @@ package = "lsr-core"
 tests = [
     "sliced_snapshot::a_boot_reads_back_only_the_header_and_tail_of_each_newest_file",
 ]
+unaided_miss = "Costs egress bytes only and changes no restored page; the swarm's oracles do not count bytes read, and only the read-back cost test does."

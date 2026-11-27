@@ -9,3 +9,4 @@ tests = [
     "actor::tests::rejected_snapshot::a_damaged_snapshot_the_store_refused_is_read_back_and_taken_again",
     "actor::tests::rejected_snapshot::a_refused_snapshot_is_kept_and_read_back",
 ]
+unaided_miss = "Needs a store that took an output damaged and then refused it, a fault pair the swarm does not draw; only the named core tests set it up."

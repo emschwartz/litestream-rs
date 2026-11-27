@@ -9,3 +9,4 @@ tests = [
     "faults::store_down_across_a_restart",
     "faults::store_returns_rolled_back",
 ]
+unaided = 50

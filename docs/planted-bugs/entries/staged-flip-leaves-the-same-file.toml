@@ -5,3 +5,4 @@ name = "staged-flip-leaves-the-same-file"
 fix = "claude/own-checkpoint"
 package = "lsr-sim"
 tests = ["world::tests::a_flipped_staged_byte_never_leaves_another_encoding_of_the_same_file"]
+unaided_miss = "The plant sits in the simulator's own judge or model, so the swarm only meets it when a seed makes that judge's exempted case happen; the judge's unit test feeds the case directly."

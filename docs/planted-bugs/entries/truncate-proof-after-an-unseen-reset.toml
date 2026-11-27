@@ -7,3 +7,4 @@ name = "truncate-proof-after-an-unseen-reset"
 fix = "claude/truncate-proof"
 package = "lsr-core"
 tests = ["an_unproven_truncate_leaves_the_next_sync_to_snapshot"]
+unaided_miss = "Needs a fault or interleaving at one request or tick (a rejected part, a busy checkpoint, a slice boundary, a second SQLite in the process) that the swarm does not aim at; only a targeted test sets it up."

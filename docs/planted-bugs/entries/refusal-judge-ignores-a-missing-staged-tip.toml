@@ -5,3 +5,4 @@ fix = "62268c853"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["restored_staging::staging_emptied_by_an_operation_is_a_cause_for_a_refusal_after_a_newer_snapshot"]
+unaided_miss = "The plant sits in the simulator's own judge or model, so the swarm only meets it when a seed makes that judge's exempted case happen; the judge's unit test feeds the case directly."

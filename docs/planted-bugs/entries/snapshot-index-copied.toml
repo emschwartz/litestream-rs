@@ -6,3 +6,4 @@ test_bin = "core"
 tests = [
     "mem::snapshot_peak_heap_is_linear_in_pages_with_a_pinned_coefficient",
 ]
+unaided_miss = "The plant costs requests, memory or bytes and changes no restored page; the swarm's oracles judge pages and needless snapshots, not request counts or buffer sizes, and only the cost tests count those."

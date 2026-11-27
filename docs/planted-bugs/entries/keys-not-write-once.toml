@@ -2,3 +2,4 @@ name = "keys-not-write-once"
 fix = "checker-holes (write-once keys)"
 package = "lsr-sim"
 tests = ["oracle::tests::a_key_put_again_with_other_bytes_is_a_rewrite"]
+unaided_miss = "The plant sits in the simulator's own judge or model, so the swarm only meets it when a seed makes that judge's exempted case happen; the judge's unit test feeds the case directly."

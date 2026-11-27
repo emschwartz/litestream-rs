@@ -9,3 +9,4 @@ tests = [
     "ahead::a_four_page_unrelated_database_stops",
     "ahead::a_two_page_database_never_carries_on",
 ]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

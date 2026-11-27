@@ -11,3 +11,4 @@ tests = [
     "recover::tests::a_rewound_tail_rewritten_with_the_same_last_page_is_not_continued",
     "recover::tests::the_loader_calls_a_page_with_other_bytes_a_mismatch_and_a_missing_one_not_in_newest_staged_file",
 ]
+unaided = 84

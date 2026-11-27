@@ -7,3 +7,4 @@ tests = [
     "vouch::a_wiped_staging_with_commits_the_replica_lacks_continues_on_the_wals_word",
     "vouch::staging_behind_a_replica_the_wal_vouches_for_continues",
 ]
+unaided_miss = "The local course needs staging behind the replica with the store down across two restarts and lying reads on return, a history the swarm does not draw; only its explicit scenarios reach it."

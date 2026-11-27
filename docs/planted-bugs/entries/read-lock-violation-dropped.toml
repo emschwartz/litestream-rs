@@ -2,3 +2,4 @@ name = "read-lock-violation-dropped"
 fix = "claude/review-197-fixes"
 package = "lsr-core"
 tests = ["an_abandoned_commit_after_a_restart_is_counted_as_a_read_lock_violation"]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

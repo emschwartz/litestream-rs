@@ -8,3 +8,4 @@ tests = [
     "gates::restore_of_a_chain_sends_one_request_per_file",
     "gates::restore_through_the_retry_layer_reads_a_file_in_one_request",
 ]
+unaided_miss = "The plant costs requests, memory or bytes and changes no restored page; the swarm's oracles judge pages and needless snapshots, not request counts or buffer sizes, and only the cost tests count those."

@@ -5,3 +5,4 @@ fix = "claude/sim-remote-corrupt"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["a_short_object_a_delete_could_not_remove_is_damage"]
+unaided = 50

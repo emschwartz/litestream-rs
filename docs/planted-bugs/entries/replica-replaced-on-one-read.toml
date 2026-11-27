@@ -3,3 +3,4 @@ name = "replica-replaced-on-one-read"
 fix = "34f1694"
 package = "lsr-core"
 tests = ["one_torn_read_of_the_replica_copy_does_not_write_over_it"]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

@@ -6,3 +6,4 @@ package = "lsr-core"
 tests = [
     "actor::tests::steady::a_minute_of_level_zero_files_is_one_level_one_file",
 ]
+unaided_miss = "Splits a minute of level-0 files into two level-1 files and changes no restored page; the swarm judges pages, not Go's file counts, and only the steady-state test counts them."

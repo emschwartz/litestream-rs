@@ -6,3 +6,4 @@ package = "lsr-sim"
 test_bin = "sim"
 patch = "busy-bump-fails-the-checkpoint"
 tests = ["faults::bump_overtaken_then_the_wal_restarts", "faults::sealed_then_bump_busy"]
+unaided_miss = "Needs a fault or interleaving at one request or tick (a rejected part, a busy checkpoint, a slice boundary, a second SQLite in the process) that the swarm does not aim at; only a targeted test sets it up."

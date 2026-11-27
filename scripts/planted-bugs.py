@@ -33,12 +33,14 @@ still in that session when the command ends is killed (where `/proc` exists): a 
 leave a test's child process running, and an orphan must not outlive the run.
 
 `--unaided` asks another question: would the simulator's swarm find each planted bug with no
-test written for it? The named tests are not run. Each patch is applied and the swarm runs
-`--seeds` seeds from `--base` (disjoint from the fixed seed set); the table gives the seeds run up
-to the first failure, or `none`. A bug no seed finds is a listed generator gap, not a failure:
-this mode reports and exits 0 unless the clean tree fails or a plant does not apply or build.
+test written for it? The named tests are not run. Each patch is applied and the swarm runs from
+`--base` (disjoint from the fixed seed set), and the run judges (D299): an entry of the swarm's
+reach (UNAIDED_PACKAGES) carries `unaided = <seeds>`, a budget the swarm must fail within, or
+`unaided_miss = "<why it cannot>"`; an entry with neither is refused by `--names`. A budgeted
+plant runs exactly its budget; found later or never is a failure. A plant marked a miss runs
+`--seeds` seeds, and a failure found there is a failure too: the explanation is stale.
 
-    uv run scripts/planted-bugs.py --unaided [--seeds N] [--base B] [--only NAME]...
+    uv run scripts/planted-bugs.py --unaided [--seeds N] [--base B] [--only NAME]... [--shard K/N]
 """
 
 import argparse
@@ -64,6 +66,9 @@ LOCK = SCRATCH / "lock"
 # 90 s limit from docs/planted-bugs/nextest.toml.
 RUN_BOUND = 300
 BUILD_BOUND = 1800
+# The packages whose plants the swarm can be asked about: the swarm drives lsr-core's engine
+# through lsr-sim. Every non-canary entry of these carries `unaided` or `unaided_miss`.
+UNAIDED_PACKAGES = ("lsr-sim", "lsr-core")
 # A planted loop must not eat the box: virtual memory cap for test runs, in KiB.
 MEM_CAP_KIB = 8 * 1024 * 1024
 
@@ -292,6 +297,60 @@ def test_files(bug: dict) -> tuple[set[str], list[str]]:
     return files, missing
 
 
+def unaided_problems(bugs: list[dict]) -> list[str]:
+    """What is wrong with the entries' unaided fields: one line each. An entry of
+    UNAIDED_PACKAGES has exactly one of `unaided` (a positive integer) and `unaided_miss` (a
+    sentence); entries that plant the same patch agree, since one swarm run answers them all."""
+    found, by_patch = [], {}
+    for b in bugs:
+        if "canary" in b:
+            continue
+        budget, miss = b.get("unaided"), b.get("unaided_miss")
+        name = b["name"]
+        if budget is None and miss is None:
+            if b["package"] in UNAIDED_PACKAGES:
+                found.append(f"{name}: needs `unaided = <seeds>` or `unaided_miss = \"<why>\"`")
+            continue
+        if budget is not None and miss is not None:
+            found.append(f"{name}: has both `unaided` and `unaided_miss`")
+        elif miss is not None and not (isinstance(miss, str) and miss.strip()):
+            found.append(f"{name}: `unaided_miss` must say why the swarm cannot reach it")
+        elif budget is not None and not (isinstance(budget, int) and not isinstance(budget, bool)
+                                         and budget > 0):
+            found.append(f"{name}: `unaided` must be a positive number of seeds")
+        by_patch.setdefault(b.get("patch", name), []).append(b)
+    for patch, group in by_patch.items():
+        if len({(g.get("unaided"), g.get("unaided_miss")) for g in group}) > 1:
+            found.append(f"{patch}: entries {[g['name'] for g in group]} plant one patch and must "
+                         "carry the same unaided field")
+    return found
+
+
+def unaided_verdict(bug: dict, got: str, clean: str) -> tuple[str, str]:
+    """The judged row for one plant: `got` is `swarm()`'s answer for it and `clean` the clean
+    tree's. Verdicts that pass start with `ok`; every other one fails the run."""
+    first = got.splitlines()[0] if got else ""
+    if first == "STALE" or first.startswith(("BUILD", "ERROR", "timeout")):
+        return first.split(" ")[0].upper(), "no answer: " + first
+    found = first[:1].isdigit()
+    if found and first.partition("\t")[0].partition(" ")[2] == clean.partition("\t")[0].partition(" ")[2] \
+            and clean[:1].isdigit():
+        return "MASKED", "the clean tree's own failure is the first failure"
+    seeds_run = first.partition("\t")[0].partition(" ")[2] if not found else ""
+    if "unaided_miss" in bug:
+        if found:
+            return "STALE MISS", (f"the swarm found it at seed {first.split(' ')[0]}, so \"{bug['unaided_miss']}\" "
+                                  "is no longer true: set `unaided` from this run and drop the miss")
+        return "ok miss", f"not found in {seeds_run} seeds, as marked"
+    budget = bug["unaided"]
+    if not found:
+        return "NOT FOUND", f"no failure in the budget of {budget} seeds"
+    k = int(first.split(" ")[0])
+    if k > budget:
+        return "OVER BUDGET", f"first failure at seed {k}, budget {budget}"
+    return "ok", f"first failure at seed {k} of budget {budget}"
+
+
 def missing_tests(bugs: list[dict]) -> list[str]:
     """`entry: test` for each named test that no `fn` defines."""
     return [f"{b['name']}: {t}" for b in bugs for t in test_files(b)[1]]
@@ -327,7 +386,8 @@ def main() -> int:
     ap.add_argument("--keep", action="store_true", help="leave the scratch worktree and target dir")
     ap.add_argument("--unaided", action="store_true",
                     help="seeds the swarm needs to find each plant, with no named test run")
-    ap.add_argument("--seeds", type=int, default=1000, help="--unaided: swarm seeds per plant")
+    ap.add_argument("--seeds", type=int, default=100,
+                    help="--unaided: seeds run for a plant marked a miss (a budgeted plant runs its budget)")
     ap.add_argument("--base", type=int, default=1_000_001, help="--unaided: first swarm seed")
     ap.add_argument("--no-wait", action="store_true",
                     help="refuse to start while another run holds the lock, instead of waiting")
@@ -345,9 +405,13 @@ def main() -> int:
         gone = missing_tests(bugs)
         for line in gone:
             print(f"planted-bugs: no test function for {line}", file=sys.stderr)
-        if not gone:
-            print(f"planted-bugs: every named test of {len(bugs)} entries is defined")
-        return 1 if gone else 0
+        unjudged = unaided_problems(bugs)
+        for line in unjudged:
+            print(f"planted-bugs: unaided field: {line}", file=sys.stderr)
+        if not gone and not unjudged:
+            print(f"planted-bugs: every named test of {len(bugs)} entries is defined, "
+                  "every swarm-reachable plant has its unaided budget or miss")
+        return 1 if gone or unjudged else 0
     unknown = [n for n in opts.only if n not in names]
     if unknown:
         print(f"planted-bugs: no such entry: {unknown}", file=sys.stderr)
@@ -385,7 +449,7 @@ def main() -> int:
         return 2
 
     if opts.unaided:
-        return unaided([b for b in bugs if "canary" not in b], opts.seeds, opts.base)
+        return unaided([b for b in bugs if "unaided" in b or "unaided_miss" in b], opts.seeds, opts.base)
 
     rows: list[tuple[str, str, str, str]] = []  # name, fix, verdict, detail
     head = checkout_head()
@@ -462,8 +526,10 @@ def run_ledger(bugs: list[dict], head: str, rows: list[tuple[str, str, str, str]
 SWARM = {"package": "lsr-sim", "test_bin": "sim"}
 
 
-# Seeds per nextest invocation: each run stays well inside the ledger's 90 s per-test limit.
-SWARM_CHUNK = 100
+# Seeds per nextest invocation: each run stays well inside the ledger's 90 s per-test limit, with
+# room for a loaded runner (a seed takes 0.4 s on a quiet one and up to 1.5 s on a busy box; at 100
+# seeds a busy box hit the limit, which showed as ERROR with no first-failure line).
+SWARM_CHUNK = 25
 
 
 def swarm(seeds: int, base: int) -> str:
@@ -494,44 +560,45 @@ def swarm(seeds: int, base: int) -> str:
 
 
 def unaided(bugs: list[dict], seeds: int, base: int) -> int:
-    """Seeds to the first swarm failure per plant; see the module docs."""
+    """Judges the swarm against each plant's unaided field; see the module docs."""
     head = checkout_head()
+    # One swarm run answers every entry that plants the same patch.
+    answers: dict[str, str] = {}
+    rows = []
     try:
         prepare_tree(head)
-        clean = swarm(seeds, base)
-        rows = []
-        for bug in bugs:
-            reset_tree(head)
-            patch = PATCHES / f"{bug.get('patch', bug['name'])}.patch"
-            applied = git("apply", "--whitespace=nowarn", str(patch), cwd=TREE, check=False)
-            assert_tree_at(head)
+        # The clean tree runs as many seeds as the longest plant run: a clean failure inside any
+        # of them is the clean tree's own and says nothing about a plant.
+        runs = [b["unaided"] if "unaided" in b else seeds for b in bugs]
+        clean = swarm(max(runs, default=seeds), base)
+        for bug, count in zip(bugs, runs):
+            patch_name = bug.get("patch", bug["name"])
+            patch = PATCHES / f"{patch_name}.patch"
             started = time.monotonic()
-            got = swarm(seeds, base) if applied.returncode == 0 else "STALE"
-            rows.append((bug["name"], got, time.monotonic() - started))
-            print(f"{bug['name']}: {got.splitlines()[0]} [{rows[-1][2]:.0f}s]", flush=True)
+            key = f"{patch_name}/{count}"
+            if key not in answers:
+                reset_tree(head)
+                applied = git("apply", "--whitespace=nowarn", str(patch), cwd=TREE, check=False)
+                assert_tree_at(head)
+                answers[key] = swarm(count, base) if applied.returncode == 0 else "STALE"
+            verdict, detail = unaided_verdict(bug, answers[key], clean)
+            rows.append((bug["name"], verdict, detail, answers[key]))
+            print(f"{bug['name']}: {verdict}, {detail} [{time.monotonic() - started:.0f}s]", flush=True)
     except StaleTree as stale:
         print(f"planted-bugs: {stale}; no verdict is about this checkout", file=sys.stderr)
         return 1
     finally:
         git("checkout", "--force", "--detach", "HEAD", cwd=TREE, check=False)
-    print(f"\nswarm seeds {base}..{base + seeds - 1} at {head[:12]}; clean tree: {clean.splitlines()[0]}")
-    print("| entry | seeds to first failure | first seed | failure |\n|---|---|---|---|")
-    for name, got, _ in rows:
-        first, _, why = got.partition("\t")
-        k, _, seed = first.partition(" ")
-        if k == "none":
-            k, seed = f"none in {seed}", ""
-        print(f"| {name} | {k} | {seed} | {why.splitlines()[0] if why else ''} |")
-    # A plant whose first failure is the clean tree's own (same seed, same message) shows nothing
-    # about the plant: the clean tree's defect hid it. It is reported as masked, not found.
-    masked = {name for name, got, _ in rows if got[:1].isdigit() and got.split(" ", 1)[1:] == clean.split(" ", 1)[1:]}
-    for name in sorted(masked):
-        print(f"masked by the clean tree's own failure: {name}")
-    found = sum(1 for name, got, _ in rows if got[:1].isdigit() and name not in masked)
-    print(f"\nunaided: the swarm found {found} of {len(rows)} plants within {seeds} seeds")
-    broken = [n for n, got, _ in rows if not (got[:1].isdigit() or got.startswith("none"))]
-    if broken or not clean.startswith("none"):
-        print(f"planted-bugs: clean tree {clean.splitlines()[0]!r}; no answer for {broken}", file=sys.stderr)
+    print(f"\nswarm from seed {base} at {head[:12]}; clean tree: {clean.splitlines()[0]}")
+    print("| entry | verdict | detail | first seed |\n|---|---|---|---|")
+    for name, verdict, detail, got in rows:
+        seed = got.split("\t")[0].split(" ")[1] if got[:1].isdigit() else ""
+        print(f"| {name} | {verdict} | {detail} | {seed} |")
+    bad = [r for r in rows if not r[1].startswith("ok")]
+    print(f"\nunaided: {len(rows) - len(bad)} of {len(rows)} plants judged as recorded")
+    if bad or not clean.startswith("none"):
+        print(f"planted-bugs: clean tree {clean.splitlines()[0]!r}; failed: "
+              + ", ".join(f"{n} ({v})" for n, v, _, _ in bad), file=sys.stderr)
         return 1
     return 0
 

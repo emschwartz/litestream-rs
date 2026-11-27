@@ -7,3 +7,4 @@ tests = [
     "upload::tests::slices::no_staged_file_at_or_past_the_one_in_flight_may_be_deleted_until_the_send_is_stopped",
     "actor::tests::sliced::a_drain_past_its_deadline_aborts_the_file_in_flight",
 ]
+unaided_miss = "Needs a fault or interleaving at one request or tick (a rejected part, a busy checkpoint, a slice boundary, a second SQLite in the process) that the swarm does not aim at; only a targeted test sets it up."

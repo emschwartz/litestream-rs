@@ -4,3 +4,4 @@ name = "verify-no-plan-called-merged"
 fix = "plant"
 package = "lsr-core"
 tests = ["verify::tests::against::a_transaction_the_replica_does_not_hold_fails_to_restore"]
+unaided_miss = "The compaction, listing or retention state it breaks needs a backlog, a stale carried listing or a hole in a level that the swarm's short runs do not build; only core unit tests set that state directly."

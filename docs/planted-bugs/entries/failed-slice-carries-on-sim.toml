@@ -6,3 +6,4 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["sliced::a_store_fault_between_two_slices_sends_the_file_again_from_its_first_byte"]
+unaided = 50

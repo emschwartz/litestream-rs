@@ -5,3 +5,4 @@ package = "lsr-core"
 tests = [
     "a_boot_removes_the_scratch_killed_uploads_left",
 ]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

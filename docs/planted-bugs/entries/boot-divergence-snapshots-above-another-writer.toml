@@ -4,3 +4,4 @@ name = "boot-divergence-snapshots-above-another-writer"
 fix = "68d2d90"
 package = "lsr-core"
 tests = ["a_running_engine_stops_when_another_writer_took_its_next_id"]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

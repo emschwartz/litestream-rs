@@ -4,3 +4,4 @@ package = "lsr-core"
 tests = [
     "lag::a_maintenance_fault_never_trips",
 ]
+unaided = 50

@@ -5,3 +5,4 @@ package = "lsr-sim"
 test_bin = "sim"
 patch = "unpinned-after-own-checkpoint"
 tests = ["faults::bump_overtaken_then_the_wal_restarts"]
+unaided = 104

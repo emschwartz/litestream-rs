@@ -4,3 +4,4 @@ fix = "5cf9f56"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["faults::bucket_rolled_back_while_idle"]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

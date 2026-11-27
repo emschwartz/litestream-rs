@@ -5,3 +5,4 @@ fix = "checker-holes (stall liveness)"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["stall_liveness::a_stall_ends_with_the_fault_that_caused_it"]
+unaided = 50

@@ -4,3 +4,4 @@ package = "lsr-core"
 tests = [
     "lag::a_refusal_at_boot_trips_until_the_first_listing",
 ]
+unaided = 120

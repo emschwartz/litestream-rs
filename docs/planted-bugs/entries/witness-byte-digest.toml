@@ -4,3 +4,4 @@ package = "lsr-core"
 tests = [
     "a_staged_file_whose_bytes_differ_but_still_verify_is_refused",
 ]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

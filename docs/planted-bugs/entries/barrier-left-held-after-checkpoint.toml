@@ -6,3 +6,4 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["barrier::every_checkpoint_lets_the_application_write_again_within_its_tick"]
+unaided = 50

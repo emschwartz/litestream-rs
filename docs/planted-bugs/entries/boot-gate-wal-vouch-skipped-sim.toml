@@ -4,3 +4,4 @@ fix = "aa1165d"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["newest_staged_file_lost", "restored_old_meta"]
+unaided_miss = "The local course needs staging behind the replica with the store down across two restarts and lying reads on return, a history the swarm does not draw; only its explicit scenarios reach it."

@@ -2,3 +2,4 @@ name = "failstop-holds-on-an-unreachable-store"
 fix = "c8b9c90"
 package = "lsr-core"
 tests = ["lag::a_store_down_for_the_bound_judges_the_boot"]
+unaided_miss = "Fail-stop needs an outage or doubt held past the age bound with the write gate in play, a scenario longer than the swarm's draw; only the named failstop scenarios and lag tests reach it."

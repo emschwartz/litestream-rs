@@ -7,3 +7,4 @@ tests = [
     "staging_that_does_not_read_whole_begins_no_course",
     "staged_files_that_do_not_chain_begin_no_course",
 ]
+unaided_miss = "The local course needs staging behind the replica with the store down across two restarts and lying reads on return, a history the swarm does not draw; only its explicit scenarios reach it."

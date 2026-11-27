@@ -6,3 +6,4 @@ test_bin = "sim"
 tests = [
     "failstop::a_refusal_at_boot_holds_until_it_heals",
 ]
+unaided = 120

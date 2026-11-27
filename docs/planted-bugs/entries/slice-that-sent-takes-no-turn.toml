@@ -6,3 +6,4 @@ package = "lsr-core"
 tests = [
     "actor::tests::sliced_compaction::a_slice_that_hands_bytes_over_before_it_waits_is_the_ticks_unit",
 ]
+unaided = 300

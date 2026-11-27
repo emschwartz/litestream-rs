@@ -8,3 +8,4 @@ tests = [
     "a_restart_during_an_outage_stages_and_checkpoints_from_local_state",
     "the_boot_after_the_course_stops_for_another_writer",
 ]
+unaided = 300

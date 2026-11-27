@@ -2,3 +2,4 @@ name = "first-snapshot-reads-the-database"
 fix = "plant"
 package = "lsr-core"
 tests = ["the_first_start_reads_each_page_once"]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

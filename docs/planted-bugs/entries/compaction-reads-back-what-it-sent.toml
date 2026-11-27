@@ -7,3 +7,4 @@ tests = [
     "actor::tests::steady::a_steady_writer_reads_no_level_zero_file_back",
     "maintain::tests::a_file_this_process_sent_is_compacted_from_staging_with_no_read_of_the_replica",
 ]
+unaided_miss = "The plant costs requests, memory or bytes and changes no restored page; the swarm's oracles judge pages and needless snapshots, not request counts or buffer sizes, and only the cost tests count those."

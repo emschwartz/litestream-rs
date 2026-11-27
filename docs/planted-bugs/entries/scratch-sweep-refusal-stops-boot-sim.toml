@@ -5,3 +5,4 @@ package = "lsr-sim"
 test_bin = "sim"
 patch = "scratch-sweep-refusal-stops-boot"
 tests = ["a_refused_scratch_sweep_never_holds_the_boot"]
+unaided = 72

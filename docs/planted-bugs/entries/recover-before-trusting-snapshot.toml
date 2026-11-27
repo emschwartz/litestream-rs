@@ -5,3 +5,4 @@ test_bin = "sim"
 tests = [
     "a_requested_snapshot_after_the_wal_moved_trusts_no_stale_page",
 ]
+unaided = 176

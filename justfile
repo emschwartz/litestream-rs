@@ -2,7 +2,7 @@
 default: check
 
 # The land gate: format, lints, tests. A branch lands only when this is green.
-check: fmt-check clippy test test-opt doctest features upstream-test-map-fresh evidence-fresh planted-bugs-names
+check: fmt-check clippy test test-opt doctest features upstream-test-map-fresh evidence-fresh planted-bugs-names planted-bugs-judge-test
 
 fmt-check:
     cargo fmt --all -- --check
@@ -201,6 +201,11 @@ planted-bugs-apply:
 planted-bugs-names:
     python3 scripts/planted-bugs.py --names
 
+# The unaided judge's own test, over fake rows: within budget passes, over budget fails, a miss
+# that is found fails.
+planted-bugs-judge-test:
+    python3 scripts/test_planted_bugs.py
+
 # The planted bugs a pull request against `base` can have stopped catching (its diff touches the
 # entry, its patch, a file the patch edits or a file defining a named test, or the patch no longer
 # applies), planted again and run: `just planted-bugs-diff origin/main [K/N]`. Pull requests in CI.
@@ -213,9 +218,10 @@ planted-bugs-diff base shard="0/1":
 planted-bugs *args:
     uv run scripts/planted-bugs.py {{args}}
 
-# The swarm alone against each planted bug, no named test run: seeds to the first failure per
-# entry (`docs/planted-bugs.md`). Reports; a plant no seed finds is a listed generator gap.
-planted-bugs-unaided seeds="1000" *args:
+# The swarm alone against each planted bug, no named test run, judged (docs/decisions/D299.md): a
+# plant must fail within its `unaided` budget, a plant marked `unaided_miss` must still not be
+# found within `seeds`. Nightly in CI, in shards: `just planted-bugs-unaided 100 --shard 0/8`.
+planted-bugs-unaided seeds="100" *args:
     uv run scripts/planted-bugs.py --unaided --seeds {{seeds}} {{args}}
 
 # Production lines per shipped crate (code, comment, blank; tests and the "testing" feature left

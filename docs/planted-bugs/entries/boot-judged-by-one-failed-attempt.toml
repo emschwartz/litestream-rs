@@ -7,3 +7,4 @@ tests = [
     "a_store_down_for_the_bound_judges_the_boot",
     "a_timeout_at_boot_is_no_refusal",
 ]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

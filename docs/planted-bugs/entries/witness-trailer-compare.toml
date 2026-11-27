@@ -5,3 +5,4 @@ tests = [
     "a_staged_file_replaced_under_a_running_engine_is_never_uploaded",
     "a_staged_file_replaced_after_its_witness_is_refused_and_leaves_nothing_visible",
 ]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

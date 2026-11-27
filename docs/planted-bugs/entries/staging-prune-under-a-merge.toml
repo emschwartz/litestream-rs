@@ -6,3 +6,4 @@ package = "lsr-core"
 tests = [
     "actor::tests::sliced_compaction::the_staging_prune_waits_for_a_merge_reading_staged_copies",
 ]
+unaided_miss = "The state it breaks (a staged copy that differs from the replica's, a prune racing a merge part-way) needs one interleaving the swarm's random faults do not line up within its seeds; only a targeted core test sets it directly."

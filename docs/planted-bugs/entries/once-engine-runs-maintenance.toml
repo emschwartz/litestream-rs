@@ -3,3 +3,4 @@ name = "once-engine-runs-maintenance"
 fix = "claude/once-quiet"
 package = "lsr-core"
 tests = ["a_one_off_engine_plans_nothing_however_late_it_ticks", "a_one_off_drain_still_ends_with_the_retention_pass"]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

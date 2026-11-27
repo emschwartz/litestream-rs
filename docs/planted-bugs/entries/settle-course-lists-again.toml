@@ -7,3 +7,4 @@ package = "lsr-core"
 tests = [
     "actor::tests::local::settling_a_course_lists_the_replica_no_more_than_a_boot_without_one",
 ]
+unaided_miss = "Costs one extra listing per boot with a local course and changes no restored page; the swarm does not count requests, and only the settle test does."

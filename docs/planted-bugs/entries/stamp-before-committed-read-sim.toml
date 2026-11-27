@@ -8,3 +8,4 @@ test_bin = "sim"
 tests = [
     "a_commit_after_the_tick_read_its_clock_is_not_stamped_before_it",
 ]
+unaided = 68

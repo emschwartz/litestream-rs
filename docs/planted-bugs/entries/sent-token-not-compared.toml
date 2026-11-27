@@ -4,3 +4,4 @@ name = "sent-token-not-compared"
 fix = "claude/steady-requests"
 package = "lsr-core"
 tests = ["maintain::tests::a_staged_copy_that_changed_since_it_was_sent_is_not_compacted_from"]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

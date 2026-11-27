@@ -12,3 +12,4 @@ tests = [
     "actor::tests::rejected_snapshot::a_refused_database_snapshot_is_kept_and_owes_a_read_back",
     "actor::tests::audit::a_sound_output_the_store_refused_stays_and_is_read_back",
 ]
+unaided_miss = "Needs a store that refuses an output against its checksum while the key holds an earlier sound attempt, a fault pair the swarm does not draw; only the named core tests set it up."

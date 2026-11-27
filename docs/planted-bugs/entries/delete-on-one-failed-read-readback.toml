@@ -4,3 +4,4 @@ package = "lsr-core"
 tests = [
     "one_bad_read_of_a_sound_snapshot_deletes_nothing",
 ]
+unaided = 300
