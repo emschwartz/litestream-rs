@@ -96,7 +96,7 @@ impl Checkpointer for Sqlite {
 
     fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointRun, SourceError> {
         let mut inner = self.lock();
-        if mode == CheckpointMode::Truncate {
+        let (rc, log, checkpointed, one_sqlite, lost) = if mode == CheckpointMode::Truncate {
             let shm = inner.shm_path();
             let alone = descriptors_on(&shm) == Some(1);
             let (rc, log, checkpointed) = wal_checkpoint(inner.free_writer()?, mode);
@@ -105,27 +105,24 @@ impl Checkpointer for Sqlite {
             if rc & 0xff == ffi::SQLITE_LOCKED {
                 return Err(SourceError::Busy);
             }
-            let (busy, log, checkpointed) = sort_run(rc, log, checkpointed)?;
-            return Ok(CheckpointRun {
-                busy,
-                log,
-                checkpointed,
-                epoch: inner.epoch,
-                one_sqlite,
-            });
-        }
-        inner.end_read()?;
-        let (rc, log, checkpointed) = wal_checkpoint(inner.reader.handle(), mode);
-        // The read transaction comes back whether or not the checkpoint ran, as Go defers it.
-        let retaken = inner.begin_read();
+            (rc, log, checkpointed, one_sqlite, false)
+        } else {
+            inner.end_read()?;
+            let (rc, log, checkpointed) = wal_checkpoint(inner.reader.handle(), mode);
+            // The read transaction comes back whether or not the checkpoint ran, as Go defers it.
+            let lost = inner.begin_read().is_err();
+            (rc, log, checkpointed, true, lost)
+        };
         let (busy, log, checkpointed) = sort_run(rc, log, checkpointed)?;
-        retaken.map_err(|_lost| SourceError::ReadTxLost)?;
+        if lost {
+            return Err(SourceError::ReadTxLost);
+        }
         Ok(CheckpointRun {
             busy,
             log,
             checkpointed,
             epoch: inner.epoch,
-            one_sqlite: true,
+            one_sqlite,
         })
     }
 
