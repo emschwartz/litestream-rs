@@ -78,7 +78,6 @@ impl Control {
     }
 }
 
-/// The `-exec` child process, if one was asked for.
 enum ChildProcess {
     None,
     Running(Child),
@@ -170,7 +169,6 @@ pub(crate) fn supervise(
     finished
 }
 
-/// The first held gate, with its database.
 fn first_held(daemon: &Daemon) -> Option<(PathBuf, Trip)> {
     daemon
         .gates()

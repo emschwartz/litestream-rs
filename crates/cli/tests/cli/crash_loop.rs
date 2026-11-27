@@ -148,7 +148,6 @@ impl World {
 fn a_crash_loop_of_short_boots_with_no_change_leaves_nothing_growing() {
     let world = World::new();
     let (replica, staging, size) = (&world.replica, &world.staging, world.size);
-    // The first boot snapshots and uploads it; then it is killed.
     let mut daemon = replicate(&world.config);
     daemon.wait_for(&["msg=uploaded", "Put("]);
     daemon.signal("KILL");
@@ -311,7 +310,6 @@ fn wait_for_scratch(dir: &Path) {
 #[ignore = "open defect, issue #331, fails when run: the kill lands as the first scratch byte appears, and a cut-short snapshot leaves nothing a later boot can build on without durable engine state (D173, D174)"]
 fn a_boot_snapshot_cut_short_every_boot_still_moves_the_replica() {
     let world = World::new();
-    // The first boot replicates the database as it is.
     let mut daemon = replicate(&world.config);
     daemon.wait_for(&["msg=uploaded", "Put("]);
     daemon.signal("KILL");

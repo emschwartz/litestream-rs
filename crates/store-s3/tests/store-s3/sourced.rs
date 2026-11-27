@@ -457,7 +457,7 @@ fn a_parts_failure_is_reported_as_what_it_was() {
 
 /// A request that fails the way a busy bucket does is sent again for its part alone, from the
 /// source's verified bytes: the upload keeps the parts it has, completes, and starts nothing
-/// over. Go's uploader does the same through the AWS SDK's retryer (D308).
+/// over. Go's uploader does the same through the AWS SDK's retryer (D313).
 #[test]
 fn a_part_that_fails_once_is_sent_again_and_the_upload_completes() {
     let bytes = body(2 * PART + 100_000);

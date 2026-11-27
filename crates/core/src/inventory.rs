@@ -708,7 +708,6 @@ mod tests {
     impl ObjectStore for Stuck {
         type Upload = MemUpload;
 
-        /// Leaves no scratch.
         async fn remove_scratch(&self) -> Result<u64, StoreError> {
             Ok(0)
         }

@@ -14,7 +14,6 @@ use lsr_compat::{GoVersion, go_binary, lsr_binary};
 use lsr_core::needs::{Resource, must};
 use lsr_core::parse_file_name;
 
-/// One side: a database, its replica and its config, in a directory of its own.
 struct Side {
     dir: tempfile::TempDir,
     app: rusqlite::Connection,
@@ -66,7 +65,6 @@ impl Side {
         )
     }
 
-    /// Every file name at `level`, sorted.
     fn level(&self, level: u8) -> Vec<String> {
         let dir = self.replica().join("ltx").join(level.to_string());
         let mut names: Vec<String> = std::fs::read_dir(dir)
@@ -89,7 +87,6 @@ impl Side {
             .unwrap()
     }
 
-    /// The rows Go restores from the replica.
     fn go_restores(&self, go: &Path) -> Vec<Vec<u8>> {
         let out = self
             .dir

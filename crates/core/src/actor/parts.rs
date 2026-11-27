@@ -11,10 +11,9 @@
 //! The engine's place in the WAL is one value, [`Course`]: not booted, on a
 //! local course while the replica cannot be listed (`super::local`), no
 //! position (the next sync is a snapshot, for a cause), or at a position.
-//! What used to be separate flags (a snapshot pending, more WAL behind the
-//! cap, a wal-index reset seen) are fields of the variant they are true in,
-//! so "no position and no snapshot pending" cannot be written down. A boot
-//! builds a whole `Engine` and assigns it only when every step succeeded.
+//! A snapshot pending, more WAL behind the cap and a wal-index reset seen are fields of the
+//! variant they are true in, so "no position and no snapshot pending" cannot be written down.
+//! A boot builds a whole `Engine` and assigns it only when every step succeeded.
 
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
@@ -304,8 +303,8 @@ impl Kept {
         }
     }
 
-    /// The restore point retention keeps: the oldest of those asked for, a degraded task's and a
-    /// scheduled verify's. Derived on every read, so there is no copy to fall behind.
+    /// The restore point retention keeps: the oldest of a degraded task's and a scheduled
+    /// verify's. Derived on every read, so there is no copy to fall behind.
     pub(super) fn kept_restore_point(&self) -> Option<Txid> {
         [self.task_restore_point.txid(), self.verify_restore_point]
             .into_iter()
@@ -313,7 +312,7 @@ impl Kept {
             .min()
     }
 
-    /// The cause a snapshot is owed for besides the engine's own, if any.
+    /// The cause an operator asked a snapshot for, if any.
     pub(super) fn asked(&self) -> Option<SnapshotCause> {
         self.snapshot_asked
             .then_some(SnapshotCause::OperatorRequested)
@@ -539,7 +538,6 @@ impl Sliced {
         }
     }
 
-    /// Whether it is the level-9 snapshot read from the database.
     pub(super) const fn is_snapshot(&self) -> bool {
         matches!(self, Self::Snapshot(_))
     }
@@ -552,7 +550,6 @@ impl Sliced {
         }
     }
 
-    /// Ends it, its upload aborted.
     pub(super) async fn abort(self) {
         match self {
             Self::Snapshot(snapshot) => snapshot.abort().await,
@@ -562,7 +559,6 @@ impl Sliced {
 }
 
 impl Engine {
-    /// The job part-way to the replica, if any.
     pub(super) fn slicing(&self) -> Option<&Sliced> {
         self.sliced.as_ref().map(|(_, sliced)| &**sliced)
     }

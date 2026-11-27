@@ -56,7 +56,7 @@ pub struct PageLimit(NonZeroU16);
 impl PageLimit {
     /// The largest page.
     pub const MAX_RAW: u16 = 1000;
-    /// The largest page as a limit; equals [`Self::MAX_RAW`] (pinned by a test).
+    /// The largest page as a limit; equals [`Self::MAX_RAW`].
     pub const MAX: Self = Self(NonZeroU16::MIN.saturating_add(999));
 
     /// A page of one entry.
@@ -88,7 +88,7 @@ impl ReadLen {
     pub const MAX_RAW: u32 = 16_777_216;
 
     /// One mebibyte: the chunk a file is read in when nothing calls for
-    /// another size (pinned by a test).
+    /// another size.
     pub const CHUNK: Self = Self(NonZeroU32::MIN.saturating_add(1_048_575));
 
     /// Returns `None` for zero or above [`Self::MAX_RAW`].
@@ -101,9 +101,7 @@ impl ReadLen {
     }
 
     /// `raw` as a length, or [`Self::CHUNK`] when it is not one. For a
-    /// module's own constant, so that a read size is a value fixed when the
-    /// crate is built and no call site has a failure to handle; a test pins
-    /// each such constant to the size it names.
+    /// module's own constant, so that no call site has a failure to handle.
     #[must_use]
     pub const fn or_chunk(raw: u32) -> Self {
         match Self::new(raw) {
@@ -388,8 +386,8 @@ pub enum StoreError {
 
 /// Why a store refuses access. Each kind asks a different person to fix a
 /// different thing, so they are told apart all the way to the health report:
-/// the classes were one (`credentials`) until clock skew, a missing bucket and
-/// a failed certificate check each sent operators to rotate keys that were fine.
+/// clock skew, a missing bucket or a failed certificate check must not send
+/// operators to rotate keys that are fine.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Error)]
 pub enum Denied {
     /// The store does not accept the credentials: an unknown access key, a
@@ -492,6 +490,9 @@ pub enum BatchKind {
     Lists,
     /// [`ObjectStore::created_at_many`].
     ResolvedCreatedAt,
+    /// Spans of one object read at once, each its own [`ObjectStore::read_span`]: a restore's
+    /// window over a large file (`crate::restore`). One, the default, reads it as one stream.
+    Spans,
 }
 
 /// A backend holding a replica's LTX objects, keyed by [`FileKey`].
@@ -533,6 +534,23 @@ pub trait ObjectStore: Send + Sync {
             store: self,
             key,
             offset,
+            end: None,
+        })
+    }
+
+    /// Bytes `start` to `end` (exclusive) of `key` as one stream ([`ReadStream`]), for a reader
+    /// that reads up to [`BatchKind::Spans`] spans of one object side by side. Its pieces end at
+    /// `end` as a [`Self::read_stream`]'s end at the object's end. A store whose
+    /// [`BatchKind::Spans`] width is above one makes it one request and reads it ahead of the
+    /// caller, a bounded number of pieces, so the spans download at once while the caller takes
+    /// them in turn; the request may go out before the first piece is asked for. The default reads
+    /// each piece with [`Self::read`]. A wrapper forwards it.
+    fn read_span(&self, key: FileKey, start: u64, end: u64) -> Box<dyn ReadStream + '_> {
+        Box::new(Ranged {
+            store: self,
+            key,
+            offset: start,
+            end: Some(end),
         })
     }
 
@@ -899,16 +917,28 @@ pub trait ReadStream: Send {
     fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>>;
 }
 
-/// [`ObjectStore::read_stream`]'s default: one [`ObjectStore::read`] a piece.
+/// [`ObjectStore::read_stream`]'s and [`ObjectStore::read_span`]'s default: one
+/// [`ObjectStore::read`] a piece, none past `end`.
 struct Ranged<'a, S: ?Sized> {
     store: &'a S,
     key: FileKey,
     offset: u64,
+    end: Option<u64>,
 }
 
 impl<S: ObjectStore + ?Sized> ReadStream for Ranged<'_, S> {
     fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
         Box::pin(async move {
+            let len = match self.end {
+                None => len,
+                Some(end) => {
+                    let left = end.saturating_sub(self.offset).min(len.get());
+                    match u32::try_from(left).ok().and_then(ReadLen::new) {
+                        Some(len) => len,
+                        None => return Ok(Vec::new()),
+                    }
+                }
+            };
             let bytes = self.store.read(&self.key, self.offset, len).await?;
             let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
             self.offset = self.offset.saturating_add(read);
@@ -1010,8 +1040,8 @@ impl Upload for Box<dyn DynUpload> {
     }
 }
 
-/// Whether the store holds an object under `key`, by a one-byte read. Used where one key is
-/// named without a listing: a boot's refused staged file.
+/// Whether the store holds an object under `key`, by a one-byte read, for a key named
+/// without a listing.
 ///
 /// # Errors
 /// The store's error for a read that fails other than as not found.

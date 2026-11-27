@@ -15,8 +15,7 @@
 //! part of the result.
 //!
 //! Two bounds hold, whatever the lanes do:
-//! - **Count.** At most `width` parts of one upload are started and not yet collected: the
-//!   `concurrency` setting, or fewer for parts that hold their bytes (below).
+//! - **Count.** At most `concurrency` parts of one upload are started and not yet collected.
 //! - **One part waits.** A whole part that finds every lane taken waits in the upload, one at
 //!   most. A write that would make a second waits for a part to end, on this thread, helping
 //!   the lanes when they have no thread of their own. A buffered write that fills a part with
@@ -25,9 +24,9 @@
 //!   than a write of [`ReadLen::CHUNK`]: a caller that asks first never waits.
 //!
 //! **Parts that hold their bytes.** A part written with [`Upload::write`] is a buffer, so
-//! the upload holds `width` parts in flight and one more, filling or waiting: no byte goes
-//! into a new buffer while a whole part still waits. `width` is cut so that this fits a fixed
-//! budget (`part_plan.rs`, `docs/decisions/D232.md`).
+//! the upload holds `concurrency` parts in flight and one more, filling or waiting: no byte goes
+//! into a new buffer while a whole part still waits, so `part size x (concurrency + 1)` is the
+//! most it holds, as in Go (`docs/decisions/D309.md`).
 //!
 //! **Parts written from a source.** An upload whose first write is [`Upload::write_from`]
 //! keeps no part buffer: of each part it keeps what was seen of every 256 KiB and a reader of
@@ -45,7 +44,7 @@
 //! connection) is sent again by the thread that sent it, from the same verified bytes (the
 //! buffer it still holds, or its source's cells), a bounded number of times and with a capped
 //! wait between tries, as
-//! Go's uploader retries a part (`multipart.rs`, `docs/decisions/D308.md`); the parts already
+//! Go's uploader retries a part (`multipart.rs`, `docs/decisions/D313.md`); the parts already
 //! uploaded stay. A source that gave nothing is never retried here. The first part that fails
 //! for good is the upload's failure, returned by the call that collects it. Parts not yet on
 //! the wire are then not sent, and the caller restarts the upload. A failed upload sends no AbortMultipartUpload itself: its id
@@ -89,7 +88,7 @@ use crate::again::{Run, Sealed};
 use crate::classify::{classify, transient_other};
 use crate::lanes::{Condvar, Mutex, MutexGuard, lock};
 use crate::multipart::{PAYLOAD_TOO_LARGE, Sent, completed_etag_fits, judge_part, part_retry_wait};
-use crate::part_plan::{MAX_OBJECT, held_width, plan_part_size};
+use crate::part_plan::{MAX_OBJECT, plan_part_size};
 use crate::request::{HttpRequest, Precondition, RequestBuilder, RequestError, UploadId};
 use crate::sigv4::PayloadHash;
 use crate::store::Inner;
@@ -468,16 +467,6 @@ impl<T> S3Upload<T> {
         u64::try_from(self.part).unwrap_or(u64::MAX)
     }
 
-    /// The most parts of this upload in flight at once.
-    fn width(&self) -> usize {
-        let most = self.inner.concurrency;
-        if self.filling.sourced() {
-            most.get()
-        } else {
-            held_width(most, self.part_len()).get()
-        }
-    }
-
     /// Ends the upload on a failure of its own making; parts not yet on the wire are not sent.
     fn fail(&mut self, err: StoreError) -> StoreError {
         self.over = true;
@@ -606,7 +595,7 @@ impl<T: Transport> S3Upload<T> {
 
     /// Starts the part that waits when a lane is free; whether it did.
     fn start_ready(&mut self) -> Result<bool, StoreError> {
-        let width = self.width();
+        let width = self.inner.concurrency.get();
         let Some(multi) = &mut self.multi else {
             return Ok(false);
         };
@@ -897,7 +886,7 @@ impl<T: Transport> Upload for S3Upload<T> {
         // A buffered part that fills with every lane taken waits, and the rest of the write it
         // filled waits with it (`take`): with less room than one write left, that write could.
         let short = self.part_len().saturating_sub(self.filling.len()) < ReadLen::CHUNK.get();
-        let (width, buffered) = (self.width(), !self.filling.sourced());
+        let (width, buffered) = (self.inner.concurrency.get(), !self.filling.sourced());
         Ok(match &self.multi {
             Some(multi) if multi.ready.is_some() => Flight::Full,
             Some(multi) if buffered && short && multi.flying >= width => Flight::Full,

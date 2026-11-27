@@ -179,7 +179,6 @@ fn after_a_restart_only_the_files_left_staged_are_read_back() {
     );
     assert_eq!(second.get(&(Request::Get, 0)), None, "{second:?}");
 }
-/// How many files the sync steps of `ticks` staged.
 fn synced(ticks: &[Tick]) -> u32 {
     ticks
         .iter()
@@ -309,7 +308,6 @@ fn a_drain_does_not_wait_for_the_interval() {
     let seen = rig.settle(&mut actor, at + 1);
     assert_eq!(synced(&seen), 1, "{seen:?}");
 }
-/// How many requests of `kind` a bill holds, at every level.
 fn count(bill: &BTreeMap<(Request, u8), usize>, kind: Request) -> usize {
     bill.iter()
         .filter(|((request, _), _)| *request == kind)
@@ -319,7 +317,6 @@ fn count(bill: &BTreeMap<(Request, u8), usize>, kind: Request) -> usize {
 
 /// Level-0 retention ages each file it deletes by the created-at time the file's put was
 /// answered with, and its anchors by those of the newest files this process put: no HEAD.
-/// A listing with only a last-modified time once cost one HEAD per level-0 file deleted.
 /// Go ages by the listed last-modified time and asks nothing.
 #[test]
 fn retention_reads_no_created_at_time_of_a_file_this_process_put() {
@@ -516,9 +513,7 @@ fn a_steady_writer_with_short_intervals_pays_the_bill_and_no_more() {
 /// snapshot moves the floor retention reads); the second leaves out the levels above the top
 /// the boot found empty (`docs/decisions/D294.md`). The snapshot is planned from the boot's listing
 /// and the level-0 file this engine put since, as Go plans it from one listing of level 9
-/// (`store.go`, `CompactDB`). It once listed the whole replica again for it, ten more
-/// requests on every first start (and one more whole listing for each pass made while the
-/// first file was still in flight).
+/// (`store.go`, `CompactDB`).
 #[test]
 fn a_first_start_lists_the_replica_at_boot_and_after_its_first_snapshot_only() {
     let mut rig = s3_like();

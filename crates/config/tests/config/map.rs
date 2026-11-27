@@ -415,6 +415,38 @@ fn if_replication_stops_defaults_to_hold_start_and_the_bound_to_ten_minutes() {
     }
 }
 
+/// `snapshot-read-limit` (issue 315): a byte size a second, no limit unless stated, never
+/// zero; Go ignores the section, so the key is read only here.
+#[test]
+fn snapshot_read_limit_is_a_byte_size_off_by_default() {
+    let config = |head: &str| one(&format!("{head}{}", db_with(""))).config().clone();
+    assert_eq!(config("").snapshot_read_limit, None);
+    for (value, want) in [
+        ("30MB", 30_000_000),
+        ("512KiB", 524_288),
+        ("1048576", 1_048_576),
+    ] {
+        let got = config(&format!("litestream-rs:\n  snapshot-read-limit: {value}\n"));
+        assert_eq!(
+            got.snapshot_read_limit.map(|l| l.get()),
+            Some(want),
+            "{value}"
+        );
+    }
+    for value in ["0", "fast", "-1MB"] {
+        let problems = refused(&format!(
+            "litestream-rs:\n  snapshot-read-limit: {value}\n{}",
+            db_with("")
+        ));
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.path.to_string() == "litestream-rs.snapshot-read-limit"),
+            "{value}: {problems:#?}"
+        );
+    }
+}
+
 /// Go's `TestNewDBFromConfig_MetaPathExpansion`.
 #[test]
 fn meta_path_is_expanded_and_used_as_is() {

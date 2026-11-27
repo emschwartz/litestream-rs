@@ -40,7 +40,6 @@ fn a_steady_sync_puts_each_level_zero_file_once_and_asks_nothing_else() {
         Ok(report) => report,
         Err(failure) => panic!("{failure}"),
     };
-    // Operations 6 to 26: seven commits and their ticks, one checkpoint among them.
     let (from, to) = (5, 26);
     let counts = &report.remote_counts;
     let spent = lsr_sim::resources::delta(counts[from], counts[to]);

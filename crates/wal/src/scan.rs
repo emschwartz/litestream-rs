@@ -136,7 +136,6 @@ pub struct WalReader<R> {
     header: WalHeader,
 }
 
-/// A buffer for one whole frame.
 fn frame_buf(page_size: PageSize) -> Vec<u8> {
     vec![0; usize_from(u32::try_from(frame_len(page_size)).unwrap_or(0))]
 }

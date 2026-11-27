@@ -60,7 +60,6 @@ pub enum ProbeError {
     NoIndex,
 }
 
-/// The header bytes a pager needs to open a file at `page_size`.
 fn file_header(page_size: PageSize) -> [u8; 100] {
     let mut head = [0_u8; 100];
     if let Some(magic) = head.get_mut(..16) {
@@ -90,7 +89,6 @@ fn be_word(bytes: &[u8], at: usize) -> Option<u32> {
     bytes.get(at..end)?.try_into().ok().map(u32::from_be_bytes)
 }
 
-/// The recovered wal-index header: `mxFrame`, the size, the salts and the checksum.
 fn index_header(shm: &[u8]) -> Option<(u32, u32, Salts, WalChecksum)> {
     if shm.get(12).copied().unwrap_or(0) == 0 {
         return None;

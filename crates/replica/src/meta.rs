@@ -25,12 +25,9 @@
 //! when the process dies. Descriptors are opened close-on-exec, so an
 //! `-exec` child does not inherit it.
 //!
-//! The release is an explicit unlock, not the close alone. A child process
-//! the host starts holds a copy of every descriptor from its fork until its
-//! exec, and a lock of this kind lasts until the last copy closes: left to
-//! the close, the lock outlived the replicator for that moment, and a
-//! replicator started again in the same process was refused as a second
-//! engine. An unlock through any copy releases it at once.
+//! The release is an explicit unlock, not the close alone: a child the host forks holds a copy
+//! of every descriptor until its exec, and a lock of this kind lasts until the last copy
+//! closes, so a replicator restarted in the same process would be refused as a second engine.
 //!
 //! Where it excludes: processes on one host whose meta directory is on a
 //! local filesystem (ext4, XFS, Btrfs, ZFS, tmpfs on Linux; APFS and HFS+ on
@@ -55,9 +52,7 @@ use lsr_core::TakeoverRecord;
 use crate::error::StartError;
 use crate::events::TrustRecordUnusable;
 
-/// The file the engine locks.
 pub(crate) const LOCK_FILE: &str = "lsr-lock";
-/// The takeover record.
 pub(crate) const TAKEOVER_FILE: &str = "lsr-takeover";
 /// The takeover record's scratch name, renamed over it.
 const TAKEOVER_SCRATCH: &str = "lsr-takeover.new";
@@ -69,8 +64,7 @@ pub(crate) struct MetaLock {
 }
 
 impl Drop for MetaLock {
-    /// Unlocks before the close (the module doc says why). An unlock that fails leaves the
-    /// lock to the close, as before.
+    /// Unlocks before the close (the module doc says why).
     fn drop(&mut self) {
         drop(self.file.unlock());
     }

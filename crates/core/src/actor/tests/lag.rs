@@ -7,7 +7,6 @@ use crate::actor::lag::BOOT_UNDECIDED_BOUND;
 use crate::failstop::{MaxUnreplicatedAge, Trip};
 use crate::store::Denied;
 
-/// The default bound, in milliseconds.
 const BOUND: i64 = 600_000;
 
 /// Upload failures enough to outlast any test here.
@@ -86,7 +85,6 @@ fn a_store_down_past_the_bound_trips_at_the_probe() {
 /// next retry at 811 s): the probe at 600 s succeeds and nothing trips.
 #[test]
 fn a_heal_inside_the_backoff_is_found_by_the_probe_and_never_trips() {
-    // The first failure, then retries at 1, 3, 7, 15, 31, 63, 127, 255 and 511 s.
     let (mut rig, mut actor) = lagging(10);
     let seen = drive(&mut rig, &mut actor, T0 + 10, T0 + 10 + BOUND + 400_000);
     assert_eq!(first_trip(&seen), None, "{seen:?}");
@@ -129,7 +127,6 @@ fn a_crash_loop_does_not_reset_the_clock() {
             break;
         }
         now += life;
-        // A crash: a new process, a new actor, the staged files left behind.
         actor = Actor::new(go_like());
         rig.tick(&mut actor, now);
         assert_eq!(
@@ -353,7 +350,6 @@ fn a_refusal_restarts_the_bound() {
             .inner
             .inject_failure(StoreOp::List, transient(StoreOp::List));
     }
-    // The refusal lands after the first run would have reached the bound.
     let refused_at = T0 + bound;
     rig.tick(&mut actor, refused_at);
     assert!(!actor.boot_judged(), "a refusal holds");
@@ -393,7 +389,6 @@ fn a_local_failure_before_the_listing_does_not_release_a_start_another_writer_st
     rig.settle(&mut first_run, T0);
     let ours = first_run.staged().max(first_run.engine.upload.confirmed());
     super::second_writer::put_foreign(&rig, ours.unwrap().next().unwrap().get());
-    // A restart: the next boot lists the replica and refuses the other writer's file.
     let mut actor = Actor::new(go_like());
     rig.staging
         .inner
@@ -965,7 +960,6 @@ fn a_file_that_changes_nothing_on_top_of_a_commit_keeps_the_commit_dated() {
     let since = actor
         .unreplicated_since()
         .expect("the commit is off the replica");
-    // The same page again: a file that changes nothing.
     rig.commit(7);
     rig.tick(&mut actor, T0 + 20);
     assert!(actor.staged() > actor.replicated());

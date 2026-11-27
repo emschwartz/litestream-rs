@@ -71,8 +71,6 @@ pub(super) const NAPKIN: &str = "napkin (written before timing):
     page cache at about 2 GB/s (0.5 s), one GET per file at about 1 ms each: floor about 1.5 s;
     peak memory: a streaming decoder needs a few MiB, one buffered file needs its size";
 
-// ---- snapshot-impact (issue 315): what a full copy does to an application beside it ----
-
 /// The database: 16 GiB, twice the 8 GiB box's memory (4,194,304 pages, 16,777,216 rows).
 pub(super) const IMPACT_DB_MIB: u64 = 16 * 1024;
 /// The hot set: 1 GiB of leaf pages, one row each (262,144 pages), a seventh of the memory.
@@ -127,7 +125,7 @@ pub(super) struct ArmDef {
 /// the paced arm takes half the rate B's calibration copy read at (a quarter and an eighth were
 /// dropped before any counted run: see the frame's last paragraph);
 /// [`read-twice`] is the known-bad control and must lose to B clearly.
-pub(super) const ARMS: [ArmDef; 5] = [
+pub(super) const ARMS: [ArmDef; 8] = [
     ArmDef {
         label: "A",
         patch: None,
@@ -144,6 +142,24 @@ pub(super) const ARMS: [ArmDef; 5] = [
         label: "pace-1/2",
         patch: Some("read-pace"),
         pace_divisor: Some(2),
+        idle: false,
+    },
+    ArmDef {
+        label: "pace-1/4",
+        patch: Some("read-pace"),
+        pace_divisor: Some(4),
+        idle: false,
+    },
+    ArmDef {
+        label: "pace-1/8",
+        patch: Some("read-pace"),
+        pace_divisor: Some(8),
+        idle: false,
+    },
+    ArmDef {
+        label: "pace-1/16",
+        patch: Some("read-pace"),
+        pace_divisor: Some(16),
         idle: false,
     },
     ArmDef {
@@ -234,6 +250,16 @@ pub(super) const IMPACT_FRAME: &str = "frame of snapshot-impact (written before 
     the gate is 6 pairs, rounds are 4 to 6, and the copy limit is 60 minutes. Fewer rounds mean wider
     intervals; the gate still stops the run if the box cannot see the SESOI. Only calibration runs
     (unmeasured) had happened; no arm's counted number was seen before this change.
+  changed for the rate-cap run (2026-11-27; the page-cache advice measured no benefit, see docs/decisions/D298.md
+    on claude/snapshot-cache, and is not in the engine): the arms are A, B and the paced arms pace-1/2, 1/4,
+    1/8 and 1/16 (--arms), 10 rounds (--rounds 10) after a passing gate, on a 4 GiB dedicated box with an 8 GiB
+    database and a 512 MiB hot set; a second invocation puts the hot set near the box's free memory (--hot-mib)
+    to see whether eviction shows at all. Metrics read: application p50 and p99 and commit p50 and p99 during
+    the copy, WAL growth, copy wall time, application and system refaults. The bar above stands.
+    The first A/A gate on the box failed (half width 51%): the application's read lateness is its
+    timer wake-up (p50 0.07 ms, p99 0.07 to 0.24 ms between idle runs, measured with a sleep loop), so the
+    reader and writer threads now busy-wait their last 300 microseconds before a due time. This takes
+    about a core of the four in every arm; the copy competes with it for CPU.
   confounders accepted and named: MinIO runs on the same disk and in the same page cache (its writes
     of the replica are part of what a copy does here, in every arm that copies); one machine, one disk
     type; a hot set with a 90/10 skew, not the embedder's; uniform random reads within each tier.

@@ -141,7 +141,6 @@ impl Rig {
     }
 }
 
-/// One side's exit code, standard error and standard output.
 type Ran = (Option<i32>, String, String);
 
 fn run(binary: &Path, args: &[String], dir: &Path) -> Ran {
@@ -170,7 +169,6 @@ fn answers(rig: &Rig, case: &Case) -> (Vec<String>, Ran, Ran) {
     (args, go, lsr)
 }
 
-/// Compares one case and names how Go's run ended.
 fn compare(rig: &Rig, case: &Case) -> Result<String, TestCaseError> {
     let (args, (go_code, go_err, go_out), (lsr_code, lsr_err, lsr_out)) = answers(rig, case);
     let with_dir = args.iter().any(|a| a.ends_with("with-dir.yml"));
@@ -222,7 +220,6 @@ const AIMED: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// Cases per aimed ending.
 const AIMED_CASES: u32 = 4;
 
 /// Cases for one aimed line: its tokens, with `-json` or not after the command.
@@ -257,7 +254,6 @@ fn rig() -> Rig {
         dir.path().join("empty-replica").display(),
     );
     std::fs::write(dir.path().join("litestream.yml"), &config).unwrap();
-    // Two databases, one below a subdirectory: Go's walk order and relative replica paths.
     std::fs::create_dir_all(dir.path().join("scan/sub")).unwrap();
     for name in ["scan/b.db", "scan/a.db", "scan/sub/c.db"] {
         std::fs::write(dir.path().join(name), b"SQLite format 3\0").unwrap();

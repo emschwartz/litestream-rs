@@ -84,7 +84,6 @@ fn a_second_restore_of_one_target_is_refused_while_the_first_lives() {
         FileSink::create(&target),
         Err(CreateError::RestoreInProgress(path)) if path == dir.path().join("db.restore")
     ));
-    // The refused attempt did not disturb the first restore's scratch.
     assert_eq!(fs::read(first.scratch_path()).unwrap(), vec![1; 512]);
     drop(first);
     assert!(names(&dir).is_empty());

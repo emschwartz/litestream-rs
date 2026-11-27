@@ -1,7 +1,7 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1579,7 +1579,7 @@
+@@ -1800,7 +1800,7 @@
      fn sync_held_until(&self, now: Timestamp) -> Option<Timestamp> {
          let last = self.engine.synced_at?;
          let due = last.checked_add(self.kept.cfg.sync_interval)?;
@@ -9,4 +9,4 @@ diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
 +        (self.running() && now < due && false).then_some(due)
      }
  
-     /// Whether everything staged is on the replica.
+     fn caught_up(&self) -> bool {

@@ -15,7 +15,6 @@ use lsr_sim::sqlite::{
 use super::index::Index;
 use super::state::Real;
 
-/// A commit armed for the tick.
 pub(super) struct Armed {
     pub(super) pages: Vec<(PageNo, Vec<u8>)>,
     pub(super) db_size: u32,
@@ -23,7 +22,6 @@ pub(super) struct Armed {
     pub(super) created_at: CreatedAt,
 }
 
-/// The tick's calls, what is armed in it and what ran.
 #[derive(Default)]
 pub(super) struct Tick {
     pub(super) calls: u32,
@@ -37,7 +35,7 @@ pub(super) struct Tick {
 
 impl Real {
     /// One call into SQLite by the engine: the armed operation runs first when its turn has
-    /// come, and a commit armed for this kind of call is made.
+    /// come, then a commit armed for this kind of call.
     pub(super) fn call(&mut self, kind: Option<SourceOp>) {
         let at = self.tick.calls;
         self.tick.calls = self.tick.calls.saturating_add(1);
@@ -115,7 +113,6 @@ impl Real {
         });
     }
 
-    /// Makes the commit armed for `site`, if one is.
     pub(super) fn commit_in_tick(&mut self, site: InTickSite) {
         if self
             .tick
@@ -160,7 +157,6 @@ impl Real {
         }
     }
 
-    /// Whether a power loss now would keep the whole WAL.
     #[expect(
         clippy::expect_used,
         reason = "test support: a WAL the VFS never saw is a harness bug, not an answer"

@@ -16,7 +16,7 @@
 //! commit frame, 9 the last page differs, 9a the wal-index was reset ahead of
 //! the header past a commit the position never covered, 10 continue.
 //!
-//! Rule 9a is a running position's (#26). SQLite can reset the wal-index to a
+//! Rule 9a is a running position's. SQLite can reset the wal-index to a
 //! generation with no frame while the WAL file keeps the old header (see
 //! [`CommittedRead::reset_ahead_of`]). The reset needed every frame backfilled,
 //! so a commit that chains on from the position is in the database file and in
@@ -117,9 +117,9 @@ pub enum LastPageCheck {
     NotInNewestStagedFile,
     /// There is no such frame.
     NoFrame(Miss),
-    /// The WAL holds a last page like the newest staged file's, but what it holds in the newest staged file's range
-    /// is not what the newest staged file staged: another page set, other bytes or another commit
-    /// size (a rewound tail regrown with a different transaction).
+    /// The WAL holds a last page like the file's, but what it holds in the file's range is not
+    /// what the file staged: another page set, other bytes or another commit size (a rewound
+    /// tail regrown with a different transaction).
     Rewritten,
 }
 
@@ -534,8 +534,8 @@ impl Origin {
 struct NewestStagedPages {
     wanted: Option<PageChecksum>,
     last: Option<LastPage>,
-    /// Every page the WAL holds in the newest staged file's range is in the newest staged file with the same bytes.
-    /// The newest staged file may hold more: pages the database file supplied (grown pages, a snapshot's).
+    /// Every page the WAL holds in the file's range is in the file with the same bytes. The
+    /// file may hold more: pages the database file supplied (grown pages, a snapshot's).
     holds_wal_pages: bool,
 }
 
@@ -1113,7 +1113,8 @@ fn same_generation(
 
 /// Rule 9a: the wal-index was reset ahead of the header and a commit follows the
 /// position. A position pinned at this epoch cannot have one after it (the reset
-/// needed a backfill its read lock blocks), so finding one is what the check that catches frames abandoned after the read lock was taken exists for.
+/// needed a backfill its read lock blocks), so finding one is what the check for frames
+/// abandoned after the read lock was taken exists to catch.
 fn reset_past(
     source: &PositionSource<'_>,
     seen: &Seen,

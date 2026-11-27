@@ -76,6 +76,7 @@ mod mem_sink;
     reason = "test fixtures do index and size arithmetic on small bounded values"
 )]
 mod tests;
+mod window;
 
 #[cfg(any(test, feature = "testing"))]
 pub use mem_sink::{Database, MemPublishError, MemSink};
@@ -516,7 +517,6 @@ struct TailGone {
     listing: Inventory,
 }
 
-/// An attempt that built the whole database.
 struct Applied {
     chain: ContiguousChain,
     last: Verified,
@@ -677,11 +677,8 @@ pub(crate) async fn restore_within<S: ObjectStore, K: DatabaseSink>(
 struct Retries {
     /// Starts over each reason is allowed: [MAX_ATTEMPTS].
     limit: u8,
-    /// Starts over after a planned file was gone.
     vanished: u8,
-    /// Attempts whose listing planned a gap.
     gaps: u8,
-    /// Plans of the rest after a kept part.
     tails: u8,
 }
 
@@ -702,13 +699,11 @@ impl Retries {
         exhausted(self.vanished, self.limit, missing, attempt)
     }
 
-    /// Counts one plan of the rest after `missing` was gone in attempt `attempt`.
     fn tail(&mut self, missing: FileKey, attempt: u8) -> Result<(), RestoreError> {
         self.tails = self.tails.saturating_add(1);
         exhausted(self.tails, MAX_TAIL_PLANS, missing, attempt)
     }
 
-    /// Counts one listing that planned a gap.
     fn gap(&mut self, outcome: PlanOutcome) -> Result<(), RestoreError> {
         self.gaps = self.gaps.saturating_add(1);
         if self.gaps >= self.limit {
@@ -729,7 +724,6 @@ fn exhausted(count: u8, limit: u8, missing: FileKey, attempt: u8) -> Result<(), 
     Ok(())
 }
 
-/// One listing, one plan and the chain applied, or why not.
 async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
     store: &S,
     given: Option<&Inventory>,
@@ -832,7 +826,6 @@ async fn plan_target<S: ObjectStore>(
         .map_err(resolve_abort)
 }
 
-/// How a failed created-at read ends an attempt.
 fn resolve_abort(err: ResolveError) -> Abort {
     match err {
         ResolveError::Store(StoreError::NotFound { key }) => Abort::Vanished(key),
@@ -981,7 +974,7 @@ async fn apply_whole<S: ObjectStore, K: DatabaseSink>(
     let mut pages = WholePages::default();
     let mut read = LtxRead::new(key, chunk_len());
     let applied = read
-        .read_verified(store, |event| match event {
+        .read_verified_from(&mut *window::stream(store, info), |event| match event {
             Event::Header(header) if header.txids() != key.range() => {
                 Err(Some(RestoreError::File {
                     key,
@@ -1039,7 +1032,6 @@ impl WholePages {
     }
 }
 
-/// A chain whose last file, `key`, leaves no database is refused.
 fn not_empty(key: FileKey, last: &Verified) -> Result<(), RestoreError> {
     if last.header().commit() == 0 {
         return Err(RestoreError::File {
@@ -1050,7 +1042,6 @@ fn not_empty(key: FileKey, last: &Verified) -> Result<(), RestoreError> {
     Ok(())
 }
 
-/// What a failed read of `key` means for the attempt.
 fn read_abort(key: FileKey, fault: ReadFault<RestoreError>) -> Abort {
     match fault {
         ReadFault::Store(StoreError::NotFound { .. }) => Abort::Vanished(key),
@@ -1073,7 +1064,9 @@ async fn apply_file<S: ObjectStore, K: DatabaseSink>(
     let key = info.key;
     let mut read = LtxRead::new(key, chunk_len());
     let applied = read
-        .read_verified(store, |event| on_event(key, previous, sink, event))
+        .read_verified_from(&mut *window::stream(store, info), |event| {
+            on_event(key, previous, sink, event)
+        })
         .await;
     *bytes_read = bytes_read.saturating_add(read.bytes_read());
     let verified = applied.map_err(|fault| read_abort(key, fault))?;
@@ -1097,7 +1090,6 @@ fn on_event<K: DatabaseSink>(
     }
 }
 
-/// A file read to its end: the sink cut to the size the file's header gives.
 fn end_file<K: DatabaseSink>(sink: &mut K, verified: &Verified) -> Result<(), RestoreError> {
     let header = verified.header();
     sink.truncate(header.pages(), header.page_size())

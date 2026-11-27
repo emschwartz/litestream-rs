@@ -12,7 +12,6 @@ const T95: [f64; 30] = [
     2.052, 2.048, 2.045, 2.042,
 ];
 
-/// The t quantile for [`n`] pairs.
 fn t95(n: usize) -> f64 {
     n.checked_sub(2)
         .and_then(|df| T95.get(df))

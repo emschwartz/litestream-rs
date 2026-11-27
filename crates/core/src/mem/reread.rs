@@ -155,7 +155,6 @@ impl Upload for RereadsUpload {
 impl ObjectStore for Rereads {
     type Upload = RereadsUpload;
 
-    /// Forwards to the store it wraps.
     async fn remove_scratch(&self) -> Result<u64, StoreError> {
         self.inner.remove_scratch().await
     }

@@ -239,7 +239,6 @@ fn a_short_snapshot_that_cannot_be_deleted_goes_first_and_holds_retention() {
     assert_eq!(restored(&rig), 2);
 }
 
-/// The stored created-at time of `info`.
 fn created(info: &FileInfo) -> i64 {
     info.created_at().unwrap().at().unix_millis()
 }

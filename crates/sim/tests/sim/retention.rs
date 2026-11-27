@@ -20,7 +20,6 @@ fn run(seed: u64, opts: &Opts) -> RunReport {
     }
 }
 
-/// What one run did, summed over seeds.
 #[derive(Default, Debug)]
 struct Tally {
     compacted: usize,

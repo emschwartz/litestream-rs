@@ -48,8 +48,13 @@ struct Rig {
 /// A store of 5 MiB parts, `width` in flight at most, whose waiting callers land the part
 /// `pick` names.
 fn rig(width: usize, pick: impl FnMut(usize) -> usize + Send + 'static) -> Rig {
+    rig_of(PartSize::MIN, width, pick)
+}
+
+/// The same with parts of `part` bytes.
+fn rig_of(part: PartSize, width: usize, pick: impl FnMut(usize) -> usize + Send + 'static) -> Rig {
     let config = config()
-        .with_part_size(PartSize::MIN)
+        .with_part_size(part)
         .with_concurrency(NonZeroUsize::new(width).unwrap());
     let wire = Arc::new(FaultTransport::new(FakeS3::new(
         &config,
@@ -176,8 +181,7 @@ fn no_more_parts_are_in_flight_than_the_setting_and_one_waits() {
 
 /// A buffered upload (a level-9 snapshot's) asked before each write says it is full before the
 /// write that would fill a part with every lane taken, so no write it let through waits for a
-/// part. Such a write used to wait for one on the engine's thread, and the engine synced and
-/// uploaded nothing of its database until the part ended.
+/// part (a wait on the engine's thread stalls its sync and upload).
 #[test]
 fn a_buffered_write_let_through_never_waits_for_a_part() {
     let rig = rig(1, oldest);
@@ -223,7 +227,7 @@ fn parts_that_end_out_of_order_make_the_same_object() {
 
 /// A part fails while three others are in flight. The call that collects its answer fails
 /// with it, the others are not sent, and an abort then returns with nothing in flight and
-/// leaves the id to the orphan list, as a failed upload always did.
+/// leaves the id to the orphan list.
 #[test]
 fn a_part_that_fails_with_others_in_flight_ends_the_upload_and_the_rest_are_not_sent() {
     let rig = rig(4, oldest);
@@ -497,4 +501,25 @@ fn an_upload_that_holds_its_parts_holds_those_in_flight_and_one_more() {
         assert_eq!(rig.parts_sent(), 8);
         assert!(rig.stored().as_deref() == Some(&bytes[..]));
     }
+}
+
+/// The setting is the count, whatever the part size: 100 MiB parts and a concurrency of 2 have
+/// two parts in flight, not one (`docs/decisions/D309.md`). The memory is the parts in flight
+/// and one more.
+#[test]
+fn large_parts_still_have_the_configured_number_in_flight() {
+    const MIB: usize = 1024 * 1024;
+    let part = 100 * MIB;
+    let rig = rig_of(PartSize::new(100 * 1024 * 1024).unwrap(), 2, oldest);
+    let bytes = vec![7_u8; 2 * part];
+    let mut upload = begin(&rig.store, &key(0, 1, 1));
+    block_on(async {
+        for piece in bytes.chunks(8 * MIB) {
+            upload.write(piece).await.unwrap();
+        }
+    });
+    assert_eq!((upload.in_flight(), rig.lanes.started()), (2, 2));
+    assert!(upload.buffer_capacity() <= 3 * part);
+    block_on(upload.commit()).unwrap();
+    assert_eq!(rig.parts_sent(), 2);
 }

@@ -8,7 +8,6 @@ use std::time::Duration;
 use jiff::civil::{DateTime, date};
 use jiff::{Span, Unit};
 
-/// Milliseconds in a day.
 const MILLIS_PER_DAY: i64 = 86_400_000;
 
 /// A point in time as LTX stores it: milliseconds since the Unix epoch.

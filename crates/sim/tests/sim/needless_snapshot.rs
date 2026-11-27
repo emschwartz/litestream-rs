@@ -214,7 +214,6 @@ fn a_power_loss_between_ticks_that_takes_a_sent_staged_file_forces_the_snapshot(
         commit(),
         Op::Tick,
         Op::Restart,
-        // The boot, and the upload of the file. Nothing has synced the directory since.
         Op::Tick,
         Op::Tick,
         Op::PowerLoss,
@@ -263,7 +262,6 @@ fn a_commit_inside_a_step_under_a_reset_index_justifies_the_next_snapshot() {
         Ok(report) => report,
         Err(failure) => panic!("{failure}"),
     };
-    // The running engine's snapshot, judged and forced.
     assert_eq!(
         report.reach.get("event.Resnapshot"),
         1,

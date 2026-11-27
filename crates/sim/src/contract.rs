@@ -83,8 +83,7 @@ impl fmt::Display for Expected {
     }
 }
 
-/// Whether a file begins at transaction 1, restated from the contract: such a
-/// file can start a chain at any level.
+/// Whether a file can start a chain at any level.
 #[must_use]
 pub fn begins_at_one(file: &FileInfo) -> bool {
     file.key.range().min() == Txid::MIN

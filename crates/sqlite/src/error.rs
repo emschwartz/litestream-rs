@@ -22,10 +22,9 @@ pub enum OpenError {
         /// What SQLite said.
         source: SqliteError,
     },
-    /// The SQLite answering at run time is not one of the builds this crate's reads of SQLite's
-    /// private layouts have been verified against, so those reads cannot be trusted. The process
-    /// links another SQLite (a system library outside the verified list, SQLCipher, a
-    /// loadable-extension build, a libsqlite3-sys version outside the supported range).
+    /// The SQLite answering at run time is not a build this crate's reads of SQLite's private
+    /// layouts have been verified against: a system library outside the verified list, SQLCipher,
+    /// a loadable-extension build, a libsqlite3-sys version outside the supported range.
     #[error(
         "the SQLite in use is version {} ({source_id}), not a build this library is verified against ({}): link the SQLite bundled by libsqlite3-sys 0.37 to 0.40, or one of those builds",
         dotted(*.found),

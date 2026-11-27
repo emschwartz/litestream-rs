@@ -249,13 +249,11 @@ impl Actor {
         self.kept.quiet.insert(key.range().max());
     }
 
-    /// Takes the quiet files a boot found among the pending ones, and lets go of marks the
-    /// replica has passed.
+    /// Takes the quiet files a boot found among the pending ones.
     pub(super) fn quiet_at_boot(&mut self, quiet: BTreeSet<Txid>) {
         self.kept.quiet = quiet;
     }
 
-    /// Whether the committed WAL holds a frame past the synced position.
     fn wal_ahead(&self, end: CommittedEnd) -> bool {
         match self.position() {
             Some(position) if position.cursor().salts() == end.salts() => {

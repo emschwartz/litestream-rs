@@ -7,7 +7,6 @@
 use crate::common;
 use crate::wire;
 
-// The helpers are test code only by cfg, which is what clippy.toml's allow-*-in-tests reads.
 #[cfg(test)]
 mod cases {
     use std::io;

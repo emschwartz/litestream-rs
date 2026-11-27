@@ -60,7 +60,6 @@ fn seen(path: &Path) -> Seen {
     }
 }
 
-/// The only level-9 file of a replica.
 fn snapshot_of(replica: &Path) -> PathBuf {
     let listing = list(replica).expect("list");
     let mut snapshots = listing
@@ -183,7 +182,6 @@ fn go_snapshot_of(build: &GoBuild, db_copy: &Path, dir: &Path) -> PathBuf {
     snapshot_of(&replica)
 }
 
-/// Runs Go's `ltx` listing for the database and returns its text.
 fn go_ltx_listing(build: &GoBuild, config: &Path, db: &Path, home: &Path) -> String {
     let bin = build.binary().expect("the build under test is present");
     let mut command = Command::new(&bin);
@@ -297,7 +295,6 @@ mod live {
             .to_owned();
         let max = seen(&l9).header.fields().txids.max();
         let dir = written.fixture.dir().to_path_buf();
-        // The snapshot stands alone: a copy of the replica with every other level gone.
         let alone = dir.join("alone");
         fs::create_dir_all(alone.join("ltx").join("9")).expect("dir");
         fs::copy(&l9, alone.join("ltx").join("9").join(&l9_name)).expect("copy");
@@ -337,7 +334,6 @@ mod live {
                     "{name}, {case}: Go's ltx listing does not show the level-9 file {l9_name}:\n{listing}"
                 );
             }
-            // Go's own snapshot of the same database.
             let copy = dir.join("go-origin").join("app.db");
             fs::create_dir_all(copy.parent().expect("parent")).expect("dir");
             let restored = dir.join(format!("restored-{name}-alone.db"));

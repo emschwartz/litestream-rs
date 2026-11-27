@@ -19,7 +19,6 @@ fn len(path: &Path) -> u64 {
     std::fs::metadata(path).unwrap().len()
 }
 
-/// A WAL database with table `t`, and an application connection set up as replication asks.
 fn database(dir: &Path) -> (Connection, PathBuf) {
     let db = dir.join("app.db");
     let app = Connection::open(&db).unwrap();
@@ -65,7 +64,6 @@ fn a_restart_by_the_replicator_cuts_the_wal_back_to_the_default_limit() {
     );
 }
 
-/// What one burst through the actor did to the WAL file.
 struct Burst {
     rig: Rig<Sqlite>,
     /// The file's length once the burst committed.
@@ -143,7 +141,6 @@ fn a_wal_several_times_the_limit_shrinks_with_truncate_out_of_reach() {
     }
 }
 
-/// No snapshot after the boot's first one, and no fault, in the whole run.
 fn no_resnapshot_and_no_fault(rig: &Rig<Sqlite>) {
     let snapshots: Vec<&Tick> = rig
         .ticks()

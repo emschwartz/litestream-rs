@@ -13,7 +13,7 @@ Claude models wrote the code and these documents under the repository owner's di
 - **Visible failures.** `Replicator::health()` takes one lock and does no I/O. Every failure that lasts is a named state in the handle, in `/healthz` and in `/metrics`, never only a log line.
 - **Faster, with less memory and fewer requests.** On one 4-core Linux VM against MinIO on loopback, a first start of a 4 GiB database of random pages, at the default part settings ([docs/performance.md](docs/performance.md)):
   - **Faster:** 34.6 s against Go's 59.6 s (three paired runs).
-  - **Less memory:** a peak of 55 MiB against Go's 171 MiB (215 against 824 MiB at a large part size).
+  - **Less memory:** a peak of 55 MiB against Go's 171 MiB (at a large part size see [docs/performance.md](docs/performance.md)).
   - **Fewer requests:** 1,680 against Go's 3,809 in one counted run, though 40 LISTs against Go's 33 or 34.
 - **No silent short restores.** A restore verifies every file before it uses it, and fails rather than hand back a shorter history.
 

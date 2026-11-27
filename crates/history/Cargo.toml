@@ -28,7 +28,7 @@ sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-# The provider the S3 store's TLS clients need: this crate's tests build a real `S3Store`.
+# A crypto provider for the S3 store's TLS clients, which enable none.
 rustls = { workspace = true, features = ["aws-lc-rs", "std"] }
 lsr-core = { workspace = true, features = ["testing"] }
 lsr-history = { workspace = true, features = ["sqlite"] }

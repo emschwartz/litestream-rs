@@ -19,9 +19,7 @@
 //! The upload of a staged file is measured too. It goes to the replica a slice a step
 //! (`docs/decisions/D217.md`), and between two slices the engine keeps the decoder that
 //! verifies the file and the upload it has open. Neither grows with the file, so a file four
-//! times the size, sent in four times the slices, must peak where the small one does. The
-//! whole-file upload it replaced peaked at 533,268 bytes on this gate (two read chunks and
-//! 9 KiB); the send's own state adds 504.
+//! times the size, sent in four times the slices, must peak where the small one does.
 
 #![expect(
     clippy::arithmetic_side_effects,

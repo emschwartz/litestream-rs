@@ -520,7 +520,6 @@ impl State {
     }
 }
 
-/// The whole file, or `None` when there is none.
 fn read_whole(path: &std::path::Path) -> io::Result<Option<Vec<u8>>> {
     #[expect(
         clippy::disallowed_methods,
@@ -534,7 +533,6 @@ fn read_whole(path: &std::path::Path) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
-/// Makes `path` hold `bytes`, or removes it.
 fn put(path: &std::path::Path, bytes: Option<&[u8]>) -> io::Result<()> {
     match bytes {
         Some(bytes) => std::fs::write(path, bytes),
@@ -1247,9 +1245,8 @@ extern "C" fn x_truncate(file: *mut ffi::sqlite3_file, size: i64) -> c_int {
 
 /// `flags` with a `SQLITE_SYNC_FULL` sync turned into `SQLITE_SYNC_NORMAL`: the unix VFS answers
 /// FULL with `fcntl(F_FULLFSYNC)` on macOS, a drive cache flush of 8 ms a call against 0.1 ms for
-/// `fsync`. The engine's own sync of the WAL asks for FULL, and a cycle of the fault matrix makes
-/// it once per injected step. The durability these tests check is the law's (it cuts each file back
-/// to its last sync in the process), not the drive's, and Linux, where CI runs, does `fsync` for
+/// `fsync`. The engine's WAL sync asks for FULL, once per injected step of the fault matrix. The
+/// durability these tests check is the law's, not the drive's, and Linux (CI) does `fsync` for
 /// both. See `host_fs.rs` for the stores' half of this.
 const fn without_drive_flush(flags: c_int) -> c_int {
     if flags & 0x0F == ffi::SQLITE_SYNC_FULL {

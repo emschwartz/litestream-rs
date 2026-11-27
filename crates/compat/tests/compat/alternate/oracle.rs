@@ -41,7 +41,6 @@ use std::path::{Path, PathBuf};
 use lsr_compat::{AppFixture, hash_pages, integrity_check};
 use rusqlite::{Connection, OptionalExtension};
 
-/// The b-tree page type of a table leaf.
 const TABLE_LEAF: u8 = 0x0d;
 
 /// One database state: its page hashes and the `_litestream_seq` value it held (0 with no
@@ -66,7 +65,6 @@ pub fn live_seq(fixture: &AppFixture) -> i64 {
     seq_in(&fixture.app)
 }
 
-/// The root page of `_litestream_seq` in the database at `path`.
 fn seq_root_in(conn: &Connection) -> u32 {
     conn.query_row(
         "SELECT rootpage FROM sqlite_master WHERE type = 'table' AND name = '_litestream_seq'",

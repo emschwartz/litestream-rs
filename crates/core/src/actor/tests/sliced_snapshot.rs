@@ -368,8 +368,7 @@ fn file_in_flight_beside_the_snapshot(rig: &mut Rig, actor: &mut Actor) {
 
 /// A file in flight and a snapshot part-way share one count of slices: with a commit waiting at
 /// every tick, at most [`state::FAIR_SHARE`] ticks in a row end in a slice of either before the
-/// WAL step syncs. Before, the snapshot's share ended in the file's slice, which was counted
-/// apart, and a commit waited behind both.
+/// WAL step syncs.
 #[test]
 fn a_commit_waits_at_most_a_share_of_slices_of_a_file_and_a_snapshot_together() {
     let (mut rig, mut actor) = before_a_long_snapshot();

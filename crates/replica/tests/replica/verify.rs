@@ -549,7 +549,6 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
         matches!(seen, (at, VerifyOutcome::Failed(Mismatch::Pages { first, .. })) if at == txid && first == page),
         "{seen:?}"
     );
-    // Replication goes on.
     site.commit(1);
     advance(&replicator, &clock, POLL);
     let went_on = moved_until(&replicator, &clock, (POLL, 240), |h| {
@@ -694,9 +693,7 @@ fn a_run_that_restores_but_finds_the_newest_out_of_reach_fails_as_unrestorable()
         },
     )
     .unwrap();
-    // The boot's first file goes up before any commit: a commit that beats the boot is inside
-    // that one file, nothing is left to compact, and the schedule then writes no level-1 file
-    // and no level-9 snapshot for a day (see `settle_maintenance`).
+    // The boot's first file goes up before any commit (see the test above, `settle_maintenance`).
     moved_until(&replicator, &clock, (POLL, 240), caught_up);
     site.commit(1);
     advance(&replicator, &clock, POLL);

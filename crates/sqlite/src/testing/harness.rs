@@ -63,7 +63,6 @@ pub use stepper::{StepDid, Stepper, step_after_recovery};
 
 use app::{APP, App};
 
-/// The application connection a cycle's long reader uses.
 const READER: u32 = 1;
 
 /// What the suite needs of a backend: the engine's three doors and a way to open them.
@@ -248,7 +247,6 @@ const DEFAULT_SEED: NonZeroI32 = match NonZeroI32::new(0x5eed) {
     Some(seed) => seed,
     None => NonZeroI32::MIN,
 };
-/// Ticks a settle may take.
 const SETTLE_TICKS: u32 = 2_000;
 /// Retries in a row, with nothing done between them, after which a settle gives up.
 const SETTLE_RETRIES: u32 = 50;
@@ -408,8 +406,7 @@ pub fn open_app(db: &Path, vfs: &FaultVfs, synchronous: &str) -> Result<Connecti
     Ok(app)
 }
 
-/// Creates the database at `db` (one table, `t(id INTEGER PRIMARY KEY, v BLOB)`) and returns
-/// its file's bytes, read once every connection is closed.
+/// Returns the new database's bytes, read once every connection is closed.
 fn create(db: &Path, vfs: &FaultVfs, page_size: u32) -> Result<Vec<u8>, RigError> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE;
     let conn = Connection::open_with_flags_and_vfs(db, flags, vfs.name())?;
@@ -1233,8 +1230,7 @@ impl<B: Backend> Rig<B> {
     }
 }
 
-/// One in-process concurrent writer: an application connection through the rig's VFS, set up as
-/// replication asks, waiting on the others' write lock.
+/// The in-process counterpart of the application process's writer.
 fn local_writer(db: &Path, vfs: &str, writer: u32, rows: u32) -> Result<(), RigError> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE;
     let conn = Connection::open_with_flags_and_vfs(db, flags, vfs)?;
@@ -1249,7 +1245,6 @@ fn local_writer(db: &Path, vfs: &str, writer: u32, rows: u32) -> Result<(), RigE
     Ok(())
 }
 
-/// Copies every file of `from` into `to`, so the oracle can judge a replica on disk.
 async fn copy_store(from: &FsStore<HostFs>, to: &MemStore) -> Result<(), RigError> {
     let store = |err: StoreError| RigError::Store(err.to_string());
     let inventory = Inventory::load(from)

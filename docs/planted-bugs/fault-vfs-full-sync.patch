@@ -1,8 +1,8 @@
 diff --git a/crates/sqlite/src/testing/vfs.rs b/crates/sqlite/src/testing/vfs.rs
 --- a/crates/sqlite/src/testing/vfs.rs
 +++ b/crates/sqlite/src/testing/vfs.rs
-@@ -1252,7 +1252,7 @@
- /// to its last sync in the process), not the drive's, and Linux, where CI runs, does `fsync` for
+@@ -1249,7 +1249,7 @@
+ /// durability these tests check is the law's, not the drive's, and Linux (CI) does `fsync` for
  /// both. See `host_fs.rs` for the stores' half of this.
  const fn without_drive_flush(flags: c_int) -> c_int {
 -    if flags & 0x0F == ffi::SQLITE_SYNC_FULL {

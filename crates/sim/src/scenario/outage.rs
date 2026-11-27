@@ -21,11 +21,7 @@ const ROUNDS: u32 = 40;
 /// course keep the WAL under. The application writes about `3 * ROUNDS` frames meanwhile.
 pub const OUTAGE_WAL_FRAMES: u32 = 32;
 
-/// The reach key of a tick that ended with the engine staging before it booted.
 const LOCAL_COURSE: &str = "boot.local_course";
-
-/// The reach keys of what the checks made of the course's files (`crate::slot`): staged apart
-/// and judged there, moved up to level 0, and deleted without a move.
 const STAGED_APART: &str = "staged.apart";
 const MOVED_UP: &str = "staged.moved_up";
 const APART_GIVEN_UP: &str = "staged.apart_given_up";
@@ -65,7 +61,6 @@ fn failing(op: StoreOp, err: StoreError) -> Op {
     }
 }
 
-/// Every call on the replica fails as a timeout until [`Op::Heal`].
 fn store_down() -> Vec<Op> {
     OPS.into_iter()
         .map(|op| {
@@ -78,9 +73,6 @@ fn store_down() -> Vec<Op> {
         .collect()
 }
 
-/// A snapshot on the replica, then the store goes down, two commits are staged and cannot
-/// be sent, the process is killed, and the new one runs `ROUNDS` rounds of a commit and a
-/// tick with the store still down.
 fn restarted_while_down() -> Vec<Op> {
     let mut ops = vec![commit(3, false)];
     ops.extend(ticks(4));
@@ -117,8 +109,6 @@ pub fn store_down_across_a_restart() -> Scenario {
     s
 }
 
-/// The run's events from the first failed call on the replica to the first boot after it:
-/// what the engine did while the store was down.
 fn while_down(report: &RunReport) -> Result<&[Seen], String> {
     let seen = &report.seen;
     let down = seen
@@ -197,10 +187,6 @@ fn short_wal_and_no_snapshot(report: &RunReport) -> Result<(), String> {
 /// after a local course staged from it, and then the store answers. The course's files were
 /// cut from the WAL as it was, each from frames that were durable then. Moved up by the boot
 /// they no longer match the WAL, and the boot takes a snapshot, which the damage forces.
-///
-/// The rotating seeds of 2026-11-25 failed here before the checks read the slot: the move
-/// was taken for a staging from the regrown WAL (frames not durable, or another commit than
-/// the file holds), and for the staging that ends the damage's claim on a snapshot.
 #[must_use]
 pub fn store_returns_after_the_wal_was_regrown() -> Scenario {
     wal_damaged_as_the_store_returns(
@@ -213,10 +199,6 @@ pub fn store_returns_after_the_wal_was_regrown() -> Scenario {
 /// The WAL's header is torn as the store answers, and the first delete in staging fails: the
 /// boot's move of the course's files stops after its first copy, and a later boot takes the
 /// snapshot the torn header forces.
-///
-/// The rotating seeds of 2026-11-25 failed here before the checks read the slot: the copy
-/// was taken for a file staged after the damage, which ends the damage's claim on a
-/// snapshot, so the snapshot was called needless.
 #[must_use]
 pub fn store_returns_after_the_wal_lost_its_header() -> Scenario {
     wal_damaged_as_the_store_returns(
@@ -337,8 +319,6 @@ pub fn store_returns_with_another_writers_file() -> Scenario {
     s
 }
 
-/// A second file on the replica before the store goes down, then [`restarted_while_down`]'s
-/// outage and restart.
 fn restarted_while_down_past_two_files() -> Vec<Op> {
     let mut ops = vec![commit(3, false)];
     ops.extend(ticks(4));

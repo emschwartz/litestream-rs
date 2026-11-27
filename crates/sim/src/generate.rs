@@ -664,13 +664,10 @@ pub struct Weights {
     pub size_scale: u8,
 }
 
-/// What the application does when it comes back after a restart, before the
-/// engine has looked at the WAL. Real applications do not sit still: a job
-/// runner replays the work it cannot prove finished, an idempotent migration
-/// runs again, a busy service goes straight back to committing. Replayed
-/// work writes the same page images again, which is the one way a rewound
-/// WAL can regrow frames identical to the ones it lost (see the anchor
-/// scenario in the correctness review of the boot proof).
+/// What the application does when it comes back after a restart, before the engine has looked
+/// at the WAL. Replayed work writes the same page images again, the one way a rewound WAL can
+/// regrow frames identical to the ones it lost (see the anchor scenario in the correctness
+/// review of the boot proof).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AfterRestart {
     /// It waits for its next drawn operation.
@@ -734,8 +731,6 @@ impl Default for Weights {
             staging_damage: 1,
             heal: 1,
             // Off in the default mix so its recorded histories keep their
-            // shape; swarm mixes draw it.
-            // Off in the default mix so its recorded histories keep their
             // shape; swarm mixes draw it, and `tests/sim/survival.rs` turns
             // it on.
             hold: 0,
@@ -754,20 +749,12 @@ impl Default for Weights {
             // Off in the default mix so its recorded histories keep their
             // shape; swarm mixes draw it.
             kill_after_fault: false,
-            // Off in the default mix so its recorded histories keep their
-            // shape; swarm mixes draw it.
             app_in_tick: 0,
-            // Off in the default mix so its recorded histories keep their
-            // shape; swarm mixes draw it.
             verify: 0,
             truncate_pages: None,
             http_fault: 0,
             remote_parts: None,
-            // Off in the default mix so its recorded histories keep their
-            // shape; swarm mixes draw it.
             slice_bytes: None,
-            // Off in the default mix so its recorded histories keep their shape; swarm mixes
-            // draw them.
             gray: 0,
             latency_tail: false,
             size_scale: 1,
@@ -917,67 +904,54 @@ impl Weights {
             latency_tail: false,
             size_scale: 1,
         };
-        // Drawn last, so every other kind keeps the weight it had before
-        // second writers were drawn.
+        // Each draw comes after the last, so every earlier one keeps its value.
         mix.second_writer = weight(false);
-        // Drawn after that, for the same reason.
         mix.block_crash_law = below(&entropy, 2) == 0;
-        // And after that, for the same reason.
-        // Drawn after that, for the same reason: a third each.
+        // A third each.
         mix.after_restart = match below(&entropy, 3) {
             0 => AfterRestart::Nothing,
             1 => AfterRestart::Redo,
             _ => AfterRestart::Busy,
         };
-        // Drawn after that, for the same reason: half the redoing apps retry
-        // jobs that are not all idempotent.
+        // Half the redoing apps retry jobs that are not all idempotent.
         if mix.after_restart == AfterRestart::Redo && below(&entropy, 2) == 0 {
             mix.after_restart = AfterRestart::Retry;
         }
-        // Drawn after that, for the same reason: a disk in four lies.
+        // A disk in four lies.
         mix.lying_wal_sync = below(&entropy, 4) == 0;
-        // And after that, for the same reason: a rate of 1 to 30 in a
-        // thousand steps, left out a third of the time.
+        // A rate of 1 to 30 in a thousand steps, left out a third of the time.
         mix.hold = if below(&entropy, 3) == 0 {
             0
         } else {
             u32::try_from(below(&entropy, 30).saturating_add(1)).unwrap_or(1)
         };
-        // Drawn after that, for the same reason: half each.
         mix.clock_law = if below(&entropy, 2) == 0 {
             ClockLaw::PerTick
         } else {
             ClockLaw::EachRead
         };
-        // And after that, for the same reason: staging on the real directory store in half the
-        // swarm.
+        // Staging on the real directory store in half the swarm.
         mix.staging_fs = below(&entropy, 2) == 0;
-        // Drawn after that, for the same reason: half each.
         mix.error_domain = below(&entropy, 2) == 0;
-        // Drawn after that, for the same reason: half each.
         mix.overlap = below(&entropy, 2) == 0;
-        // And after that, for the same reason.
         mix.app_in_tick = weight(false);
-        // Drawn after that, for the same reason.
         mix.verify = weight(false);
-        // And after that, for the same reason: a second application connection that commits,
-        // with its own checkpoint count (a WAL header written again with the same salts).
+        // A second application connection that commits, with its own checkpoint count (a WAL
+        // header written again with the same salts).
         mix.other_connection_commit = weight(false);
-        // Drawn after that, for the same reason: half each.
         mix.kill_after_fault = below(&entropy, 2) == 0;
-        // And after that, for the same reason: the replica on the real S3 store in half the
-        // swarm, and provider faults on its requests.
+        // The replica on the real S3 store in half the swarm, and provider faults on its requests.
         mix.remote_s3 = below(&entropy, 2) == 0;
         mix.http_fault = weight(false);
-        // And after that: a store without conditional writes in a quarter of the swarm.
+        // A store without conditional writes in a quarter of the swarm.
         mix.no_create_only = below(&entropy, 4) == 0;
-        // And after that: half the swarm sends staged files a slice a tick, of 256 bytes or
+        // Half the swarm sends staged files a slice a tick, of 256 bytes or
         // 1 KiB with even odds (most staged files are a few hundred bytes, and a sync step
         // stages up to 16 KiB and a transaction).
         mix.slice_bytes = (below(&entropy, 2) == 0)
             .then(|| if below(&entropy, 2) == 0 { 256 } else { 1024 })
             .and_then(std::num::NonZeroU64::new);
-        // And after that: half the swarm's S3 replicas send in parts, of 64 or 256 bytes with
+        // Half the swarm's S3 replicas send in parts, of 64 or 256 bytes with
         // even odds, one to three at once (a staged file is a few hundred bytes, so most are
         // then two parts or more). Drawn whatever the replica is on, so a draw added after
         // these does not depend on it.
@@ -988,7 +962,7 @@ impl Weights {
         mix.remote_parts = (below(&entropy, 2) == 0)
             .then(|| crate::remote::Parts::new(part, lanes))
             .flatten();
-        // And after that: gray weather in two thirds of the swarm, at 1 to 30 steps in a
+        // Gray weather in two thirds of the swarm, at 1 to 30 steps in a
         // thousand, and the latency tail in half (`docs/decisions/D276.md`).
         mix.gray = if below(&entropy, 3) == 0 {
             0

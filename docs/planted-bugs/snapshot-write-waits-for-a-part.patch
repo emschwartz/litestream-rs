@@ -1,15 +1,14 @@
 diff --git a/crates/store-s3/src/upload.rs b/crates/store-s3/src/upload.rs
-index d07001429..682f17e33 100644
 --- a/crates/store-s3/src/upload.rs
 +++ b/crates/store-s3/src/upload.rs
-@@ -857,13 +857,8 @@ impl<T: Transport> Upload for S3Upload<T> {
+@@ -832,13 +832,8 @@ impl<T: Transport> Upload for S3Upload<T> {
              self.seal_now();
              self.pump()?;
          }
 -        // A buffered part that fills with every lane taken waits, and the rest of the write it
 -        // filled waits with it (`take`): with less room than one write left, that write could.
 -        let short = self.part_len().saturating_sub(self.filling.len()) < ReadLen::CHUNK.get();
--        let (width, buffered) = (self.width(), !self.filling.sourced());
+-        let (width, buffered) = (self.inner.concurrency.get(), !self.filling.sourced());
          Ok(match &self.multi {
              Some(multi) if multi.ready.is_some() => Flight::Full,
 -            Some(multi) if buffered && short && multi.flying >= width => Flight::Full,

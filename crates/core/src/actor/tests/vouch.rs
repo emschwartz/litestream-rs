@@ -58,8 +58,7 @@ fn a_wiped_staging_with_commits_the_replica_lacks_continues_on_the_wals_word() {
 }
 
 /// Staging lost its newest files but the WAL still holds the replica's
-/// newest: vouched, so the boot continues from it, where it used to take a
-/// `BehindRemote` snapshot.
+/// newest: vouched, so the boot continues from it with no `BehindRemote` snapshot.
 #[test]
 fn staging_behind_a_replica_the_wal_vouches_for_continues() {
     let mut rig = three();
@@ -71,7 +70,6 @@ fn staging_behind_a_replica_the_wal_vouches_for_continues() {
     assert!(!keys.is_empty());
     block_on(rig.staging.inner.delete(&keys)).unwrap();
     if Rig::files(&rig.staging, Level::ZERO).is_empty() {
-        // Prune had left only the newest; keep one older file staged.
         let one = FileKey::new(Level::ZERO, TxidRange::single(Txid::MIN));
         let bytes = block_on(rig.remote.inner.read(&one, 0, ReadLen::CHUNK));
         if let Ok(bytes) = bytes {
@@ -117,7 +115,7 @@ fn a_foreign_file_put_while_the_engine_was_down_stops_the_boot() {
 /// so the replica holds this database's own later files, which the restored
 /// WAL no longer holds. Nothing local tells them from a foreign writer's:
 /// a stop. A takeover through the replica's newest then lets the boot take
-/// the snapshot above them it used to take.
+/// the snapshot above them.
 #[test]
 fn a_vm_restore_stops_until_a_takeover_covers_the_replica() {
     let mut rig = three();
@@ -177,7 +175,7 @@ fn a_takeover_does_not_cover_a_foreign_file_above_it() {
 }
 
 /// The Go-compatible opt-out checks nothing: the boot snapshots above the
-/// foreign file, as it always did.
+/// foreign file.
 #[test]
 fn continuing_past_another_writer_skips_the_gate() {
     let mut rig = three();
@@ -231,8 +229,6 @@ fn a_crash_between_the_engines_own_drop_and_its_snapshot_is_not_a_refusal() {
         ),
         "{seen:?}"
     );
-    // The rig, as the driver, kept the takeover the engine asked for before
-    // the drop.
     assert_eq!(rig.takeover.map(TakeoverRecord::txid), Some(tx(3)));
     assert!(staged(&rig).iter().all(|n| *n < 3), "{:?}", staged(&rig));
     rig.wal.force_restart();
@@ -268,7 +264,6 @@ fn a_takeover_the_driver_cannot_write_keeps_the_staged_files_and_waits() {
             clock: &FakeClock::new(ts(now)),
             notice: &mut |_| {},
         };
-        // No driver: nothing is handed back.
         let tick = block_on(actor.tick(env, ts(now)));
         match event(&tick) {
             Some(Event::TakeoverWanted(_)) => asked += 1,
@@ -338,7 +333,7 @@ fn own_upload_unconfirmed_then_dropped() -> (Rig, Actor, i64) {
 /// once, so a listing runs before the snapshot is staged. It finds 4 above
 /// where staging now stands. That is the engine's own upload, which its
 /// record vouched for: the listing confirms it and the snapshot goes above
-/// it. The listing used to take it for another writer's file and stop.
+/// it.
 #[test]
 fn a_listing_after_a_running_drop_takes_the_vouched_upload_as_its_own() {
     let (mut rig, mut actor, now) = own_upload_unconfirmed_then_dropped();
@@ -362,8 +357,7 @@ fn a_listing_after_a_running_drop_takes_the_vouched_upload_as_its_own() {
 /// and takes id 4, which the replica already holds with the engine's own
 /// unconfirmed upload. The next listing finds the two differ. Within the ids
 /// its own drop vouched for, the replica's copy stands and the staged
-/// snapshot goes, as for a staged file that changed. It used to take the
-/// replica's copy for another writer's and stop.
+/// snapshot goes, as for a staged file that changed.
 #[test]
 fn a_snapshot_on_an_id_a_running_drop_vouched_for_gives_way_to_the_replicas_copy() {
     let (mut rig, mut actor, now) = own_upload_unconfirmed_then_dropped();
@@ -388,7 +382,7 @@ fn a_snapshot_on_an_id_a_running_drop_vouched_for_gives_way_to_the_replicas_copy
 /// takes a file past everything the engine staged or confirmed for another
 /// writer's. The drop therefore marks the uploads to list first: the
 /// listing confirms 4 as the engine's own before maintenance looks. Without
-/// that, maintenance found 4 and stopped for another writer.
+/// that, maintenance would find 4 and stop for another writer.
 #[test]
 fn maintenance_after_a_running_drop_waits_for_the_listing_that_confirms_its_upload() {
     let (mut rig, mut actor, now) = own_upload_unconfirmed_then_dropped();
@@ -600,7 +594,7 @@ fn a_held_takeover_short_of_the_replica_still_stops_over_its_own_state() {
 }
 
 /// The application vacuumed to another page size: the database is not the replica's state,
-/// and the boot stops for the page size, as it did before the check.
+/// and the boot stops for the page size.
 #[test]
 fn a_new_meta_directory_over_a_resized_database_stops_for_the_page_size() {
     let mut rig = redeployed_with_a_new_meta_directory();
@@ -800,7 +794,6 @@ fn a_takeover_before_a_running_drop_reaches_no_further_than_the_puts_it_sent() {
     });
     assert!(dropped, "{seen:?}");
     assert_eq!(rig.takeover.map(TakeoverRecord::txid), Some(tx(4)));
-    // The replica takes puts again: the refusals left queued are spent.
     let probe = FileKey::new(Level::ZERO, TxidRange::single(tx(99)));
     let begin = || {
         block_on(
@@ -968,7 +961,6 @@ fn check_slices(rig: &mut Rig, actor: &mut Actor, limit: usize) -> (usize, Tick)
         // The tick that read the restore's last bytes leaves it whole, waiting for the boot.
         assert!(!actor.boot_judged());
         assert!(actor.checking_identity() || actor.engine.identity.is_some());
-        // The tick that began the check leaves it going.
         assert!(slices > 0 || actor.checking_identity());
     }
     panic!("the identity check never ended");

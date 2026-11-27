@@ -258,7 +258,6 @@ impl Wake for ThreadWaker {
     }
 }
 
-/// Runs a source's read to its end on the calling thread.
 fn block_on<F: Future>(fut: F) -> F::Output {
     let mut fut = pin!(fut);
     let waker = Waker::from(Arc::new(ThreadWaker(thread::current())));
@@ -312,14 +311,12 @@ mod tests {
         let reads = Arc::new(AtomicUsize::new(0));
         let reader = Box::new(Gives(now, Arc::clone(&reads)));
         let mut run = Run::at(0, u64::try_from(bytes.len()).unwrap(), CELL, reader);
-        // In pieces that fit no cell.
         for piece in bytes.chunks(100_000) {
             run.add(piece);
         }
         (run.seal(), reads)
     }
 
-    /// The part's body, read to its end.
     fn sent(part: &mut Sealed) -> Vec<u8> {
         let go = AtomicBool::new(false);
         let mut sent = Vec::new();

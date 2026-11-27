@@ -34,7 +34,6 @@ struct Entry {
     missing: Option<String>,
 }
 
-/// A counterpart is one Rust test or several.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum Counterparts {
@@ -131,7 +130,6 @@ fn rust_tests(listing: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// The counterparts the test map names that the listing lacks.
 fn unknown_counterparts<'a>(test_map: &'a TestMap, tests: &BTreeSet<String>) -> BTreeSet<&'a str> {
     entries(test_map)
         .filter_map(|(_, _, e)| e.counterpart.as_ref())

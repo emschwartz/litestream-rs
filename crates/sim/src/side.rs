@@ -52,7 +52,6 @@ impl Debug for SideSource {
     }
 }
 
-/// A backend's WAL source with its open file boxed.
 struct BoxedWal<S>(S);
 
 impl<S: WalSource> WalSource for BoxedWal<S>

@@ -84,7 +84,7 @@ mod soak {
 
         fn store(&self) -> S3Store<UreqTransport> {
             let escaped = self.endpoint.replace(':', "%3A").replace('/', "%2F");
-            // Virtual-host style, as these runs always used; Go's rule would pick path style.
+            // Virtual-host style; Go's rule would pick path style.
             let url = format!(
                 "{}?endpoint={escaped}&region={}&forcePathStyle=false",
                 self.url(),

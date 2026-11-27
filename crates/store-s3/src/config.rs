@@ -448,14 +448,15 @@ impl S3Config {
     }
 
     /// Replaces how many parts of one multipart upload may be in flight at
-    /// once, Go's `concurrency`. It governs nothing else: reads, listings and
-    /// HEADs have their own fixed limits. One sends every part after the one
-    /// before it.
+    /// once, Go's `concurrency`, and how many spans of one large file a
+    /// restore reads at once (`docs/decisions/D312.md`). It governs nothing
+    /// else: other reads, listings and HEADs have their own fixed limits. One sends every part
+    /// after the one before it, and reads a restore's files as one stream each.
     ///
     /// Memory: an upload of a staged file holds no part, each is read from the
     /// file as it is sent. An upload with no file behind it holds the parts in
-    /// flight and one more, and has fewer in flight than this when that many
-    /// would pass 256 MiB (`part_plan.rs`, `docs/decisions/D232.md`).
+    /// flight and one more ([`Self::max_buffered`]), with no cap but the two
+    /// settings (`docs/decisions/D309.md`).
     #[must_use]
     pub fn with_concurrency(mut self, concurrency: NonZeroUsize) -> Self {
         self.concurrency = Some(concurrency);
@@ -520,6 +521,14 @@ impl S3Config {
             (None, Provider::R2) => R2_CONCURRENCY,
             (None, _) => DEFAULT_CONCURRENCY,
         }
+    }
+
+    /// The most memory one upload with no file behind it may hold in parts: the part size
+    /// times the parts in flight and one more, as in Go's uploader. Saturates.
+    #[must_use]
+    pub fn max_buffered(&self) -> u64 {
+        let held = u64::try_from(self.concurrency().get()).unwrap_or(u64::MAX);
+        self.part_size.get().saturating_mul(held.saturating_add(1))
     }
 
     /// How long a request may make no progress before the transport fails it as a timeout,
@@ -624,6 +633,24 @@ mod tests {
 
     fn n(value: usize) -> NonZeroUsize {
         NonZeroUsize::new(value).unwrap()
+    }
+
+    #[test]
+    fn a_buffered_upload_may_hold_the_part_size_times_one_more_than_the_parts_in_flight() {
+        let mib = 1024 * 1024;
+        let part = PartSize::new(100 * mib).unwrap();
+        let base = config_at("s3.example.com").with_part_size(part);
+        assert_eq!(
+            base.clone().with_concurrency(n(10)).max_buffered(),
+            1100 * mib
+        );
+        assert_eq!(
+            base.clone().with_concurrency(n(2)).max_buffered(),
+            300 * mib
+        );
+        assert_eq!(base.max_buffered(), 600 * mib, "five by default");
+        let huge = config_at("s3.example.com").with_part_size(PartSize::new(u64::MAX).unwrap());
+        assert_eq!(huge.max_buffered(), u64::MAX);
     }
 
     /// Multipart parts in flight: 5, R2 2 unless set, a set value always wins.

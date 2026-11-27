@@ -324,6 +324,7 @@ const RUST: &[Key] = &[
     key("responses", Map(Section::Responses), Implemented),
     key("if-replication-stops", Str, Implemented),
     key("max-unreplicated-age", Duration, Implemented),
+    key("snapshot-read-limit", Bytes, Implemented),
 ];
 
 /// One per field of the replicator's responses.
@@ -366,7 +367,6 @@ const RESPONSES: &[Key] = &[
     key("other-writer", Str, Implemented),
 ];
 
-/// The tables a section's keys come from, searched in order.
 fn tables(section: Section) -> [&'static [Key]; 2] {
     match section {
         Section::Top => [TOP, SETTINGS],
@@ -404,7 +404,6 @@ pub(crate) fn suggest(section: Section, name: &str) -> Option<&'static str> {
     best.map(|(_, name)| name)
 }
 
-/// Levenshtein distance over characters, ignoring ASCII case.
 fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().map(|c| c.to_ascii_lowercase()).collect();
     let b: Vec<char> = b.chars().map(|c| c.to_ascii_lowercase()).collect();

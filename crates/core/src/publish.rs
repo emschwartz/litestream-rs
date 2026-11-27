@@ -5,16 +5,14 @@
 //! than were sent, and the object under the key does not decode. [`Writer`]
 //! counts what was written and compares the answer with it, and never takes a
 //! short object as published: it reports [`CorruptCause::CommitSizeMismatch`].
-//! After a create-only write it deletes the object first, since the key held
-//! nothing before. After a replace it deletes nothing (`removed: false`): the
-//! key may have held an acknowledged object, and a delete would end the
-//! replica a transaction early with no error, where the short object makes a
-//! restore stop with a typed one until the caller writes it again or removes
-//! it under a [`Removal`] reason. `removed: false` tells the caller not to
-//! trust a listing of that key. A commit that holds is a
-//! [`Published`], which says whether the write created the object or replaced
-//! one; [`ours`] makes the third kind, a key a read showed already holds our
-//! bytes.
+//! After a create-only write it deletes the object, since the key held nothing before.
+//! After a replace it deletes nothing (`removed: false`): the key may have held an
+//! acknowledged object, and a delete would end the replica a transaction early with no error,
+//! where the short object makes a restore stop with a typed one until the caller writes it
+//! again or removes it under a [`Removal`] reason. `removed: false` tells the caller not to
+//! trust a listing of that key. A commit that holds is a [`Published`], which says whether
+//! the write created the object or replaced one; [`ours`] makes the third kind, a key a read
+//! showed already holds our bytes.
 //!
 //! **No delete after a rejected write.** A store that says the bytes are not the bytes sent
 //! ([`CorruptCause::ChecksumMismatch`]) is never answered with a delete of the key, in either
@@ -325,8 +323,7 @@ pub(crate) enum Why {
     RejectedOutput,
 }
 
-/// Replica objects to delete, with the reason. Item 4 of issue #171 replaces
-/// the reasons that rest on a listing with a proof built from a read.
+/// Replica objects to delete, with the reason.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Removal<'k> {
     keys: &'k [FileKey],
@@ -402,10 +399,9 @@ where
         // A create-only write found the key free: the object is ours alone, and the caller still
         // holds what it wrote until a later verified listing, so a wrong delete costs a rewrite.
         WriteMode::New => delete().await.is_ok(),
-        // A replace may land on a key that held an acknowledged object. Deleting what the short
-        // commit left would end the replica a transaction early with no error (seed 0x1dc); the
-        // object stays, a restore that meets it stops with a typed error, and the caller writes
-        // it again or removes it under a reason of its own (`Removal`).
+        // A replace may land on a key that held an acknowledged object. Deleting would end the
+        // replica a transaction early with no error; the object stays and a restore that meets it
+        // stops with a typed error (see the module doc).
         WriteMode::Replace => false,
     };
     Err(StoreError::Corrupt {

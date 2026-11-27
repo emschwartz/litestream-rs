@@ -90,7 +90,6 @@ dbs:
     std::fs::write(path, text).expect("write the config");
 }
 
-/// `lsr config check` accepts the file and warns about the tuning knobs it ignores.
 fn check_config(lsr: &Path, config: &Path) {
     let out = Command::new(lsr)
         .arg("config")
@@ -330,7 +329,6 @@ fn sidecar_handover(build: &GoBuild, lsr: &Path) {
     go_resumes(name, &bin, &config, &mut fixtures, &at_rust);
 }
 
-/// Go starts again on what `lsr` left.
 fn go_resumes(name: &str, bin: &Path, config: &Path, fixtures: &mut [AppFixture], at_rust: &Left) {
     let mut go = Replicator::start(bin, config, &fixture_log(fixtures, "go-2.log")).expect("Go");
     let previous: Vec<Option<Txid>> = at_rust.positions.iter().copied().map(Some).collect();

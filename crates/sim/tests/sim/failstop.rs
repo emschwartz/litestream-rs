@@ -609,11 +609,10 @@ fn an_accepted_trip_over_unread_frames_stands_until_the_engine_lets_go() {
     }
 }
 
-/// Seed 0x734 from the mixed campaign: a rollback of the replica leaves staged files it lacks.
-/// The boot after used to delete them, the live WAL not vouching for them, and stage a snapshot
-/// of their end state (`SnapshotCause::StagedUnverified`); uploads were then refused past the
-/// bound and the engine tripped. The boot now reads the files whole and uploads them as staged
-/// (`docs/decisions/D175.md`), so nothing is left to replace and nothing trips.
+/// A rollback of the replica leaves staged files it lacks. The boot reads them whole and uploads
+/// them as staged (`docs/decisions/D175.md`), instead of deleting them (the live WAL not vouching
+/// for them) and staging a snapshot of their end state (`SnapshotCause::StagedUnverified`),
+/// whose uploads were refused past the bound and tripped the engine. Nothing is left to replace.
 #[test]
 fn seed_0x734_uploads_the_files_a_rollback_left_and_never_trips() {
     let opts = Opts {
@@ -635,7 +634,7 @@ fn seed_0x734_uploads_the_files_a_rollback_left_and_never_trips() {
 /// A restart while every read of the replica lies leaves the engine dating a pending staged file
 /// from its stamp (the listing hid the replica's copy). The engine trips for it on the first tick
 /// after the lie ends, before an honest read could show it the replica holds everything: that is
-/// the lie's doing, not a trip the judge may call false (seed 0x6b065d24, reduced).
+/// the lie's doing, not a trip the judge may call false.
 #[test]
 fn a_trip_dated_by_lying_reads_stands_on_the_first_honest_tick() {
     use lsr_sim::generate::Hold;

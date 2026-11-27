@@ -35,10 +35,10 @@ use crate::heap::{Counting, Peak, peak_of};
 use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    AsOfPlanner, CreatedAt, DatabaseSink, FakeWal, FileInfo, FileKey, Inventory, KeyTarget, Level,
-    ListedTime, Listing, ObjectStore, PageChecksumTable, PageLimit, PageSource, PlanOutcome,
-    ReadLen, RestoreTarget, SourceError, Step, StepEnd, StoreError, SyncConfig, Synced, Upload,
-    build_listing, plan, restore, sync_step,
+    AsOfPlanner, BatchKind, CreatedAt, DatabaseSink, FakeWal, FileInfo, FileKey, Inventory,
+    KeyTarget, Level, ListedTime, Listing, ObjectStore, PageChecksumTable, PageLimit, PageSource,
+    PlanOutcome, ReadLen, ReadStream, RestoreTarget, SourceError, Step, StepEnd, StoreError,
+    SyncConfig, Synced, Upload, build_listing, plan, restore, sync_step,
 };
 use lsr_ltx::{
     DbChecksum, DbPages, Encoder, Header, HeaderFields, PageNo, PageRef, PageSize, Timestamp, Txid,
@@ -49,7 +49,6 @@ use lsr_wal::{Salts, WalReader};
 #[global_allocator]
 static HEAP: Counting = Counting;
 
-/// A kibibyte, a mebibyte.
 pub const KIB: usize = 1024;
 pub const MIB: usize = 1024 * KIB;
 
@@ -143,6 +142,10 @@ pub struct Spool {
     _dir: tempfile::TempDir,
     files: Vec<(FileInfo, File)>,
     pages: u64,
+    /// Spans of one file read at once ([`BatchKind::Spans`]), one unless set.
+    spans: usize,
+    /// Spans opened.
+    opened: AtomicU64,
 }
 
 impl Spool {
@@ -177,7 +180,15 @@ impl Spool {
             _dir: dir,
             files,
             pages: written,
+            spans: 1,
+            opened: AtomicU64::new(0),
         }
+    }
+
+    /// The same replica read up to `spans` spans of a file at once.
+    pub fn with_spans(mut self, spans: usize) -> Self {
+        self.spans = spans;
+        self
     }
 
     /// Pages in every file together: what a restore of the whole chain writes.
@@ -219,10 +230,48 @@ impl Upload for NoUpload {
     }
 }
 
+/// A span of a [`Spool`] file, one read a piece.
+struct SpoolSpan<'a> {
+    spool: &'a Spool,
+    key: FileKey,
+    at: u64,
+    end: u64,
+}
+
+impl ReadStream for SpoolSpan<'_> {
+    fn next(&mut self, len: ReadLen) -> lsr_core::BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move {
+            let left = u32::try_from(self.end.saturating_sub(self.at).min(len.get())).unwrap();
+            let Some(len) = ReadLen::new(left) else {
+                return Ok(Vec::new());
+            };
+            let bytes = self.spool.read(&self.key, self.at, len).await?;
+            self.at += u64::try_from(bytes.len()).unwrap();
+            Ok(bytes)
+        })
+    }
+}
+
 impl ObjectStore for Spool {
     type Upload = NoUpload;
 
-    /// Leaves no scratch.
+    fn batch_width(&self, kind: BatchKind) -> std::num::NonZeroUsize {
+        match kind {
+            BatchKind::Spans => std::num::NonZeroUsize::new(self.spans).unwrap(),
+            BatchKind::Lists | BatchKind::ResolvedCreatedAt => std::num::NonZeroUsize::MIN,
+        }
+    }
+
+    fn read_span(&self, key: FileKey, start: u64, end: u64) -> Box<dyn ReadStream + '_> {
+        self.opened.fetch_add(1, Ordering::Relaxed);
+        Box::new(SpoolSpan {
+            spool: self,
+            key,
+            at: start,
+            end,
+        })
+    }
+
     async fn remove_scratch(&self) -> Result<u64, StoreError> {
         Ok(0)
     }
@@ -396,6 +445,24 @@ fn restore_peak_heap_is_flat_in_chain_length() {
     assert!(long_peak.extra <= RESTORE_CAP);
 }
 
+/// A file read through a window of eight spans holds what one stream holds: the window takes one
+/// chunk at a time, in order, from a store that reads each piece when asked. (A store that reads
+/// spans ahead holds them too, as many as its width; S3 bounds each at 16 MiB.)
+#[test]
+fn restore_through_a_window_holds_one_chunk() {
+    let spool = Spool::build(16_384, 0, 16).with_spans(8);
+    let (peak, written) = restore_peak(&spool);
+    assert_eq!(written, spool.pages());
+    // A 64 MiB file and a little: eight 8 MiB spans, then the rest as one stream.
+    assert_eq!(spool.opened.load(Ordering::Relaxed), 8);
+    eprintln!("restore through a window: {} KiB", peak.extra >> 10);
+    assert!(
+        peak.extra <= RESTORE_CAP,
+        "{} bytes, over {RESTORE_CAP}",
+        peak.extra
+    );
+}
+
 /// A database past 1 GiB has no lock page, so the fixtures past it must leave it out:
 /// naming it made the 4 GiB restore gate panic while building its replica.
 #[test]
@@ -442,7 +509,6 @@ impl Upload for VoidUpload {
 impl ObjectStore for Void {
     type Upload = VoidUpload;
 
-    /// Leaves no scratch.
     async fn remove_scratch(&self) -> Result<u64, StoreError> {
         Ok(0)
     }
@@ -572,10 +638,9 @@ pub fn snapshot_run(pages: u32) -> SnapshotRun {
 /// and the encoder's page index. The table is one 8-byte slot a page and the index about
 /// nine varint bytes, so the law is linear in the database's pages and its floor is 17
 /// bytes a page (74 MiB measured at 16 GiB of 4 KiB pages: 18). The plan holds nothing a page costs: it
-/// is walked, never listed (it was 32 bytes a page, 48 while sorted); the table was a map
-/// (about 20), and the index was copied twice at the end of the file. Measured: 16 to 18
-/// bytes a page, from 86; the ceiling is that plus about 15%, so any of those again, or holding
-/// page contents, which is 4096 bytes a page, breaks it.
+/// is walked, never listed. Measured: 16 to 18 bytes a page; the ceiling is that plus about
+/// 15%, so a listed plan, a map table, a copied index, or holding page contents (4096 bytes a
+/// page) breaks it.
 pub const SNAPSHOT_BYTES_PER_PAGE: usize = 20;
 
 /// The most one `Upload::write` may carry, the last included: a snapshot streams its pages

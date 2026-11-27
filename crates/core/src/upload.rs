@@ -21,7 +21,7 @@
 //! and snapshot above it. A key with no staged counterpart (staging is dropped once a
 //! file is confirmed) must decode and verify as LTX naming that key, else the
 //! replica is corrupt. The read-back runs at boot and after an ambiguous commit
-//! only, so steady state makes no list and no read call. A listing is also
+//! only. A listing is also
 //! never trusted to move the position backwards or past the local position: either
 //! is a persistent fault for the actor's configured response, not a guess.
 //!
@@ -428,9 +428,9 @@ enum TailVerdict {
 }
 
 /// Judges the replica's newest level-0 file against the staged file under
-/// the same key; `size` is the replica object's listed size. Only the newest key is read back: an older one was confirmed
-/// by its own commit in an earlier run, and reading every key at boot would be
-/// a whole replica scan.
+/// the same key; `size` is the replica object's listed size. Only the newest key is read
+/// back: an older one was confirmed by its own commit, and reading every key at boot would
+/// be a whole replica scan.
 async fn judge_tail<L: Role, S: Role>(
     staging: &L,
     remote: &S,
@@ -1160,11 +1160,7 @@ impl Sending {
         })
     }
 
-    /// Commits the upload of a file that ended, verified, with every part answered. A file
-    /// replaced after it was witnessed is refused here and its upload aborted: one replaced
-    /// before the first slice always, one replaced between two slices when the store reads it
-    /// by range (a file held open is still the file that was opened, and goes up if that one
-    /// is what was witnessed).
+    /// Commits the upload of a file that ended, verified, with every part answered.
     ///
     /// A second read that gave nothing fails the commit before anything is published, so
     /// the state stands and nothing is deleted, whatever the store's error would mean

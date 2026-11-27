@@ -41,7 +41,6 @@ use crate::health::{Mismatch, Verification, VerifyFailure, VerifyOutcome};
 use crate::runtime::{Park, later, lock};
 use crate::store::Metered;
 
-/// The verify thread's name.
 pub(crate) const THREAD: &str = "lsr-verify";
 
 /// Where a run is.

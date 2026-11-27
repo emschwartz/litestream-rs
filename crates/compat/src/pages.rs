@@ -22,7 +22,6 @@ pub struct PageDigest {
     pub page_hashes: Vec<String>,
 }
 
-/// Lowercase hex of a SHA-256 digest.
 fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }

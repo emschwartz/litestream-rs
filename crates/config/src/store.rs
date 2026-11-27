@@ -114,7 +114,6 @@ mod tests {
         BucketName, Endpoint, HttpRequest, HttpResponse, Prefix, Transport, TransportError,
     };
 
-    /// An instance metadata service that cannot be reached.
     struct Down;
 
     impl Transport for Down {

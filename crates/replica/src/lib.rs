@@ -131,6 +131,7 @@ mod health;
 #[doc(hidden)]
 pub mod local;
 mod meta;
+mod pace;
 mod readers;
 mod replicator;
 mod restore;

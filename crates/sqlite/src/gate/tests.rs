@@ -31,7 +31,6 @@ fn rows(conn: &Connection) -> i64 {
         .unwrap()
 }
 
-/// The handler's timeout and call count on `conn`, read back.
 fn state(conn: &Connection) -> (c_int, u32) {
     Handle::of_rusqlite(conn)
         .unwrap()

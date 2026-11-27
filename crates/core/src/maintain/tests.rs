@@ -969,7 +969,6 @@ impl Checker {
     }
 }
 
-/// Runs jobs until `due` waits; returns the wait time.
 fn drive(model: &mut Model, check: &mut Checker, now: i64, cfg: &Maintenance) -> Option<Timestamp> {
     for _ in 0..5000 {
         let before = model.inv();
@@ -1045,7 +1044,6 @@ proptest! {
 
 // Holes: a level never gains a file that leaves a hole a lower level could have closed.
 
-/// `plan_level` into `dst` at `now` under the defaults, on stored created-at times.
 fn level_step(inventory: &Inventory, now: i64, dst: u8, state: &MaintainState, view: View) -> Step {
     match plan_level(
         inventory,
@@ -1686,7 +1684,6 @@ fn ltx(min: u64, max: u64, created: i64) -> Vec<u8> {
     ltx_filled(min, max, created, u8::try_from(max % 251).unwrap())
 }
 
-/// [`ltx`] with page 1 filled with `fill`.
 fn ltx_filled(min: u64, max: u64, created: i64, fill: u8) -> Vec<u8> {
     let page_size = PageSize::new(PAGE).unwrap();
     let header = Header::new(HeaderFields {
@@ -1841,7 +1838,7 @@ fn whole(store: &MemStore, k: &FileKey) -> Vec<u8> {
 /// A staged level-0 file that verifies but is not the replica's object under
 /// the same key (a staging backup put back, say) is not compaction input:
 /// level 1 would hold one content for a transaction while level 0 holds
-/// another. Level 1 is built from the replica's copy (seed 0xcf8).
+/// another. Level 1 is built from the replica's copy.
 #[test]
 fn level_one_is_built_from_the_replica_when_the_local_copy_differs() {
     let (local, replica) = (MemStore::new(), MemStore::new());
@@ -2278,9 +2275,6 @@ fn run_delete_counts_tolerates_gone_keys_and_maps_a_store_error() {
     );
 }
 
-// Review: failing tests (blind adversarial review of the executor and its
-// interplay with retention).
-
 const REVIEW_DAY: i64 = 86_400_000;
 
 /// Rewrites `out` at half its length, as a store that acknowledged a short commit holds it.
@@ -2652,7 +2646,6 @@ fn a_distrusted_output_gone_from_the_listing_is_forgotten() {
     );
 }
 
-/// The range of the level-1 compaction `due` is, when it is one.
 fn level_one_run(due: &Due) -> Option<(u64, u64)> {
     if let Due::Run(Job::Compact(job)) = due
         && job.level() == level(1)
@@ -2677,7 +2670,6 @@ fn hour_old_level_zero(last: u64) -> (MemStore, MemStore) {
     (local, replica)
 }
 
-/// Runs the level-1 compaction due at `now` and records it; returns its range.
 fn compact_level_one(
     local: &MemStore,
     replica: &MemStore,

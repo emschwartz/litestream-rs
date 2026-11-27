@@ -89,7 +89,7 @@ fn an_object_over_ten_thousand_configured_parts_fills_a_larger_part() {
 }
 
 /// With no length given, or one that fits, the configured part is the part: a write of one
-/// part starts the multipart upload, as before.
+/// part starts the multipart upload.
 #[test]
 fn an_object_that_fits_is_cut_at_the_configured_part() {
     for len in [None, Some(60 * 1024 * 1024)] {

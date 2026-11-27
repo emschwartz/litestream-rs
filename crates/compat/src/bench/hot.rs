@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OpenFlags};
 
 use super::app::App;
-use super::clock::{now, pause, pause_until, slot};
+use super::clock::{now, pause, pause_until_spinning, slot};
 use super::sys;
 use crate::error::CompatError;
 use crate::workload::SplitMix;
@@ -35,7 +35,6 @@ pub(super) const HOT: &str = "hot-app";
 const ROWS_PER_PAGE: u64 = 4;
 /// Rows a page of the hot set stands for: the gap between two hot row ids.
 const MIN_STRIDE: u64 = ROWS_PER_PAGE;
-/// Reads a thread makes between two looks for the stop file.
 const STOP_CHECK_EVERY: u64 = 256;
 /// The bytes of one sample on disk: due time (unix nanoseconds) and latency (nanoseconds).
 pub(super) const SAMPLE_BYTES: usize = 16;
@@ -76,7 +75,6 @@ impl HotSet {
         Self { stride, pages }
     }
 
-    /// The id of the hot row number [`k`] (below [`pages`]).
     fn id(self, k: u64) -> i64 {
         i64::try_from(k.saturating_mul(self.stride).saturating_add(1)).unwrap_or(i64::MAX)
     }
@@ -188,7 +186,6 @@ pub(super) fn marker(db: &Path) -> Result<(u64, u32), CompatError> {
     Ok((value, page))
 }
 
-/// Reads the hot rows [`from..to`] once.
 fn touch(conn: &Connection, hot: HotSet, from: u64, to: u64) -> Result<(), CompatError> {
     let mut stmt = conn.prepare("SELECT length(data) FROM items WHERE id = ?1")?;
     for k in from..to {
@@ -250,7 +247,7 @@ fn reader(job: &Job, hot: HotSet, index: u32) -> Result<Vec<Sample>, CompatError
             return Ok(samples);
         }
         let due = slot(base_instant, period, u32::try_from(k).unwrap_or(u32::MAX));
-        pause_until(due);
+        pause_until_spinning(due);
         let _len: i64 = stmt.query_row([hot.id(hot.pick(&mut rng))], |r| r.get(0))?;
         let late = now().saturating_duration_since(due);
         let due_ns = base_unix.saturating_add(
@@ -281,7 +278,7 @@ fn writer(job: &Job, hot: HotSet) -> Result<Vec<Sample>, CompatError> {
             return Ok(samples);
         }
         let due = slot(base_instant, period, u32::try_from(k).unwrap_or(u32::MAX));
-        pause_until(due);
+        pause_until_spinning(due);
         let began = now();
         let started_unix = unix_ns();
         let tx = conn.transaction()?;

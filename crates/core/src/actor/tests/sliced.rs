@@ -44,7 +44,6 @@ fn caught_up_with(config: ActorConfig) -> (Rig, Actor) {
     (rig, actor)
 }
 
-/// The staged size of transaction `n`.
 fn staged_size(rig: &Rig, n: u64) -> u64 {
     Rig::files(&rig.staging, Level::ZERO)
         .iter()
@@ -311,9 +310,7 @@ fn checkpoints_run_while_a_file_is_in_flight() {
 /// A backlog of staged files, each a little larger than what a tick has left after finishing
 /// the one before: every upload tick publishes a file and leaves the next in flight. Those
 /// ticks are slices like any other, so a commit made before every tick is staged after at
-/// most [`state::FAIR_SHARE`] of them. Before, a tick that published a file counted no slice,
-/// and the WAL step waited until the whole backlog was on the replica: the WAL went
-/// unsynced and unchecked by any checkpoint for as long as that took.
+/// most [`state::FAIR_SHARE`] of them.
 #[test]
 fn a_tick_that_publishes_a_file_and_starts_the_next_is_a_slice() {
     let size = {

@@ -69,8 +69,7 @@ pub(crate) struct Sent {
     pub(crate) parts: usize,
 }
 
-/// The HTTP status a store-side "too large" is reported as: an upload that
-/// would need more than 10000 parts.
+/// The status a store-side "too large" is reported as: more than 10000 parts.
 pub(crate) const PAYLOAD_TOO_LARGE: u16 = 413;
 
 /// How a part is sent again: Go's uploader sends each request through the AWS SDK's retryer,
@@ -178,9 +177,8 @@ impl<T: Transport> Inner<T> {
         Ok(())
     }
 
-    /// The upload id is spent: the object a HEAD finds is this upload's when
-    /// it matches what was sent, and its ETag is returned; anything else is
-    /// for the caller to list and read back.
+    /// The upload id is spent: a HEAD that matches what was sent returns its ETag; anything
+    /// else is for the caller to list and read back.
     fn settle_spent_upload(&self, key: &FileKey, sent: Sent) -> Result<String, StoreError> {
         let op = StoreOp::Upload;
         let ambiguous = invalid_data(op);

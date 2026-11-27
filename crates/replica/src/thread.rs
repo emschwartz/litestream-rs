@@ -28,9 +28,6 @@
 //! engine's count, raised to the WAL file's length and to the staged files past the last
 //! transaction the replica held.
 //!
-//! Every wait this thread returns is capped at a stop's deadline (`park_until`), and a turn
-//! that finds the deadline passed while the engine waits to be rebuilt ends there.
-//!
 //! Fail-stop's write gate is this thread's too: a third connection ([`WriteGate`]), apart
 //! from the engine's two, that holds a write transaction while [`lsr_core::blocks_writes`]
 //! says the application's writes are held. After every tick, and at the start of every turn,
@@ -65,6 +62,7 @@ use crate::events::{Event, EventSink, TrustRecordUnusable};
 use crate::exec::{block_on, block_on_tick};
 use crate::health::{Counters, FailStop, Gone, Phase, StopOutcome, Writes};
 use crate::meta::{MetaLock, remove_takeover, write_takeover};
+use crate::pace::Paced;
 use crate::readers::Guarded;
 use crate::replicator::Shared;
 use crate::runtime::{Runtime, later};
@@ -116,7 +114,6 @@ struct Progress {
     replicated: Option<(Txid, Timestamp)>,
     unreplicated_since: Option<Timestamp>,
     left: Unfinished,
-    /// Whether a booted engine has been read yet.
     advanced: bool,
 }
 
@@ -213,7 +210,6 @@ pub(crate) struct Worker {
     stop: Option<Timestamp>,
     progress: Progress,
     seen: Seen,
-    /// The scheduled verify, when `Config::verify_interval` is set.
     scheduled: Option<Scheduled>,
     /// The meta directory, where the takeover record is kept (`crate::meta`).
     meta: PathBuf,
@@ -221,7 +217,6 @@ pub(crate) struct Worker {
     _meta_lock: MetaLock,
     /// Whether fail-stop has let the application run yet (`lsr_core::AppGate`).
     app_gate: AppGate,
-    /// The connection that holds the application's writes.
     gate: WriteGate,
     /// Why the application's writes are to be held, as last judged; `None` lets them through.
     blocked: Option<WhyBlocked>,
@@ -496,7 +491,15 @@ impl Worker {
     /// One engine tick, or why the closed connections could not be reopened.
     fn tick(&mut self, now: Timestamp) -> Result<Tick, Reopen> {
         let sqlite = self.connection()?;
-        let (mut wal, mut db) = (sqlite.clone(), sqlite.clone());
+        // Reads are paced only while the application's writes go through: a read that runs
+        // while the replicator holds them (the boot's identity check) would hold them longer.
+        let limit = self
+            .blocked
+            .is_none()
+            .then_some(self.config.snapshot_read_limit)
+            .flatten();
+        let mut wal = sqlite.clone();
+        let mut db = Paced::new(sqlite.clone(), self.runtime.clone(), limit);
         let mut ck = Guarded::new(
             sqlite,
             Arc::clone(&self.shared.readers),
@@ -571,7 +574,6 @@ impl Worker {
         }
     }
 
-    /// The engine booted: the rebuild is over.
     fn booted(&mut self) {
         self.rebuilt = None;
         self.shared.update(|state| state.booted = true);
@@ -769,7 +771,6 @@ impl Worker {
         self.park_until(Some(until))
     }
 
-    /// Writes the health snapshot.
     fn observe(&mut self, now: Timestamp) {
         let measured = self.left();
         let left = match (booted(&self.actor), measured) {
@@ -944,9 +945,7 @@ impl Worker {
         })
     }
 
-    /// What is left when no booted engine can measure it, counted high: the last measure,
-    /// raised to the WAL file's length and to the staged files past the newest transaction
-    /// the replica was known to hold.
+    /// What is left when no booted engine can measure it, counted high (see the module doc).
     fn counted_high(&self) -> Unfinished {
         let kept = self.progress.left;
         let confirmed = self.progress.replicated.map(|(txid, _)| txid);

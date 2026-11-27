@@ -80,7 +80,6 @@ impl Runner {
         }
     }
 
-    /// Counts what became of the run's parts.
     pub(super) fn tally_parts(&mut self) {
         let Some(counts) = self
             .w
@@ -179,13 +178,6 @@ impl Runner {
         })
     }
 
-    /// A refusal the S3 replica answered in the tick must come back as the engine's report of
-    /// it: a task degraded with it, or a stop for it (the engine takes any store refusal as
-    /// persistent); of several in one tick, at least one. A refusal reported as another, or as a fault to retry, tells the
-    /// operator to fix the wrong thing.
-    ///
-    /// # Errors
-    /// [`Violation::DenialMisreported`].
     /// Where the refusal judge starts counting, taken just before a tick so that a refusal met
     /// by the simulator's own reads between ticks is not charged to the engine.
     pub(super) fn denials_baseline(&mut self) {
@@ -207,6 +199,13 @@ impl Runner {
         (wire.fired(), self.w.remote_raw.refused_deletes(), others)
     }
 
+    /// A refusal the S3 replica answered in the tick must come back as the engine's report of
+    /// it: a task degraded with it, or a stop for it (the engine takes any store refusal as
+    /// persistent); of several in one tick, at least one. A refusal reported as another, or as a
+    /// fault to retry, tells the operator to fix the wrong thing.
+    ///
+    /// # Errors
+    /// [`Violation::DenialMisreported`].
     pub(super) fn judge_denials(&mut self, ended: &TickEnd<Tick>) -> Result<(), Violation> {
         let Some(owed) = self.owed_denials() else {
             return Ok(());
@@ -343,7 +342,6 @@ impl Runner {
         })
     }
 
-    /// The provider faults pushed and not yet met by a request, at the end of a run.
     pub(super) fn http_faults_pending(&self) -> usize {
         self.w.remote_raw.wire().map_or(0, |wire| wire.pending())
     }

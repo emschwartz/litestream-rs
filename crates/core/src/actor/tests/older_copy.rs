@@ -11,7 +11,6 @@ fn tx(n: u64) -> Txid {
     Txid::new(n).unwrap()
 }
 
-/// The counter value the replica's newest state holds.
 const TIP_SEQ: u32 = 5;
 
 /// When the replica's newest file was written: the tick that staged it.
