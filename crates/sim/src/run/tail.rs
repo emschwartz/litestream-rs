@@ -207,11 +207,12 @@ impl Runner {
             within(Bound::BarrierWaitMicros, held.wait_micros, limit)?;
             // Each barrier's PASSIVE may copy twice the run's passive threshold, and never under
             // 64 frames (docs/decisions/D303.md), plus one commit of the application's made
-            // inside the tick; never the backlog of a snapshot that held checkpoints back.
+            // inside the tick (counted before it lands); never the backlog of a snapshot that
+            // held checkpoints back.
             let per_barrier = u64::from(super::PASSIVE_PAGES)
                 .saturating_mul(2)
                 .max(64)
-                .saturating_add(self.max_tx_pages);
+                .saturating_add(self.max_tx_pages.max(self.in_tick_pages));
             within(
                 Bound::BarrierCopiedFrames,
                 held.copied_frames,
