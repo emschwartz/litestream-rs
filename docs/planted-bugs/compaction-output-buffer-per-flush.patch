@@ -1,5 +1,5 @@
 diff --git a/crates/core/src/compact.rs b/crates/core/src/compact.rs
-index e3950d890..daecd00b4 100644
+index ac75a59a0..b07cfbb7e 100644
 --- a/crates/core/src/compact.rs
 +++ b/crates/core/src/compact.rs
 @@ -864,6 +864,7 @@ impl Compacting {
@@ -7,6 +7,6 @@ index e3950d890..daecd00b4 100644
              let sent = self.handoff.send(&mut self.upload, out, room);
              left = sent.await.map_err(CompactError::Dest)?;
 +            self.buf.out().shrink_to_fit();
-         }
-         let Some(trailer) = self.trailer.filter(|_| self.buf.whole()) else {
-             return Ok(None);
+             if left == Some(room) {
+                 return Err(CompactError::Bug(BugSite::Encode.hit()));
+             }
