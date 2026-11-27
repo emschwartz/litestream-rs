@@ -1,16 +1,16 @@
 diff --git a/crates/core/src/checkpoint.rs b/crates/core/src/checkpoint.rs
-index 28dae946..551b9b4c 100644
+index 32648ca8a..cea21d0f2 100644
 --- a/crates/core/src/checkpoint.rs
 +++ b/crates/core/src/checkpoint.rs
-@@ -441,6 +441,7 @@ struct Protocol<'a, W, P, C, L> {
+@@ -515,6 +515,7 @@ struct Protocol<'a, W, P, C, L> {
      cfg: SyncConfig,
      /// Read after each step's committed read for that step's file.
      clock: &'a dyn Clock,
 +    started: Timestamp,
-     good: Reached,
-     files: Vec<FileInfo>,
-     witnesses: Vec<Witnessed>,
-@@ -484,7 +485,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_,
+     staged: Staged,
+     run: Option<CheckpointRun>,
+ }
+@@ -558,7 +559,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
          let committed = self.wal.committed().map_err(Fault::from_source)?;
          // After the committed read, so the file's created-at time follows every
          // transaction it carries (see `Env::clock`).
@@ -19,11 +19,11 @@ index 28dae946..551b9b4c 100644
          wal_barrier(&mut *self.wal)?;
          let cfg = SyncConfig {
              cap: None,
-@@ -653,6 +654,7 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
+@@ -784,6 +785,7 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
          staging: &staging,
          cfg: *cfg,
          clock,
 +        started: clock.now(),
-         good: Reached::Through(proof),
-         files: Vec::new(),
-         witnesses: Vec::new(),
+         staged: Staged {
+             reached: Reached::Through(proof),
+             files: Vec::new(),

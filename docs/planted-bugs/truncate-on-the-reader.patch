@@ -1,13 +1,20 @@
 diff --git a/crates/sqlite/src/checkpoint.rs b/crates/sqlite/src/checkpoint.rs
-index d79699108..8ca024595 100644
+index 03eb805fe..9a052d0aa 100644
 --- a/crates/sqlite/src/checkpoint.rs
 +++ b/crates/sqlite/src/checkpoint.rs
 @@ -96,7 +96,7 @@ impl Checkpointer for Sqlite {
  
      fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointRun, SourceError> {
          let mut inner = self.lock();
--        if mode == CheckpointMode::Truncate {
-+        if mode == CheckpointMode::Truncate && false {
+-        let (rc, log, checkpointed, one_sqlite, lost) = if mode == CheckpointMode::Truncate {
++        let (rc, log, checkpointed, one_sqlite, lost) = if mode == CheckpointMode::Truncate && false {
              let shm = inner.shm_path();
              let alone = descriptors_on(&shm) == Some(1);
              let (rc, log, checkpointed) = wal_checkpoint(inner.free_writer()?, mode);
+@@ -254,4 +254,4 @@ mod tests {
+             Err(SourceError::Io(io::ErrorKind::Other))
+         );
+     }
+-}
++}
+\ No newline at end of file
