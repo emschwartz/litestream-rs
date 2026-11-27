@@ -501,6 +501,7 @@ pub struct RustSettings {
     pub(crate) responses: lsr_core::Responses,
     pub(crate) if_replication_stops: lsr_replica::IfReplicationStops,
     pub(crate) max_unreplicated_age: lsr_replica::MaxUnreplicatedAge,
+    pub(crate) snapshot_read_limit: Option<std::num::NonZeroU64>,
 }
 
 impl RustSettings {
@@ -525,5 +526,12 @@ impl RustSettings {
     #[must_use]
     pub fn max_unreplicated_age(self) -> lsr_replica::MaxUnreplicatedAge {
         self.max_unreplicated_age
+    }
+    /// `snapshot-read-limit`: the most bytes a second the engine reads from the database file
+    /// for a whole-database read (the boot copy, a level-9 snapshot, the scheduled verify), as a
+    /// byte size (`30MB`); `None` when absent, as in Go. Zero is refused.
+    #[must_use]
+    pub fn snapshot_read_limit(self) -> Option<std::num::NonZeroU64> {
+        self.snapshot_read_limit
     }
 }

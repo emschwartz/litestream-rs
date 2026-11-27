@@ -14,7 +14,7 @@
 //!    refused here too, before anything runs.
 //! 5. `LOG_LEVEL` over `logging.level`; the snapshot-retention warning.
 
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 
 use lsr_core::{OtherWriter, Response, Responses};
 use lsr_replica::{IfReplicationStops, MaxUnreplicatedAge};
@@ -536,7 +536,26 @@ fn rust_settings(fields: Option<&Fields>, walk: &mut Walk) -> RustSettings {
         responses,
         if_replication_stops: if_replication_stops(fields, walk),
         max_unreplicated_age: max_unreplicated_age(fields, walk),
+        snapshot_read_limit: snapshot_read_limit(fields, walk),
     }
+}
+
+/// `snapshot-read-limit` (issue 315): a byte size a second; no limit when absent, and zero is
+/// refused (a limit of nothing would never finish a copy).
+fn snapshot_read_limit(fields: Option<&Fields>, walk: &mut Walk) -> Option<NonZeroU64> {
+    let name = "snapshot-read-limit";
+    let (fields, bytes) = fields.and_then(|f| Some((f, f.bytes(name, walk)?)))?;
+    let limit = NonZeroU64::new(bytes);
+    if limit.is_none() {
+        unsupported(
+            fields,
+            name,
+            bytes.to_string(),
+            "a byte size above 0, such as 30MB".to_owned(),
+            walk,
+        );
+    }
+    limit
 }
 
 /// `if-replication-stops` (decisions D13, D14): `hold-start` when absent.

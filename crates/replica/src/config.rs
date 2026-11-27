@@ -120,6 +120,13 @@ pub struct Config {
     /// How long a commit may stay off the replica before fail-stop trips for it (decision
     /// D22): 10 minutes by default, at least 5.
     pub max_unreplicated_age: MaxUnreplicatedAge,
+    /// The most bytes a second the engine reads from the database file for a whole-database
+    /// read: the boot copy, a level-9 snapshot and the scheduled verify (`snapshot-read-limit`,
+    /// issue 315). `None` (the default, as Go) reads as fast as the disk allows. A slower read
+    /// holds its read transaction for longer, so the WAL grows, and the replica gets nothing
+    /// newer than the read's start until the snapshot lands, for about twice the database's size
+    /// over the limit (`docs/decisions/D311.md`).
+    pub snapshot_read_limit: Option<NonZeroU64>,
     /// Whether the staged files this library writes are written by a thread of their own, one
     /// block behind the engine (`lsr_store_fs::FsStore::with_write_behind`). Default `false`: no
     /// thread beside the engine's. The binary turns it on when the machine has more than one core
@@ -142,6 +149,7 @@ impl Default for Config {
             verify_interval: None,
             if_replication_stops: IfReplicationStops::HoldStart,
             max_unreplicated_age: MaxUnreplicatedAge::DEFAULT,
+            snapshot_read_limit: None,
             write_behind: false,
         }
     }
@@ -160,6 +168,20 @@ impl Config {
         Some(parent.join(format!(".{name}-litestream")))
     }
 
+    /// The upload limits: a tick's bytes shrink under a read limit, so a sliced snapshot waits
+    /// only a tenth of a second at a time and the engine's other work keeps its turns.
+    fn upload(&self) -> UploadConfig {
+        let default = UploadConfig::default();
+        UploadConfig {
+            files_per_tick: self.sync_limits.files_per_upload,
+            bytes_per_tick: self
+                .snapshot_read_limit
+                .map_or(default.bytes_per_tick, |limit| {
+                    crate::pace::slice_bytes(limit, default.bytes_per_tick)
+                }),
+        }
+    }
+
     /// The engine's configuration.
     pub(crate) fn actor(&self) -> ActorConfig {
         ActorConfig {
@@ -169,10 +191,7 @@ impl Config {
             },
             sync_interval: self.poll_interval.get(),
             checkpoint: self.checkpoint,
-            upload: UploadConfig {
-                files_per_tick: self.sync_limits.files_per_upload,
-                ..UploadConfig::default()
-            },
+            upload: self.upload(),
             maintenance: self.maintenance.clone(),
             retry_interval: self.retry_interval.get(),
             shutdown_grace: self.shutdown_grace,
@@ -185,6 +204,19 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A read limit shrinks the bytes of an upload tick (a tenth of a second of reading), so a
+    /// sliced snapshot never waits long at a stretch; with none the engine's own bound stands.
+    #[test]
+    fn a_read_limit_shrinks_the_bytes_of_an_upload_tick() {
+        let none = Config::default().actor().upload.bytes_per_tick;
+        assert_eq!(none, UploadConfig::default().bytes_per_tick);
+        let limited = Config {
+            snapshot_read_limit: NonZeroU64::new(20 << 20),
+            ..Config::default()
+        };
+        assert_eq!(limited.actor().upload.bytes_per_tick.get(), 2 << 20);
+    }
 
     /// The library bounds a tick's uploads as the binary does: with no bound, the first tick
     /// after an outage uploads the whole backlog before anything else runs.

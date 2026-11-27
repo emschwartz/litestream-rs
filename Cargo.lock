@@ -1114,6 +1114,7 @@ dependencies = [
  "lsr-sqlite",
  "lsr-store-fs",
  "percent-encoding",
+ "proptest",
  "rusqlite",
  "shuttle",
  "tempfile",

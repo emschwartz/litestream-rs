@@ -1,4 +1,5 @@
 diff --git a/crates/replica/src/readers.rs b/crates/replica/src/readers.rs
+index 801a5a598..2c4a59b45 100644
 --- a/crates/replica/src/readers.rs
 +++ b/crates/replica/src/readers.rs
 @@ -19,11 +19,90 @@
@@ -102,17 +103,17 @@ diff --git a/crates/replica/src/readers.rs b/crates/replica/src/readers.rs
 +}
 \ No newline at end of file
 diff --git a/crates/replica/src/thread.rs b/crates/replica/src/thread.rs
+index 8fc8ff1d9..bfd9282ce 100644
 --- a/crates/replica/src/thread.rs
 +++ b/crates/replica/src/thread.rs
-@@ -496,7 +496,13 @@ impl Worker {
-     /// One engine tick, or why the closed connections could not be reopened.
-     fn tick(&mut self, now: Timestamp) -> Result<Tick, Reopen> {
-         let sqlite = self.connection()?;
--        let (mut wal, mut db) = (sqlite.clone(), sqlite.clone());
+@@ -505,7 +505,12 @@ impl Worker {
+             .then_some(self.config.snapshot_read_limit)
+             .flatten();
+         let mut wal = sqlite.clone();
+-        let mut db = Paced::new(sqlite.clone(), self.runtime.clone(), limit);
 +        let write_locked = Arc::new(std::sync::atomic::AtomicBool::new(false));
-+        let mut wal = sqlite.clone();
 +        let mut db = crate::readers::Paced::from_env(
-+            sqlite.clone(),
++            Paced::new(sqlite.clone(), self.runtime.clone(), limit),
 +            self.runtime.clone(),
 +            Arc::clone(&write_locked),
 +        );

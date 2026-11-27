@@ -1,0 +1,8 @@
+# An upload tick keeps its full 8 MiB under a read limit, so a sliced level-9 snapshot waits
+# seconds inside one slice and the WAL step starves behind it (issue 315).
+name = "snapshot-slice-ignores-the-read-limit"
+fix = "plant"
+package = "lsr-replica"
+tests = [
+    "config::tests::a_read_limit_shrinks_the_bytes_of_an_upload_tick",
+]

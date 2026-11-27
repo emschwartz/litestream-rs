@@ -172,6 +172,7 @@ Generated from `crates/config/src/keys.rs` by `crates/config/src/keys/table.rs`;
 | `responses` | A section; its keys are below. |
 | `if-replication-stops` | `Config.if_replication_stops`. |
 | `max-unreplicated-age` | `Config.max_unreplicated_age`. |
+| `snapshot-read-limit` | `Config.snapshot_read_limit`. |
 
 ## `litestream-rs.responses`
 
