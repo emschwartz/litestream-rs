@@ -240,7 +240,29 @@ impl ContiguousChain {
     pub const fn reaches(&self) -> Txid {
         self.reaches
     }
+
+    /// The newest file after the base that may hold the whole database, judged by size alone:
+    /// at least three quarters of the base's bytes, with the base at least
+    /// [`WHOLE_BASE_MIN_BYTES`]. A file the writer made from the whole database (the copy taken
+    /// when the WAL no longer continues the replica) is as large as a snapshot, and so is every
+    /// merge of it, but nothing in its name says so. The size proves nothing: the restore reads
+    /// the file first and starts from it only when its pages are every page of its database.
+    pub(crate) fn whole_candidate(&self) -> Option<usize> {
+        let base = self.snapshot.size;
+        if base < WHOLE_BASE_MIN_BYTES {
+            return None;
+        }
+        self.files
+            .iter()
+            .rposition(|file| file.size.saturating_mul(4) >= base.saturating_mul(3))
+            .filter(|&index| index > 0)
+    }
 }
+
+/// The smallest base for which a restore looks for a whole-database copy later in its chain
+/// ([`ContiguousChain::whole_candidate`]). Below it the base costs a few reads, and a guess that
+/// turns out wrong would cost one read more than Go makes.
+pub(crate) const WHOLE_BASE_MIN_BYTES: u64 = 16 * 1024 * 1024;
 
 /// What the planner found. Exactly one variant is a plan; each other variant
 /// is a different reason there is no exact answer.

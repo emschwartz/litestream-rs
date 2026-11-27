@@ -1,0 +1,10 @@
+# A restore whose chain holds a whole-database copy after the snapshot (the copy the writer takes
+# when the WAL no longer continues the replica) reads the snapshot and every file up to the copy,
+# though the copy rewrites every page they hold: on a large database, twice the bytes.
+name = "restore-reads-the-base-under-a-whole-copy"
+fix = "claude/restore-cheapest"
+package = "lsr-core"
+tests = [
+    "restore::tests::a_whole_database_copy_after_the_snapshot_is_the_start_and_nothing_before_it_is_read",
+]
+unaided_miss = "The plant restores the right pages and only reads more bytes; the swarm judges restored pages, never the bytes a restore read, and its databases stay below the size at which a restore looks for a whole copy."

@@ -1105,3 +1105,65 @@ fn a_heap_sift_counts_one_comparison_per_level() {
         assert_eq!(depth(len), comparisons, "{len} entries");
     }
 }
+
+/// A plan over a level-9 base of `base` bytes and level-0 files 2, 3 and 4 of the given sizes.
+fn sized_chain(base: u64, sizes: [u64; 3]) -> ContiguousChain {
+    let mut files = vec![FileInfo {
+        size: base,
+        ..at(9, 1, 1)
+    }];
+    for (t, size) in (2..).zip(sizes) {
+        files.push(FileInfo {
+            size,
+            ..at(0, t, t)
+        });
+    }
+    let PlanOutcome::Plan(chain) = plan(&inv(&files), KeyTarget::Latest) else {
+        panic!("a plan");
+    };
+    chain
+}
+
+#[test]
+fn a_whole_copy_candidate_is_the_newest_file_of_three_quarters_the_base_or_more() {
+    let base = WHOLE_BASE_MIN_BYTES * 4;
+    let quarter = base / 4;
+    // Exactly three quarters qualifies; a byte under does not.
+    assert_eq!(
+        sized_chain(base, [1, quarter * 3, 1]).whole_candidate(),
+        Some(2)
+    );
+    assert_eq!(
+        sized_chain(base, [1, quarter * 3 - 1, 1]).whole_candidate(),
+        None
+    );
+    // The newest of two that qualify, so the most files are skipped.
+    assert_eq!(
+        sized_chain(base, [base, 1, base * 2]).whole_candidate(),
+        Some(3)
+    );
+    assert_eq!(sized_chain(base, [base, 1, 1]).whole_candidate(), Some(1));
+}
+
+#[test]
+fn a_base_under_the_floor_has_no_whole_copy_candidate() {
+    // 16 MiB, written out: a base of a few reads is never worth a guess.
+    let floor = 16 * 1024 * 1024;
+    assert_eq!(sized_chain(floor, [floor, 1, 1]).whole_candidate(), Some(1));
+    assert_eq!(
+        sized_chain(floor - 1, [floor, 1, 1]).whole_candidate(),
+        None
+    );
+}
+
+#[test]
+fn a_chain_of_the_base_alone_has_no_whole_copy_candidate() {
+    let base = FileInfo {
+        size: WHOLE_BASE_MIN_BYTES,
+        ..at(9, 1, 3)
+    };
+    let PlanOutcome::Plan(chain) = plan(&inv(&[base]), KeyTarget::Latest) else {
+        panic!("a plan");
+    };
+    assert_eq!(chain.whole_candidate(), None);
+}
