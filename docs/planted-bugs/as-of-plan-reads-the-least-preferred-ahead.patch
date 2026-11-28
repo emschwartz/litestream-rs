@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/plan.rs b/crates/core/src/plan.rs
+index e3f88edc4..2e91ec354 100644
+--- a/crates/core/src/plan.rs
++++ b/crates/core/src/plan.rs
+@@ -999,7 +999,7 @@ impl<'a> AsOfPlanner<'a> {
+                     return best.take().copied();
+                 };
+                 if touches(next.key.range().min(), reach) {
+-                    if passes(next, reach) && best.is_none_or(|b| preference(next) > preference(b))
++                    if passes(next, reach) && best.is_none_or(|b| preference(next) < preference(b))
+                     {
+                         best = Some(next);
+                     }

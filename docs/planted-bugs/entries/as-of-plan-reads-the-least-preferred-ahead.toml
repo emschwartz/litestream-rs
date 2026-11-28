@@ -1,0 +1,10 @@
+# The files an instant restore reads ahead are guessed from the least preferred candidates, not
+# the chain it will take, so it reads a level-0 file a level-1 file covers. Pages stay right; the
+# cost is HEAD requests for files the plan never uses.
+name = "as-of-plan-reads-the-least-preferred-ahead"
+fix = "claude/small-restore"
+package = "lsr-core"
+tests = [
+    "restore::tests::created_ahead::the_files_read_ahead_are_the_ones_the_chain_takes",
+]
+unaided_miss = "the simulator's stores run no created-at batch and the plant changes which requests go out together, never a byte or an outcome, so no swarm seed can tell"

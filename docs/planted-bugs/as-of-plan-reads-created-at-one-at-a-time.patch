@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/plan.rs b/crates/core/src/plan.rs
+index 2306caf9c..68c09e8a1 100644
+--- a/crates/core/src/plan.rs
++++ b/crates/core/src/plan.rs
+@@ -963,7 +963,7 @@ impl<'a> AsOfPlanner<'a> {
+                 let ahead = self
+                     .expected_after(&info)
+                     .filter(|later| resolved.exact(later).is_none());
+-                return Resolve::Need(Need::with_ahead(info, ahead));
++                let _ = ahead; return Resolve::Need(Need::one(info));
+             };
+             #[cfg(any(test, feature = "testing"))]
+             {

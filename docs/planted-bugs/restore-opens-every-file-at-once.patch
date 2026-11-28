@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/restore/window.rs b/crates/core/src/restore/window.rs
+index a8f87f67a..e63f275ca 100644
+--- a/crates/core/src/restore/window.rs
++++ b/crates/core/src/restore/window.rs
+@@ -98,7 +98,7 @@ impl<'s, S: ObjectStore> Lookahead<'s, S> {
+ 
+     /// The next file, its index and its stream, after opening the small files up to `depth` ahead.
+     pub(super) fn next_file(&mut self) -> Option<(usize, &'s FileInfo, Box<dyn ReadStream + 's>)> {
+-        while self.ready.len() < self.depth {
++        while self.opened < self.files.len() {
+             let Some(info) = self.files.get(self.opened) else {
+                 break;
+             };

@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/restore/window.rs b/crates/core/src/restore/window.rs
+index a8f87f67a..7d131e8f0 100644
+--- a/crates/core/src/restore/window.rs
++++ b/crates/core/src/restore/window.rs
+@@ -73,7 +73,7 @@ impl<'s, S: ObjectStore> Lookahead<'s, S> {
+             store,
+             files,
+             from,
+-            if wide { LOOKAHEAD } else { 0 },
++            if wide { 0 } else { 0 },
+             AHEAD_BYTES,
+         )
+     }

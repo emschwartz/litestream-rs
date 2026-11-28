@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
-use lsr_core::{BoxFuture, FileKey, ReadLen, ReadStream, StoreError, StoreOp};
+use lsr_core::{BoxFuture, FileKey, ReadLen, ReadStream, SPAN_TO_END, StoreError, StoreOp};
 
 use super::Inner;
 use crate::classify::classify_transport;
@@ -189,13 +189,17 @@ impl Ahead {
         start: u64,
         end: u64,
     ) -> Self {
-        // The whole span waits read ahead, up to [`AHEAD_PIECES`].
-        let depth = end
-            .saturating_sub(start)
-            .div_ceil(AHEAD_PIECE.get())
-            .clamp(1, AHEAD_PIECES);
+        // The whole span waits read ahead, up to [`AHEAD_PIECES`]; the rest of an object, one piece.
+        let (mut stream, depth) = if end == SPAN_TO_END {
+            (S3Stream::new(inner, key, start), 1)
+        } else {
+            let depth = end
+                .saturating_sub(start)
+                .div_ceil(AHEAD_PIECE.get())
+                .clamp(1, AHEAD_PIECES);
+            (S3Stream::span(inner, key, start, end), depth)
+        };
         let (queue, pieces) = mpsc::sync_channel(usize::try_from(depth).unwrap_or(1));
-        let mut stream = S3Stream::span(inner, key, start, end);
         let full = usize::try_from(AHEAD_PIECE.get()).unwrap_or(usize::MAX);
         // A thread that cannot start drops the sender: the span's first piece fails as Transient.
         let spawned = thread::Builder::new()

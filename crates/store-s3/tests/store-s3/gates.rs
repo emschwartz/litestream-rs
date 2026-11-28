@@ -295,13 +295,14 @@ fn multipart_upload_keeps_parts_in_flight() {
 
 // An AsOf plan reads the created-at time of the one file its decision needs
 // and of up to `CREATION_TIME_CONCURRENCY` files it expects to need next, as
-// one batch (one wave). The decisions depend on one another, so the depth is
-// the length of that chain, not the number of HEADs. The ceilings are the
-// chain lengths of the 10^4-file replica's planner today; the HEAD count
-// bound is the one in `as_of_heads_are_bounded`. At width 1 the planner reads fewer
-// files (it does not speculate) but each is a wave: 60 minutes back is 11
-// waves against a ceiling of 8 (the 1 minute case has the same chain either
-// way, so the other two carry the gate).
+// one batch (one wave): the chain it will take if every file proves eligible
+// (D316). A chain is then about its length over the width in waves, not its
+// length. The files past the instant that the guess reads are the cost: a batch
+// or two, so the HEAD ceilings sit 20 to 40 above what the decisions need, and
+// the wave ceilings are the measured ones (5, 4 and 4; they were 17, 8 and 12
+// when each file of the chain was a wave). The bound on HEADs against the files
+// a plan could touch is in `as_of_heads_are_bounded`. At width 1 the planner reads
+// fewer files (it does not speculate) but each is a wave.
 #[test]
 fn as_of_created_at_reads_go_side_by_side() {
     let rig = Rig::build();
@@ -309,7 +310,7 @@ fn as_of_created_at_reads_go_side_by_side() {
     let inventory = block_on(Inventory::load(&store)).unwrap();
     let minute = std::time::Duration::from_secs(60);
     // (minutes back, HEAD ceiling, wave ceiling)
-    for (age, heads, rounds) in [(1_u32, 27_usize, 17_usize), (60, 18, 8), (120, 22, 12)] {
+    for (age, heads, rounds) in [(1_u32, 48_usize, 6_usize), (60, 64, 5), (120, 64, 5)] {
         let mut planner = AsOfPlanner::new(&inventory, instant_back(minute * age));
         let (resolved, tally) = link.measure(|| block_on(resolve(&store, &mut planner)).unwrap());
         let read = usize::try_from(resolved.created_at_read).unwrap();

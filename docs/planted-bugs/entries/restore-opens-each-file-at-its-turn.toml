@@ -1,0 +1,11 @@
+# A restore opens each small file when it reaches it, so every file waits a round trip after the
+# one before. Pages, checksums and request counts stay right, so only the order of the requests
+# sees it: a restore against a store 30 ms away spent 11 s on 300 files where 32 at once takes
+# under a second.
+name = "restore-opens-each-file-at-its-turn"
+fix = "claude/small-restore"
+package = "lsr-core"
+tests = [
+    "restore::tests::lookahead::the_next_files_are_opened_before_the_first_is_read",
+]
+unaided_miss = "the simulator's stores read lazily, so opening a file earlier or later changes when a request is sent and no byte or outcome, and no swarm seed can tell"

@@ -22,7 +22,7 @@ use lsr_ltx::{Timestamp, Txid, TxidRange};
 
 use crate::layout::{CreatedAtSource, FileInfo, FileKey, Level, ListedTime};
 use crate::store::{
-    ListAt, ObjectStore, PageLimit, ReadLen, StoreError, StoreOp, Upload, WriteMode,
+    ListAt, ObjectStore, PageLimit, ReadLen, SPAN_TO_END, StoreError, StoreOp, Upload, WriteMode,
 };
 
 /// Why a conformance case failed.
@@ -938,8 +938,8 @@ pub async fn read_stream_agrees_with_read<H: Harness>(h: &H) -> Check {
     Ok(())
 }
 
-/// `read_span` hands out what `read` does from its start, no byte at or past its end: a short
-/// piece where the span or the object ends, then nothing. A missing key fails as `read` does.
+/// `read_span` hands out what `read` does from its start, no byte at or past its end (an end of
+/// [`SPAN_TO_END`] is the object's): a short piece where the span or the object ends, then nothing. A missing key fails as `read` does.
 ///
 /// # Errors
 /// A [`Failure`] naming the rule that broke.
@@ -954,6 +954,8 @@ pub async fn read_span_agrees_with_read<H: Harness>(h: &H) -> Check {
         (2, 5, b"cde"),
         (1, 7, b"bcdefg"),
         (6, 20, b"gh"),
+        (0, SPAN_TO_END, b"abcdefgh"),
+        (3, SPAN_TO_END, b"defgh"),
     ];
     for (start, end, want) in spans {
         let mut stream = store.read_span(target, start, end);

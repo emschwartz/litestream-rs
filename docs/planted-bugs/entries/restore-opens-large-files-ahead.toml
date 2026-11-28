@@ -1,0 +1,10 @@
+# A restore opens files of any size ahead, not only those a store reads ahead whole in one piece,
+# so 32 large files would each hold read-ahead memory and a large file would skip its window of
+# spans.
+name = "restore-opens-large-files-ahead"
+fix = "claude/small-restore"
+package = "lsr-core"
+tests = [
+    "restore::tests::lookahead::a_file_is_opened_ahead_up_to_the_size_limit_and_no_larger",
+]
+unaided_miss = "the simulator's stores read lazily, so opening a file earlier or later changes when a request is sent and no byte or outcome, and no swarm seed can tell"

@@ -1,0 +1,10 @@
+# An instant restore asks for the created-at time of each file of its chain one request at a time,
+# so a chain of 120 files 30 ms from the client waits 120 round trips. Pages and the set of files
+# asked stay right; only the batches see it.
+name = "as-of-plan-reads-created-at-one-at-a-time"
+fix = "claude/small-restore"
+package = "lsr-core"
+tests = [
+    "restore::tests::created_ahead::a_chain_of_single_transaction_files_is_read_a_width_at_a_time",
+]
+unaided_miss = "the simulator's stores run no created-at batch and the plant changes which requests go out together, never a byte or an outcome, so no swarm seed can tell"

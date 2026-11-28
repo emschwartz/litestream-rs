@@ -15,7 +15,9 @@
 use std::collections::VecDeque;
 
 use crate::layout::{FileInfo, FileKey};
-use crate::store::{BatchKind, BoxFuture, ObjectStore, ReadLen, ReadStream, StoreError};
+use crate::store::{
+    BatchKind, BoxFuture, ObjectStore, ReadLen, ReadStream, SPAN_TO_END, StoreError,
+};
 
 /// Bytes a span covers: large enough that a request's round trip is small beside its transfer,
 /// small enough that the store's width of them stays a bounded share of memory (40 MiB at S3's
@@ -33,6 +35,87 @@ pub(super) fn stream<'s, S: ObjectStore>(
         return store.read_stream(info.key, 0);
     }
     Box::new(Window::new(store, info.key, info.size, width, SPAN_BYTES))
+}
+
+/// How many files ahead of the one being applied a restore opens: Go's own bound on the files it
+/// opens at once (`restoreOpenConcurrency` in `replica.go`).
+pub(super) const LOOKAHEAD: usize = 32;
+
+/// The largest listed size of a file opened ahead, which a store reads ahead whole in one piece
+/// ([`ReadLen::CHUNK`]): the memory of the files open ahead is at most [`LOOKAHEAD`] of them. A
+/// larger file's transfer outweighs its round trip, and one of two spans or more has its window.
+pub(super) const AHEAD_BYTES: u64 = 1024 * 1024;
+
+/// The files of a restore in order, each with its stream: the small ones among the next
+/// `depth` already opened ([`ObjectStore::read_span`] to [`SPAN_TO_END`]), the rest opened as
+/// [`stream`] opens them, when their turn comes.
+pub(super) struct Lookahead<'s, S> {
+    store: &'s S,
+    files: &'s [FileInfo],
+    depth: usize,
+    /// Largest listed size opened ahead.
+    small: u64,
+    /// The file to hand out next.
+    at: usize,
+    /// The next file to open ahead.
+    opened: usize,
+    /// One entry per file from `at` to `opened`: its stream, or `None` for a file left to open
+    /// at its turn.
+    ready: VecDeque<Option<Box<dyn ReadStream + 's>>>,
+}
+
+impl<'s, S: ObjectStore> Lookahead<'s, S> {
+    /// The files from `from` on, [`LOOKAHEAD`] ahead when the store reads several streams at
+    /// once ([`BatchKind::Spans`], as for a window) and none otherwise.
+    pub(super) fn new(store: &'s S, files: &'s [FileInfo], from: usize) -> Self {
+        let wide = store.batch_width(BatchKind::Spans).get() >= 2;
+        Self::with(
+            store,
+            files,
+            from,
+            if wide { LOOKAHEAD } else { 0 },
+            AHEAD_BYTES,
+        )
+    }
+
+    pub(super) const fn with(
+        store: &'s S,
+        files: &'s [FileInfo],
+        from: usize,
+        depth: usize,
+        small: u64,
+    ) -> Self {
+        Self {
+            store,
+            files,
+            depth,
+            small,
+            at: from,
+            opened: from,
+            ready: VecDeque::new(),
+        }
+    }
+
+    /// The next file, its index and its stream, after opening the small files up to `depth` ahead.
+    pub(super) fn next_file(&mut self) -> Option<(usize, &'s FileInfo, Box<dyn ReadStream + 's>)> {
+        while self.ready.len() < self.depth {
+            let Some(info) = self.files.get(self.opened) else {
+                break;
+            };
+            self.ready.push_back(
+                (info.size <= self.small).then(|| self.store.read_span(info.key, 0, SPAN_TO_END)),
+            );
+            self.opened = self.opened.saturating_add(1);
+        }
+        let index = self.at;
+        let info = self.files.get(index)?;
+        self.at = index.saturating_add(1);
+        let stream = match self.ready.pop_front().flatten() {
+            Some(stream) => stream,
+            None => stream(self.store, info),
+        };
+        Some((index, info, stream))
+    }
 }
 
 /// An open span: its stream and the bytes it has still to hand out.
