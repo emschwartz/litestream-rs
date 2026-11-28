@@ -43,8 +43,6 @@ fn bump(count: &mut u64) {
     *count = count.saturating_add(1);
 }
 
-// ---------------------------------------------------------------- Faults
-
 /// What a scheduled fault does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FaultShape {
@@ -164,7 +162,7 @@ struct FaultState {
     // Objects a flipped byte reached on a read, once per such read.
     flipped: Vec<FileKey>,
     // Reads, listings and created-at times one batch may hold.
-    widths: [NonZeroUsize; 2],
+    widths: [NonZeroUsize; 3],
     // Batch calls that held more than one item.
     batched: u32,
     // Where a hung call's wait goes, and how long the client waits before it gives up.
@@ -469,7 +467,7 @@ impl<S> Faults<S> {
             deleting: Vec::new(),
             flipped: Vec::new(),
             rejected: Vec::new(),
-            widths: [NonZeroUsize::MIN; 2],
+            widths: [NonZeroUsize::MIN; 3],
             batched: 0,
             hang: None,
             hung: 0,
@@ -554,6 +552,7 @@ const fn width_slot(kind: BatchKind) -> usize {
     match kind {
         BatchKind::Lists => 0,
         BatchKind::ResolvedCreatedAt => 1,
+        BatchKind::Spans => 2,
     }
 }
 
@@ -860,7 +859,6 @@ impl<U: Upload> Upload for FaultsUpload<U> {
     }
 }
 
-/// Writes `chunk` to `inner`, with the source the engine gave when it gave one.
 async fn write_of<U: Upload>(
     inner: &mut U,
     chunk: &[u8],
@@ -949,9 +947,6 @@ impl<U: Upload> FaultsUpload<U> {
     }
 }
 
-// ----------------------------------------------------------------- Yield
-
-/// Returns `Pending` once, waking itself, then completes.
 struct YieldNow(bool);
 
 impl Future for YieldNow {
@@ -1093,8 +1088,6 @@ impl<U: Upload> Upload for YieldUpload<U> {
         self.inner.abort().await
     }
 }
-
-// ------------------------------------------------------------------- Recorder
 
 /// One thing the store really did.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1296,7 +1289,6 @@ impl RecorderLog {
         f(&mut lock(&self.state));
     }
 
-    /// Counts the bytes a read answered with.
     fn read_answered(&self, out: Result<&Vec<u8>, &StoreError>) {
         if let Ok(bytes) = out {
             let n = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
@@ -1739,8 +1731,6 @@ impl<S: ObjectStore> TapUpload<S> {
         outcome
     }
 }
-
-// ----------------------------------------------------------------- Stage
 
 #[derive(Debug, Default)]
 struct StageState {

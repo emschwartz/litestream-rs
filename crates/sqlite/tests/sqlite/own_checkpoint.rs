@@ -90,7 +90,8 @@ fn arm(
                 | SourceOp::EndBarrier
                 | SourceOp::Checkpoint
                 | SourceOp::BeginWriteLock
-                | SourceOp::EndWriteLock => {}
+                | SourceOp::EndWriteLock
+                | SourceOp::RenewRead => {}
             }
         }));
     });
@@ -101,7 +102,6 @@ fn disarm() {
     HOOK.with(|hook| *hook.borrow_mut() = None);
 }
 
-/// A rig over the hooked backend whose actor checkpoints as `checkpoint` says.
 fn rig(dir: &TempDir, checkpoint: CheckpointConfig) -> Rig<Hooked> {
     let mut cfg = RigConfig::default();
     cfg.actor.checkpoint = checkpoint;
@@ -110,7 +110,6 @@ fn rig(dir: &TempDir, checkpoint: CheckpointConfig) -> Rig<Hooked> {
     rig
 }
 
-/// Every snapshot the ticks from the `from`th on announced.
 fn snapshots(rig: &Rig<Hooked>, from: usize) -> Vec<SnapshotCause> {
     rig.ticks()
         .iter()
@@ -128,7 +127,6 @@ fn snapshots(rig: &Rig<Hooked>, from: usize) -> Vec<SnapshotCause> {
         .collect()
 }
 
-/// How many ticks from the `from`th on ran a checkpoint of `mode`.
 fn checkpoints(rig: &Rig<Hooked>, from: usize, mode: CheckpointMode) -> usize {
     rig.ticks()
         .iter()
@@ -145,7 +143,6 @@ fn checkpoints(rig: &Rig<Hooked>, from: usize, mode: CheckpointMode) -> usize {
         .count()
 }
 
-/// A steady writer's rounds: a few commits, then the actor runs until it is idle.
 fn rounds(rig: &mut Rig<Hooked>, rounds: u32) -> std::collections::BTreeSet<(u32, u32)> {
     let mut generations = std::collections::BTreeSet::new();
     for _ in 0..rounds {
@@ -296,7 +293,8 @@ fn arm_truncate_overtaken(writer: Connection, reader: Connection) -> Rc<RefCell<
                 | SourceOp::ReadPage
                 | SourceOp::EndBarrier
                 | SourceOp::BeginWriteLock
-                | SourceOp::EndWriteLock => {}
+                | SourceOp::EndWriteLock
+                | SourceOp::RenewRead => {}
             }
         }));
     });

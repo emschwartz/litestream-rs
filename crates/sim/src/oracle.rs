@@ -97,6 +97,9 @@ pub enum Bound {
     BarrierWaitMicros,
     /// Write barriers still held when a tick ended without a crash.
     BarrierHeldAfterTick,
+    /// WAL frames the engine's own checkpoints copied into the database file while it held
+    /// the write barrier, which every application writer waits out (`crate::barrier`).
+    BarrierCopiedFrames,
 }
 
 impl fmt::Display for Bound {
@@ -127,6 +130,7 @@ impl fmt::Display for Bound {
                 "microseconds the application waited on the write barrier in one tick"
             }
             Self::BarrierHeldAfterTick => "write barriers held when a tick ended",
+            Self::BarrierCopiedFrames => "frames copied under the write barrier",
         };
         f.write_str(name)
     }
@@ -625,7 +629,6 @@ pub(crate) fn covers(
     ground: Ground<'_>,
 ) -> Result<BTreeMap<Txid, CommitId>, Violation> {
     let mut cover: BTreeMap<Txid, CommitId> = BTreeMap::new();
-    // The last level-0 put of each id, by recorder position.
     let mut replaced: BTreeMap<Txid, usize> = BTreeMap::new();
     for (at, event) in recorder.events().iter().enumerate() {
         let RecorderEvent::Put {
@@ -651,13 +654,11 @@ pub(crate) fn covers(
                     key: format!("{} {}", key.level().get(), range_str(key.range())),
                 })?)
             }
-            // A staged snapshot lost before upload (torn by a power loss, or
-            // its staging directory wiped) leaves its note behind, and the
-            // engine takes the same id again from a later commit. Staging holds
-            // one file per id, so a level-0 file put is the newest noted by
-            // then; so is one put again after a bucket rollback took the
-            // first. A compacted file names no origin and carries the commit
-            // of the level-0 file that ended it.
+            // A staged snapshot lost before upload (power loss, wiped staging) leaves its
+            // note behind, and the engine takes the same id again from a later commit.
+            // Staging holds one file per id, so a level-0 put is the newest noted by then,
+            // as is one put again after a bucket rollback. A compacted file names no
+            // origin and carries the commit of the level-0 file that ended it.
             None => {
                 let _ = header;
                 let noted = model.staged_as(max, at);
@@ -966,10 +967,9 @@ pub fn check_with(
     Ok(out)
 }
 
-/// The replica's files as the store holds them, ascending by key: read from the store's own
-/// objects ([`crate::remote::Bucket::stored`]), never through the engine's listing code (`Inventory::load`, its
-/// paging and its merge), so a listing defect the engine has cannot also hide a file from the
-/// judges.
+/// The replica's files ascending by key, read from the store's own objects
+/// ([`crate::remote::Bucket::stored`]) and never through the engine's listing code, so a
+/// listing defect cannot also hide a file from the judges.
 #[must_use]
 pub fn replica_files(remote: &crate::remote::Bucket) -> Vec<FileInfo> {
     remote.stored()

@@ -4,9 +4,8 @@
 //! and SQLite cannot tell the replicator whether one is coming. The engine's connections never
 //! wait on a lock (a busy timeout of zero), so a TRUNCATE a reader blocks does not wait for it:
 //! it copies what the reader allows into the database file, reports busy, leaves the WAL as it
-//! was and takes no snapshot. Under [`ReaderTracking::Untracked`] SQLite is asked and answers.
-//! Under [`ReaderTracking::Tracked`] the application says when it reads: a TRUNCATE asked for
-//! while a [`ReaderGuard`] lives is refused without calling SQLite, as
+//! was and takes no snapshot. An application that says when it reads holds a [`ReaderGuard`] for
+//! each long read: a TRUNCATE asked for while one lives is refused without calling SQLite, as
 //! `SourceError::ReadersHeld` and not as busy (SQLite was never asked), so the engine waits its
 //! backoff and asks again. A FULL checkpoint (the cure after a failed WAL sync runs one) is
 //! blocked by readers on older snapshots the same way, also reports busy without waiting, and
@@ -22,10 +21,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, SourceError};
+use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, ReadLockHold, SourceError};
 use lsr_sqlite::{Sqlite, WritesHeld};
-
-use crate::config::ReaderTracking;
 
 /// Held for the length of one long read. While any guard lives, the replicator runs no
 /// TRUNCATE checkpoint. Counted, so overlapping readers are safe; dropping it ends the read.
@@ -50,26 +47,19 @@ impl Drop for ReaderGuard {
     }
 }
 
-/// The backend's checkpointer, refusing TRUNCATE and FULL while a tracked reader lives,
+/// The backend's checkpointer, refusing TRUNCATE and FULL while a reader guard lives,
 /// and every write while the application's writes are held.
 #[derive(Clone, Debug)]
 pub(crate) struct Guarded {
     sqlite: Sqlite,
-    tracking: ReaderTracking,
     readers: Arc<AtomicUsize>,
     held: WritesHeld,
 }
 
 impl Guarded {
-    pub(crate) const fn new(
-        sqlite: Sqlite,
-        tracking: ReaderTracking,
-        readers: Arc<AtomicUsize>,
-        held: WritesHeld,
-    ) -> Self {
+    pub(crate) const fn new(sqlite: Sqlite, readers: Arc<AtomicUsize>, held: WritesHeld) -> Self {
         Self {
             sqlite,
-            tracking,
             readers,
             held,
         }
@@ -84,10 +74,7 @@ impl Guarded {
     }
 
     fn may_wait(&self) -> bool {
-        match self.tracking {
-            ReaderTracking::Untracked => true,
-            ReaderTracking::Tracked => self.readers.load(Ordering::SeqCst) == 0,
-        }
+        self.readers.load(Ordering::SeqCst) == 0
     }
 }
 
@@ -107,10 +94,15 @@ impl Checkpointer for Guarded {
             CheckpointMode::Truncate | CheckpointMode::Full if !self.may_wait() => {
                 Err(SourceError::ReadersHeld)
             }
-            CheckpointMode::Truncate | CheckpointMode::Full | CheckpointMode::Passive => {
-                self.sqlite.checkpoint(mode)
-            }
+            CheckpointMode::Truncate
+            | CheckpointMode::Full
+            | CheckpointMode::Passive
+            | CheckpointMode::Backlog => self.sqlite.checkpoint(mode),
         }
+    }
+
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError> {
+        self.sqlite.renew_read()
     }
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {

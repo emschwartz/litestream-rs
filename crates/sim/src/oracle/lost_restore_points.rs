@@ -8,8 +8,7 @@
 //! transaction when a replica file ends at that transaction (another writer's
 //! file there was compacted, so a restore reaches it), or when the same key was
 //! counted before (a staging backup put back a file already given up: deleting
-//! it again loses nothing new). Seeds 0xf4a87, 0xf47e6, 0xf4bab and 0xf44c6
-//! failed on the double count and the other writer's transaction.
+//! it again loses nothing new).
 //!
 //! Each is counted (`lost_restore_points.counted`) and judged against the
 //! forcings in effect ([`crate::forcing`]): one with nothing in effect that
@@ -78,7 +77,7 @@ impl LostRestorePoints {
     /// staged file at or below the replica's newest transaction that it never
     /// took, and that no replica file ends at, can never be uploaded, so its
     /// restore point is given up now, with the window that forced the
-    /// snapshot, not later when a prune deletes it (seed 0xf4cf9).
+    /// snapshot, not later when a prune deletes it.
     pub fn passed_by_replica(
         &mut self,
         staged: &[FileKey],

@@ -20,6 +20,10 @@ impl Transport for Shared {
     fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
         self.0.send(request)
     }
+
+    fn pause(&self, wait: std::time::Duration) {
+        self.0.pause(wait);
+    }
 }
 
 pub struct FakeHarness {

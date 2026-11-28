@@ -317,7 +317,6 @@ fn a_restarted_wal_ends_at_the_first_stale_frame() {
         );
     }
     check(&new, 512);
-    // A cursor taken in the old generation is refused outright.
     let old_reader = WalReader::open(Cursor::new(old.wal)).unwrap();
     let old_cursor = old_reader.cursor_at_start();
     let err = reader

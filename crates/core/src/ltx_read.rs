@@ -2,7 +2,7 @@
 //!
 //! Every reader of whole files goes through [`LtxRead`]: restore, compaction,
 //! verify, the newest staged file's recovery check and the page table's seeding.
-//! It owns the three rules each of them used to repeat by hand:
+//! It owns three rules:
 //! - The listed size is advisory: only the decoder knows where a file ends.
 //! - A chunk shorter than asked is the end of the object (the read contract
 //!   of [`ObjectStore::read`]), so no empty read follows to learn it.
@@ -14,9 +14,10 @@
 //!   one value.
 //!
 //! Memory is one chunk: the old chunk is dropped before the next read. Every
-//! read takes its chunks from one [`ObjectStore::read_stream`], so on S3 the
-//! whole file is one request: a read to the end ([`LtxRead::read_verified`])
-//! and a read stepped event by event ([`LtxRead::next`], a compaction's inputs,
+//! read takes its chunks from one stream: [`ObjectStore::read_stream`], so on S3
+//! the whole file is one request, or a restore's window of ranged reads handing
+//! out the file in order (`crate::restore`). With one stream: a read to the end
+//! ([`LtxRead::read_verified`]) and a read stepped event by event ([`LtxRead::next`], a compaction's inputs,
 //! each holding its connection between steps as Go's compactor does) alike.
 
 use std::convert::Infallible;
@@ -234,11 +235,24 @@ impl LtxRead {
     pub(crate) async fn read_verified<S: ObjectStore, E>(
         &mut self,
         store: &S,
-        mut on_event: impl FnMut(Event<'_>) -> Result<(), E>,
+        on_event: impl FnMut(Event<'_>) -> Result<(), E>,
     ) -> Result<Verified, ReadFault<E>> {
         let mut stream = store.read_stream(self.key, self.offset);
+        self.read_verified_from(&mut *stream, on_event).await
+    }
+
+    /// [`Self::read_verified`] from a stream the caller opened at where the read stands: a
+    /// restore's window of spans (`crate::restore`).
+    ///
+    /// # Errors
+    /// [`ReadFault`], the first one met.
+    pub(crate) async fn read_verified_from<E>(
+        &mut self,
+        stream: &mut (dyn ReadStream + '_),
+        mut on_event: impl FnMut(Event<'_>) -> Result<(), E>,
+    ) -> Result<Verified, ReadFault<E>> {
         loop {
-            match self.next(&mut *stream, &mut on_event).await? {
+            match self.next(stream, &mut on_event).await? {
                 Next::Event(()) => {}
                 Next::End(verified) => return Ok(verified),
             }

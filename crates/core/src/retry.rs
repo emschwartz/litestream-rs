@@ -424,7 +424,21 @@ impl<S: ObjectStore + 'static, P: Sleeper + 'static, E: Entropy + 'static> Objec
             core: &self.core,
             key,
             offset,
+            end: None,
             open: None,
+        })
+    }
+
+    /// Opens the inner span at once, not at the first piece: a reader opens several to have them
+    /// download side by side.
+    fn read_span(&self, key: FileKey, start: u64, end: u64) -> Box<dyn ReadStream + '_> {
+        Counters::bump(&self.core.counters.calls);
+        Box::new(Resuming {
+            core: &self.core,
+            key,
+            offset: start,
+            end: Some(end),
+            open: Some(self.core.inner.read_span(key, start, end)),
         })
     }
 
@@ -542,6 +556,8 @@ struct Resuming<'a, S, P, E> {
     key: FileKey,
     /// Where the next piece starts: the bytes handed out so far.
     offset: u64,
+    /// Where a span ends ([`ObjectStore::read_span`]), `None` for the rest of the object.
+    end: Option<u64>,
     /// The inner stream, once one answered; `None` before the first piece and after a failure.
     open: Option<Box<dyn ReadStream + 'a>>,
 }
@@ -549,9 +565,12 @@ struct Resuming<'a, S, P, E> {
 impl<S: ObjectStore, P: Sleeper, E: Entropy> ReadStream for Resuming<'_, S, P, E> {
     fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
         Box::pin(async move {
-            let (core, key, offset) = (self.core, self.key, self.offset);
+            let (core, key, offset, end) = (self.core, self.key, self.offset, self.end);
             let reopen = move || async move {
-                let mut fresh = core.inner.read_stream(key, offset);
+                let mut fresh = match end {
+                    None => core.inner.read_stream(key, offset),
+                    Some(end) => core.inner.read_span(key, offset, end),
+                };
                 let bytes = fresh.next(len).await?;
                 Ok((fresh, bytes))
             };
@@ -662,7 +681,8 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> Upload for RetryingUpload<S, P, E> 
         .await
     }
 
-    /// Not a call of its own: it sends nothing, and a part's failure is the upload's.
+    /// Not a call of its own: it sends nothing, and a part's failure, once the store has sent it
+    /// again as often as it will, is the upload's.
     async fn flight(&mut self, rest: Rest) -> Result<Flight, StoreError> {
         self.inner.flight(rest).await
     }

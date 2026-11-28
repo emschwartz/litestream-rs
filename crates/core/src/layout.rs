@@ -230,7 +230,7 @@ impl FileKey {
         Self::new(Level::SNAPSHOT, TxidRange::from_start(txid))
     }
 
-    /// The compaction level.
+    /// The level.
     #[must_use]
     pub const fn level(&self) -> Level {
         self.level
@@ -440,17 +440,13 @@ pub enum CreatedAtSource {
 /// so only [`Stamp::of`] makes one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Dating {
-    /// The commit as the engine first saw it: a level 0-8 file with its
-    /// stored created-at time. A level-0 file is stamped by a clock read after
-    /// the committed read of its sync (`Env::clock`), and compaction gives its
-    /// output its newest input's time (here and in Go), which recurses down to
-    /// the level-0 file that first carried that transaction. So the time is at
-    /// or after every commit the file carries (no `AsOf` applies a commit made
-    /// after its instant), and it is when the transaction first reached
-    /// staging, not when SQLite committed it: a commit made while the engine
-    /// was down is dated when the engine came back. `AsOf(t)` is therefore
-    /// the newest state the engine had staged before `t`, which can leave out
-    /// commits made before `t` that it had not yet seen.
+    /// The commit as the engine first saw it: a level 0-8 file with its stored created-at
+    /// time. A level-0 file is stamped by a clock read after the committed read of its sync
+    /// (`Env::clock`), and compaction gives its output its newest input's time (here and in
+    /// Go), so the time is at or after every commit the file carries (no `AsOf` applies a
+    /// commit made after its instant). It is when the transaction first reached staging, not
+    /// when SQLite committed it: a commit made while the engine was down is dated when the
+    /// engine came back, so `AsOf(t)` is the newest state the engine had staged before `t`.
     Commit,
     /// At or after the commit, by an unknown margin: a snapshot (stamped when
     /// written), or any file whose store lost the created-at time and reports

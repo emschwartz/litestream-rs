@@ -32,7 +32,6 @@ use crate::store::HeldFault;
 
 use super::{Runner, small};
 
-/// Every store operation, for the faults that take the whole store.
 const ALL_OPS: [StoreOp; 4] = [
     StoreOp::List,
     StoreOp::Read,
@@ -83,7 +82,6 @@ impl View {
     }
 }
 
-/// The error a held store fault returns for `op`.
 fn held_error(op: StoreOp, auth: bool) -> StoreError {
     if auth {
         StoreError::Denied {
@@ -167,7 +165,6 @@ enum Placed {
     SlowStaging,
 }
 
-/// The fault's name in reach and in violations.
 fn name(hold: Hold) -> String {
     match hold {
         Hold::StoreDown(op) => format!("store_down.{op:?}"),
@@ -338,7 +335,6 @@ impl Runner {
         }))
     }
 
-    /// Puts the fault of `hold` in place for the engine.
     fn place(&mut self, hold: Hold) -> Option<Placed> {
         match hold {
             Hold::StoreDown(op) => Some(Placed::Remote(vec![

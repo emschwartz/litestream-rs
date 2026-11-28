@@ -33,7 +33,6 @@ fn restore_target(target: Target) -> RestoreTarget {
     target.restore_target().expect("a manifest target is valid")
 }
 
-/// Asserts Rust's restore of `target` to `out` equals Go's recorded pages.
 fn assert_pages_equal(staged: &Staged, out: &str, want: &Outcome, label: &str) {
     let Outcome::Restored {
         page_size,

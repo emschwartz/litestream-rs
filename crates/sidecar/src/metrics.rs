@@ -85,7 +85,6 @@ use crate::health::{
     task_name,
 };
 
-/// The rendered text.
 struct Out(String);
 
 impl Out {
@@ -136,7 +135,6 @@ fn unix_seconds(at: Timestamp) -> String {
     seconds(u64::try_from(ms).unwrap_or(0))
 }
 
-/// The running databases with their path, as label text.
 fn running(views: &[DbView]) -> Vec<(String, &Health)> {
     views
         .iter()
@@ -147,7 +145,6 @@ fn running(views: &[DbView]) -> Vec<(String, &Health)> {
         .collect()
 }
 
-/// A per-database series over every running database.
 fn per_db(
     out: &mut Out,
     dbs: &[(String, &Health)],
@@ -295,7 +292,6 @@ fn go_checkpoint_series(out: &mut Out, dbs: &[(String, &Health)]) {
 /// Go's operation names and their totals.
 type Ops = [(&'static str, OpCounters); 4];
 
-/// One replica type's totals and bytes uploaded.
 type TypeSum = (&'static str, Ops, u64);
 
 /// A series over one kind of call's totals: name, help, value.
@@ -304,7 +300,6 @@ type CallSeries = (&'static str, &'static str, fn(CallTotals) -> String);
 /// A per-database counter: name, help, value.
 type CounterSeries = (&'static str, &'static str, fn(&Health) -> u64);
 
-/// Go's operations, from the replicator's per-call totals.
 fn operations(store: &StoreCounters) -> Ops {
     let mut read = store.read;
     read.calls = read.calls.saturating_add(store.created_at.calls);

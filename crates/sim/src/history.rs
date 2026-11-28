@@ -51,7 +51,6 @@ pub(crate) fn image_digest(image: &PageImage) -> Digest {
     Digest::of_pages(size, pages.iter().map(|p| p.as_slice()))
 }
 
-/// The digest of a restored database.
 fn database_digest(db: &Database) -> Digest {
     let pages: Vec<Vec<u8>> = (1..=db.page_count())
         .filter_map(|pgno| db.page(pgno))

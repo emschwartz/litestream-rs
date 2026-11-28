@@ -1,18 +1,17 @@
 //! Where the application runs: in the test process, or in a child process at SQLite's
 //! defaults, as an application beside a sidecar runs.
 //!
-//! [`Placement::InProcess`] is the original form of the suite: the application's connections live in
-//! the test process, through the rig's fault VFS, set up as replication asks
-//! (`crate::app_connection`: automatic checkpoints off).
+//! [`Placement::InProcess`]: the application's connections live in the test process, through the
+//! rig's fault VFS, set up as replication asks (`crate::app_connection`: automatic checkpoints off).
 //!
 //! [`Placement::SeparateProcess`] moves only the application. The test binary runs itself again as
 //! `<exe> child_process_entry --exact --nocapture --test-threads=1` with the database in
 //! [`APP_DB`]; that test's first statement is `if lsr_sqlite::testing::serve_app() { return;
 //! }`, so the child serves the application and nothing else. Its connections keep SQLite's defaults
-//! (automatic checkpoint every 1000 frames, the default VFS, busy timeout
-//! zero, which is also SQLite's default) and only `synchronous` is set, as the rig's in-process
-//! application sets it. The read lock, the engine, the stores and the oracle stay in the test process, so
-//! every lock the application takes or drops is another process's, as with a sidecar.
+//! (automatic checkpoint every 1000 frames, the default VFS, busy timeout zero) and only
+//! `synchronous` is set, as the in-process application sets it. The read lock, the engine, the
+//! stores and the oracle stay in the test process, so every lock the application takes or drops is
+//! another process's, as with a sidecar.
 //!
 //! The protocol is one request line on the child's stdin and one reply line on its stdout,
 //! marked with [`MARK`] so libtest's own lines are skipped: `<conn> open`, `<conn> close`,
@@ -57,7 +56,6 @@ pub const APP_DB: &str = "LSR_SQLITE_APP_DB";
 const APP_SYNCHRONOUS: &str = "LSR_SQLITE_APP_SYNCHRONOUS";
 /// The marker every reply line of the application process starts with.
 pub const MARK: &str = "lsr-app ";
-/// What the line that ends the writers starts with, after [`MARK`].
 const DONE: &str = "done ";
 /// The test a test binary runs as the application process.
 pub const CHILD_ENTRY: &str = "child_process_entry";
@@ -100,7 +98,6 @@ impl App {
         }
     }
 
-    /// Where it runs.
     pub(super) const fn placement(&self) -> Placement {
         match self {
             Self::Local { .. } => Placement::InProcess,
@@ -174,7 +171,6 @@ impl App {
         }
     }
 
-    /// Whether connection `id` is open.
     pub(super) fn is_open(&self, id: u32) -> bool {
         match self {
             Self::Local { conns, .. } => conns.contains_key(&id),
@@ -182,7 +178,6 @@ impl App {
         }
     }
 
-    /// The connection, when it lives in this process.
     pub(super) fn local(&self, id: u32) -> Option<&Connection> {
         match self {
             Self::Local { conns, .. } => conns.get(&id),
@@ -405,7 +400,6 @@ fn reply_line(reply: Reply) -> String {
     })
 }
 
-/// The application process's side: its database and its connections.
 struct Server {
     db: PathBuf,
     synchronous: String,
@@ -413,7 +407,7 @@ struct Server {
 }
 
 impl Server {
-    /// The reply to one request line, or `None` to exit.
+    /// `None` to exit.
     fn handle(&mut self, line: &str) -> Option<Reply> {
         let mut parts = line.splitn(3, ' ');
         let (id, verb) = (parts.next()?, parts.next()?);
@@ -511,7 +505,6 @@ pub(super) fn writer_row_bytes(writer: u32, n: u32) -> u32 {
         .saturating_add(200)
 }
 
-/// Opens and closes the database and `-shm` with `std::fs` in the application's process.
 fn touch(db: &Path) -> String {
     for path in [db.to_owned(), suffixed(db, "-shm")] {
         #[expect(

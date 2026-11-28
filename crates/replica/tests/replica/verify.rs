@@ -3,6 +3,7 @@
 //! health snapshot, or a store's own condition variable), never on the clock.
 
 use crate::common;
+use crate::waiting;
 
 use std::cell::Cell;
 use std::num::NonZeroUsize;
@@ -163,6 +164,47 @@ fn next_verified(replicator: &Replicator, events: &EventReceiver) -> (Txid, Veri
         found.get().is_some()
     });
     found.get().unwrap()
+}
+
+/// The most runs [`verified_until`] waits for: one in flight, the one that follows it, and
+/// room for the passes before a rewrite.
+const VERIFY_STEPS: usize = 10;
+
+/// The polls [`verified_until`] moves the clock for each run: an interval to fall due and a
+/// few polls for the engine to read the live pages.
+const DUE_POLLS: u32 = 70;
+
+/// Waits for runs, one at a time, until `done` holds of the health after one. For each it
+/// moves the clock [`DUE_POLLS`] polls at most, then waits for the result without moving it.
+/// A run takes real time that clock steps do not, so stepping until the result came used up a
+/// bound counted in steps on a loaded machine before a run in flight finished.
+fn verified_until(
+    replicator: &Replicator,
+    clock: &lsr_replica::FakeClockHandle,
+    done: impl Fn(&Health) -> bool,
+) -> Health {
+    for _ in 0..VERIFY_STEPS {
+        // A run in flight before the call may have ended already.
+        let seen = replicator.health();
+        if done(&seen) {
+            return seen;
+        }
+        let ran = runs(&seen);
+        // Err: not due yet, or in flight; the wait below says which.
+        drop(waiting::moved_until(
+            replicator,
+            clock,
+            (POLL, DUE_POLLS),
+            |h| runs(h) > ran,
+        ));
+        wait(replicator, |h| runs(h) > ran);
+    }
+    let seen = replicator.health();
+    assert!(
+        done(&seen),
+        "no run brought the health there in {VERIFY_STEPS} runs: {seen:?}"
+    );
+    seen
 }
 
 /// Moves the clock and waits for the thread to have turned at the new time.
@@ -351,7 +393,7 @@ fn a_clock_step_back_does_not_put_off_the_scheduled_verify() {
     advance(&replicator, &clock, POLL);
     moved_until(&replicator, &clock, (POLL, 240), caught_up);
     clock.step_back(Duration::from_secs(3600));
-    let health = moved_until(&replicator, &clock, (POLL, 240), |h| runs(h) >= 1);
+    let health = verified_until(&replicator, &clock, |h| runs(h) >= 1);
     assert_eq!(health.verification.runs.passed, 1, "{health:?}");
 }
 
@@ -484,12 +526,7 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
     // The schedule counts from the boot, not from a run the test saw, so a run can also pass
     // before the rewrite (even at this very transaction) and move the last good point: the
     // pin is whatever passed last.
-    // Moved a step at a time, as many as it takes: a run in flight (it started before the rewrite
-    // and read the file before it, so it passes) takes real time while the clock moves on, ends
-    // on the clock as it reads then, and the next is due an interval after.
-    let failed = moved_until(&replicator, &clock, (EVERY, 100), |h| {
-        h.verification.runs.failed == 1
-    });
+    let failed = verified_until(&replicator, &clock, |h| h.verification.runs.failed == 1);
     let failing = failed.verification.failing.unwrap();
     assert_eq!(failing.txid, txid);
     assert!(
@@ -501,6 +538,7 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
     assert!(kept >= Some(good), "{kept:?} below {good:?}");
     assert!(failed.is_degraded());
     assert_eq!(failed.phase, Phase::Running, "a degraded state, not a stop");
+    // The health is written before the event goes out, and the events of earlier passes come first.
     let seen = loop {
         let seen = next_verified(&replicator, &events);
         if !matches!(seen.1, VerifyOutcome::Passed { .. }) {
@@ -511,7 +549,6 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
         matches!(seen, (at, VerifyOutcome::Failed(Mismatch::Pages { first, .. })) if at == txid && first == page),
         "{seen:?}"
     );
-    // Replication goes on.
     site.commit(1);
     advance(&replicator, &clock, POLL);
     let went_on = moved_until(&replicator, &clock, (POLL, 240), |h| {
@@ -525,17 +562,16 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
         caught_up(h) && h.resnapshot.is_none() && replicated(h) > replicated(&went_on)
     });
     // A run that fell due during the catch-up may have passed at an earlier point already, so
-    // wait for one at the final point.
-    let passed = moved_until(&replicator, &clock, (EVERY, 100), |h| {
-        h.verification.last_good.map(|(txid, _)| txid) == replicated(&fixed)
-            && h.verification.failing.is_none()
+    // wait for one at the snapshot's point or later (the engine goes on staging files of its own
+    // as the clock moves, so the point a run reads can be past the one the test saw).
+    let at_least =
+        |h: &Health| h.verification.last_good.map(|(txid, _)| txid) >= replicated(&fixed);
+    let passed = verified_until(&replicator, &clock, |h| {
+        at_least(h) && h.verification.failing.is_none()
     });
     assert_eq!(passed.verification.failing, None);
     assert_eq!(passed.verification.kept_restore_point, None);
-    assert_eq!(
-        passed.verification.last_good.map(|(txid, _)| txid),
-        replicated(&fixed)
-    );
+    assert!(at_least(&passed), "{:?}", passed.verification);
     assert!(!passed.is_degraded());
 }
 
@@ -657,9 +693,7 @@ fn a_run_that_restores_but_finds_the_newest_out_of_reach_fails_as_unrestorable()
         },
     )
     .unwrap();
-    // The boot's first file goes up before any commit: a commit that beats the boot is inside
-    // that one file, nothing is left to compact, and the schedule then writes no level-1 file
-    // and no level-9 snapshot for a day (see `settle_maintenance`).
+    // The boot's first file goes up before any commit (see the test above, `settle_maintenance`).
     moved_until(&replicator, &clock, (POLL, 240), caught_up);
     site.commit(1);
     advance(&replicator, &clock, POLL);

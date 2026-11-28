@@ -9,7 +9,7 @@ use crate::error::CompatError;
 
 /// The numbers of a run, in the order of [`Run::values`]. A number a run does not have (the
 /// copy's figures of the arm with no copy) is NaN.
-pub(super) const METRICS: [&str; 22] = [
+pub(super) const METRICS: [&str; 23] = [
     "p50_ms",
     "p99_ms",
     "p999_ms",
@@ -32,6 +32,7 @@ pub(super) const METRICS: [&str; 22] = [
     "lsr_peak_rss_mib",
     "timed_out",
     "reads_in_window",
+    "write_p50_ms",
 ];
 
 /// Metric positions by name, so a table names what it reads.
@@ -40,6 +41,7 @@ pub(super) mod at {
     pub(in crate::bench) const P99: usize = 1;
     pub(in crate::bench) const P999: usize = 2;
     pub(in crate::bench) const PRE_P99: usize = 3;
+    pub(in crate::bench) const WRITE_P99: usize = 4;
     pub(in crate::bench) const APP_FAULTS: usize = 5;
     pub(in crate::bench) const COPY_S: usize = 11;
     pub(in crate::bench) const READ_MIB: usize = 12;
@@ -47,6 +49,7 @@ pub(super) mod at {
     pub(in crate::bench) const CURRENT_S: usize = 16;
     pub(in crate::bench) const STEAL: usize = 17;
     pub(in crate::bench) const TIMED_OUT: usize = 20;
+    pub(in crate::bench) const WRITE_P50: usize = 22;
 }
 
 /// One run's numbers.

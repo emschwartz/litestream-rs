@@ -1,0 +1,15 @@
+diff --git a/crates/cli/src/render.rs b/crates/cli/src/render.rs
+index a3fda672c..a9c0faca4 100644
+--- a/crates/cli/src/render.rs
++++ b/crates/cli/src/render.rs
+@@ -95,9 +95,7 @@ fn resolve_version(injected: Option<&str>, commit: Option<&str>) -> String {
+         commit,
+     ) {
+         (Some(version), _) => version.to_owned(),
+-        (None, Some(commit)) => {
+-            format!("(development build {})", commit.get(..12).unwrap_or(commit))
+-        }
++        (None, Some(_)) => DEVELOPMENT_BUILD.to_owned(),
+         (None, None) => DEVELOPMENT_BUILD.to_owned(),
+     }
+ }

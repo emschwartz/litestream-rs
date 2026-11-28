@@ -312,7 +312,6 @@ fn a_divergence_from_a_replaced_staged_file_is_not_another_writer() {
     );
 }
 
-/// What a host published, by its `Uploaded(Put)` events.
 fn puts(seen: &[Tick]) -> Vec<FileKey> {
     seen.iter()
         .filter_map(|tick| match event(tick) {

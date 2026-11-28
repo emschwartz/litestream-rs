@@ -1003,6 +1003,7 @@ dependencies = [
 name = "lsr-compat"
 version = "0.0.0"
 dependencies = [
+ "hex",
  "lsr-config",
  "lsr-core",
  "lsr-ltx",
@@ -1074,6 +1075,7 @@ dependencies = [
 name = "lsr-history"
 version = "0.0.0"
 dependencies = [
+ "hex",
  "lsr-core",
  "lsr-history",
  "lsr-ltx",
@@ -1111,6 +1113,8 @@ dependencies = [
  "lsr-replica",
  "lsr-sqlite",
  "lsr-store-fs",
+ "percent-encoding",
+ "proptest",
  "rusqlite",
  "shuttle",
  "tempfile",
@@ -1192,6 +1196,8 @@ name = "lsr-store-s3"
 version = "0.0.0"
 dependencies = [
  "base64",
+ "hex",
+ "hmac",
  "jiff",
  "lsr-core",
  "lsr-ltx",

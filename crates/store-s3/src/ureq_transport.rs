@@ -117,7 +117,6 @@ impl UreqTransport {
         })
     }
 
-    /// The same transport with another floor under its uploads' speed, for a test.
     #[cfg(test)]
     fn with_floor(mut self, bytes_per_second: std::num::NonZeroU64) -> Self {
         self.bounds = self.bounds.with_floor(bytes_per_second);
@@ -178,7 +177,6 @@ fn root_certs(roots: Roots) -> RootCerts {
     }
 }
 
-/// A response's headers as received.
 fn head_of(response: &http::Response<ureq::Body>) -> Vec<(String, String)> {
     response
         .headers()
@@ -220,7 +218,6 @@ fn read_body(
 }
 
 impl UreqTransport {
-    /// One request and its whole answer.
     fn exchange(
         &self,
         request: http::Request<impl ureq::AsSendBody>,
@@ -303,6 +300,14 @@ impl Transport for UreqTransport {
             .body(ureq::SendBody::from_reader(body))
             .map_err(|_malformed| TransportError::Io(io::ErrorKind::InvalidInput))?;
         self.exchange(self.capped(request, cap), false)
+    }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a lane is a thread of its own and the pause is its wait between two tries of a part"
+    )]
+    fn pause(&self, wait: Duration) {
+        std::thread::sleep(wait);
     }
 
     fn lanes(&self, most: NonZeroUsize) -> Arc<dyn Lanes> {
@@ -389,7 +394,6 @@ mod tests {
         assert_eq!(status_of(&url), Ok(302));
     }
 
-    /// Accepts one connection and holds it open without answering.
     fn serve_silence() -> (String, std::sync::mpsc::Sender<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
@@ -485,8 +489,6 @@ mod tests {
         let _released = release.send(());
     }
 
-    /// A server that answers every request on a connection (keep-alive) and counts the
-    /// connections it accepted.
     /// A keep-alive server that answers no request until `together` requests wait for an
     /// answer at once, so a batch of that width is in flight whole, on as many connections,
     /// however the client's threads are scheduled. Counts the connections it accepted.

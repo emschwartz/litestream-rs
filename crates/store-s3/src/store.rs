@@ -3,14 +3,18 @@
 //! Every method is an `async` block around blocking sends and never yields, as
 //! `FsStore` does; the trait allows it. A request is built sans-IO by the
 //! `RequestBuilder`, sent, then judged by `classify`, so what a status or code
-//! means is decided in one place. The store never retries.
+//! means is decided in one place. The store never retries a request, except that the thread
+//! sending a part of a multipart upload sends it again on a failure worth repeating
+//! (`upload.rs`).
 //!
 //! Batches: a call that needs several independent requests (the levels of a listing, a
 //! set of created-at times) builds them all, hands them to [`Transport::send_many`] with the
 //! limit of their kind, and judges each response alone, exactly as a single request. HEADs are
 //! limited by `CREATION_TIME_CONCURRENCY`, listing pages by `READ_CONCURRENCY`. The parts of
 //! an upload are not a batch: they go through the lanes (`lanes.rs`), as many at once as the
-//! `concurrency` setting says (provider defaults in [`S3Config::concurrency`]).
+//! `concurrency` setting says (provider defaults in [`S3Config::concurrency`]). The same setting
+//! is how many spans of one object a restore reads at once ([`BatchKind::Spans`]): each span is
+//! one GET read ahead on a thread of its own (`store/stream.rs`).
 //!
 //! Deadlines: the transport bounds one request. A call that sends several (a
 //! listing, a large delete) also checks the `Clock` between them against four
@@ -48,7 +52,7 @@ use crate::ureq_transport::UreqTransport;
 
 mod stream;
 
-use stream::S3Stream;
+use stream::{Ahead, S3Stream};
 
 /// What the created-at times read so far found, for the event layer (this crate emits no
 /// events). A listing reads none; each [`ObjectStore::created_at`] and
@@ -340,6 +344,12 @@ impl<T: Transport> ObjectStore for S3Store<T> {
         self.inner.read(key, offset, len)
     }
 
+    /// One GET for the span, sent at once and read ahead of the caller on a thread of its own,
+    /// so the spans of one file download side by side.
+    fn read_span(&self, key: FileKey, start: u64, end: u64) -> Box<dyn ReadStream + '_> {
+        Box::new(Ahead::spawn(Arc::clone(&self.inner), key, start, end))
+    }
+
     /// One GET for the rest of the object, its body read as the pieces are asked for.
     fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
         Box::new(S3Stream::new(Arc::clone(&self.inner), key, offset))
@@ -395,7 +405,7 @@ impl<T: Transport> ObjectStore for S3Store<T> {
     }
 
     fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
-        Inner::<T>::width(kind)
+        self.inner.width(kind)
     }
 
     async fn list_many(
@@ -528,12 +538,18 @@ impl<T: Transport> Inner<T> {
             .map_err(|err| classify_transport(op, &err))
     }
 
+    /// Waits `wait` before a part is sent again (`Transport::pause`).
+    pub(crate) fn pause(&self, wait: Duration) {
+        self.transport.pause(wait);
+    }
+
     /// How many requests of `kind` go out at once: the one answer both the planner
     /// ([`ObjectStore::batch_width`]) and the batches themselves use.
-    pub(crate) const fn width(kind: BatchKind) -> NonZeroUsize {
+    pub(crate) const fn width(&self, kind: BatchKind) -> NonZeroUsize {
         match kind {
             BatchKind::Lists => READ_CONCURRENCY,
             BatchKind::ResolvedCreatedAt => CREATION_TIME_CONCURRENCY,
+            BatchKind::Spans => self.concurrency,
         }
     }
 
@@ -613,7 +629,6 @@ impl<T: Transport> Inner<T> {
         add(&mut self.stats.lock().unwrap_or_else(PoisonError::into_inner));
     }
 
-    /// Counts how one created-at time read ended: found by metadata or by fallback, or the file was gone.
     fn tally_created_at(&self, result: &Result<CreatedAt, StoreError>) {
         self.tally(|stats| match result {
             Ok(created_at) => match created_at.origin() {
@@ -685,7 +700,6 @@ impl<T: Transport> Inner<T> {
         Self::judge_head(file, &response)
     }
 
-    /// What one HEAD's answer says about `file`'s created-at time.
     fn judge_head(file: &FileInfo, response: &HttpResponse) -> Result<CreatedAt, StoreError> {
         let op = StoreOp::Read;
         let key = file.key;
@@ -698,13 +712,11 @@ impl<T: Transport> Inner<T> {
         created_at_from_head(op, &head, file.size, listed)
     }
 
-    /// One HEAD per file as one batch, each judged and counted as
-    /// [`Self::created_at`] does.
     fn created_at_many(&self, files: &[FileInfo]) -> Vec<Result<CreatedAt, StoreError>> {
         let op = StoreOp::Read;
         let results = self.batch(
             op,
-            Self::width(BatchKind::ResolvedCreatedAt),
+            self.width(BatchKind::ResolvedCreatedAt),
             files.iter(),
             |file| Ok((self.request(op, |b, now| b.head(now, &file.key))?, file)),
             |file, response| Self::judge_head(file, &response),
@@ -726,7 +738,7 @@ impl<T: Transport> Inner<T> {
         let key = file.key;
         let response = self.call(op, |b, now| b.get_range(now, &key, 0, len))?;
         // The metadata is read before the body is taken out of the response, and judged after
-        // the body's own errors, as it was when the body was copied.
+        // the body's own errors.
         let carried = match response.status() {
             200 | 206 => Some(parse_created_at_header(&response)),
             _ => None,

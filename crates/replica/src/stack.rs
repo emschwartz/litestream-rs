@@ -15,8 +15,8 @@
 //! replica, sidecar and CLI suites were run. They cover full syncs, compaction, snapshots,
 //! scheduled verifies, the daemon's waiter, and restores over the file and in-memory S3 stores,
 //! through real SQLite. An overflow aborts the test. Measured twice on x86-64 Linux: on
-//! 2026-11-23 (main 079ceb3), and on 2026-11-25 (main bc16a71, an x86-64 build run under
-//! emulation on an arm64 host) after the land gate's half-stack run overflowed in CI.
+//! 2026-11-23 (main 079ceb3), and on 2026-11-25 (main bc16a71, under emulation on an arm64
+//! host) after the land gate's half-stack run overflowed in CI.
 //!
 //! | build | 2026-11-23 passes at / fails at | 2026-11-25 passes at / fails at |
 //! |---|---|---|
@@ -29,12 +29,12 @@
 //!
 //! The depth is ordinary call frames, about six times shallower in release. In a debug build
 //! each `async fn` on the path from the engine's loop down to a compaction (the loop, the tick,
-//! the maintenance step, the job, the merge) has a frame of 15 to 37 KiB, and a day's changes to
-//! maintenance added about 32 KiB between them; release did not grow. An HTTPS request
+//! the maintenance step, the job, the merge) has a frame of 15 to 37 KiB; release is far
+//! smaller. An HTTPS request
 //! through ureq and rustls needed 48 KiB alone when last measured (it fails at 32); it is not
 //! in these suites, which need no network. [`ENGINE_STACK`] is 768 KiB: 2.8 times the debug
-//! peak and 16 times the release peak, with room for the HTTPS path on top of either. It was
-//! 512 KiB until the second measurement (`docs/decisions/D202.md`). The stack is reserved
+//! peak and 16 times the release peak, with room for the HTTPS path on top of either
+//! (`docs/decisions/D202.md`). The stack is reserved
 //! address space; only the pages a thread touches are resident (about 48 KiB in release).
 //! [`WAIT_STACK`] is 64 KiB; the waiting threads passed at 16 KiB, the smallest stack the
 //! platform gives.

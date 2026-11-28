@@ -54,7 +54,7 @@ fn persistent_scenarios() -> Vec<(FaultKind, fn() -> Scenario)> {
 }
 
 /// Under the strict responses every persistent fault's scenario stops the
-/// engine with its cause, as before the responses were configurable.
+/// engine with its cause.
 #[test]
 fn under_strict_every_persistent_scenario_stops_with_its_cause() {
     for (kind, make) in persistent_scenarios() {

@@ -24,8 +24,6 @@ pub(super) struct Door(pub(super) Arc<Mutex<Real>>);
 const CLOSED: SourceError = SourceError::Io(io::ErrorKind::NotConnected);
 
 impl Door {
-    /// Counts the call, runs what is armed for it, takes an injected error, and hands back
-    /// the engine's handle.
     fn before(&self, kind: Option<SourceOp>) -> Result<Sqlite, SourceError> {
         let mut real = lock(&self.0);
         real.call(kind);
@@ -40,7 +38,6 @@ impl Door {
     }
 }
 
-/// The engine's WAL source.
 pub(super) struct RealSource(pub(super) Door);
 
 /// The WAL file the engine opened; each read counts as one of the tick's calls.
@@ -103,7 +100,6 @@ impl WalSource for RealSource {
     }
 }
 
-/// The engine's page source.
 pub(super) struct RealPages(pub(super) Door);
 
 impl PageSource for RealPages {
@@ -118,7 +114,6 @@ impl PageSource for RealPages {
     }
 }
 
-/// The engine's checkpointer.
 pub(super) struct RealCheckpointer(pub(super) Door);
 
 impl Checkpointer for RealCheckpointer {
@@ -134,6 +129,10 @@ impl Checkpointer for RealCheckpointer {
 
     fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointRun, SourceError> {
         self.0.before(Some(SourceOp::Checkpoint))?.checkpoint(mode)
+    }
+
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError> {
+        self.0.before(Some(SourceOp::RenewRead))?.renew_read()
     }
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {

@@ -79,7 +79,6 @@ fn drive(app: &mut App, shape: Shape, times: &Mutex<Vec<Instant>>) -> Result<(),
     Ok(())
 }
 
-/// Nearest-rank percentile of a sorted list.
 fn percentile(sorted: &[Duration], percent: usize) -> Duration {
     let rank = sorted.len().saturating_mul(percent).div_ceil(100).max(1);
     sorted

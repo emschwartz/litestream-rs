@@ -1,0 +1,9 @@
+# A part whose request fails once is not sent again by its own upload, so one dropped connection
+# or 5xx on a 100 MB part fails the whole snapshot upload, and the snapshot starts over.
+name = "part-failure-restarts-the-upload"
+fix = "claude/part-retry"
+package = "lsr-store-s3"
+tests = [
+    "sourced::a_part_that_fails_once_is_sent_again_and_the_upload_completes",
+    "store::cases::a_buffered_part_that_fails_once_is_sent_again_and_the_upload_completes",
+]

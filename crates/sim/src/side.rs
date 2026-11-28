@@ -52,7 +52,6 @@ impl Debug for SideSource {
     }
 }
 
-/// A backend's WAL source with its open file boxed.
 struct BoxedWal<S>(S);
 
 impl<S: WalSource> WalSource for BoxedWal<S>
@@ -190,6 +189,10 @@ impl Checkpointer for SideCheckpointer {
 
     fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointRun, SourceError> {
         self.0.checkpoint(mode)
+    }
+
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError> {
+        self.0.renew_read()
     }
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {

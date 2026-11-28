@@ -141,7 +141,6 @@ impl Drop for WriteGate {
     }
 }
 
-/// The name the busy handler's state is kept under in the connection's client data.
 const KEY: &CStr = c"lsr-write-gate-busy";
 
 /// SQLite's default busy handler's waits (`sqliteDefaultBusyCallback`), in milliseconds: the
@@ -152,7 +151,7 @@ const DELAYS: [c_int; 12] = [1, 2, 5, 10, 15, 20, 25, 25, 25, 50, 50, 100];
 struct Busy {
     held: WritesHeld,
     timeout_ms: c_int,
-    /// How often SQLite called the handler, for the tests that check it fails at once.
+    /// How often SQLite called the handler.
     #[cfg(test)]
     calls: std::sync::atomic::AtomicU32,
 }
@@ -181,7 +180,6 @@ fn default_delay(count: c_int, timeout_ms: c_int) -> Option<c_int> {
 impl BusyState for Busy {
     const KEY: &'static CStr = KEY;
 
-    /// Fail at once while the gate holds, else wait as SQLite's default handler does.
     fn retry(&self, count: c_int) -> bool {
         #[cfg(test)]
         self.calls.fetch_add(1, Ordering::Relaxed);

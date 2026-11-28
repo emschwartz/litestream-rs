@@ -26,8 +26,7 @@ fn run(seed: u64, block_crash_law: bool, ops: &[Op]) -> lsr_sim::RunReport {
 /// commit by another connection, a torn WAL header (so the WAL can no longer vouch for the
 /// replica's files) and a process crash follow. The boot finds the replica's 2 above what staging
 /// holds and refuses it: staging was put back, so the refusal is by design and the operator runs
-/// `lsr trust-local`. The checker used to call staging intact here: it took a staged 1 as at least the nothing
-/// the engine had confirmed while its listing was pending, and forgot that staging was put back.
+/// `lsr trust-local`.
 #[test]
 fn a_boot_refusal_after_staging_was_put_back_is_answered_by_trust_local_while_a_relist_is_pending()
 {

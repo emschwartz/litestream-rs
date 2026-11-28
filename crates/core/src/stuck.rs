@@ -36,7 +36,6 @@ impl StuckListing {
 impl ObjectStore for StuckListing {
     type Upload = MemUpload;
 
-    /// Forwards to the store it wraps.
     async fn remove_scratch(&self) -> Result<u64, StoreError> {
         self.inner.remove_scratch().await
     }

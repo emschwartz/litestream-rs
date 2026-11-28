@@ -28,6 +28,13 @@
 //!   [`lock_busy_wait`]. A sequence bump refused the same way means that writer's commit
 //!   moves the WAL on in place of our frame: [`CheckpointOutcome::Overtaken`].
 //!   Neither counts a failure, waits out a backoff or degrades the task.
+//! - A backlog past [`CheckpointConfig::barrier_frames`] is not copied under the barrier. Go's
+//!   PASSIVE copies whatever its read lock held back, every writer waiting: after a level-9
+//!   snapshot held the read for its whole upload, that is the WAL the upload took to grow (a
+//!   drill's writer waited 5.9 s on one). Here a barrier of its own seals and moves the read to
+//!   the committed end ([`Checkpointer::renew_read`]), the copy runs from the writer connection
+//!   with no barrier held ([`CheckpointMode::Backlog`]), and the ordinary PASSIVE follows over
+//!   what was committed meanwhile (docs/decisions/D307.md).
 //!
 //! Protocol notes. A PASSIVE takes a write barrier, seals (syncs through the committed end),
 //! checkpoints, and releases the barrier on every path; a barrier that could not be released never
@@ -77,11 +84,36 @@ pub struct CheckpointConfig {
     pub truncate_pages: Option<NonZeroU32>,
 }
 
+/// Go's PASSIVE threshold (`DefaultMinCheckpointPageN`): what a barrier's copy is measured
+/// against when the minimum trigger is off.
+const GO_MIN_PAGES: u32 = 1000;
+
+/// The fewest frames a barrier may copy whatever the threshold: under about a quarter of a
+/// MiB of 4 KiB pages the copy costs less than the extra barrier and read retake that moving
+/// it out would.
+const MIN_BARRIER_FRAMES: u32 = 64;
+
+impl CheckpointConfig {
+    /// The most frames a checkpoint copies while it holds the write barrier: twice the PASSIVE
+    /// threshold, or Go's when that trigger is off, and never under [`MIN_BARRIER_FRAMES`].
+    /// An ordinary checkpoint copies about the
+    /// threshold. A larger backlog built up while something held checkpoints back (a level-9
+    /// snapshot does for its whole upload), and it is copied first with the barrier released
+    /// (`docs/decisions/D307.md`).
+    #[must_use]
+    pub fn barrier_frames(&self) -> u32 {
+        self.min_pages
+            .map_or(GO_MIN_PAGES, NonZeroU32::get)
+            .saturating_mul(2)
+            .max(MIN_BARRIER_FRAMES)
+    }
+}
+
 impl Default for CheckpointConfig {
     fn default() -> Self {
         Self {
             interval: Some(Duration::from_secs(60)),
-            min_pages: NonZeroU32::new(1000),
+            min_pages: NonZeroU32::new(GO_MIN_PAGES),
             truncate_pages: NonZeroU32::new(121_359),
         }
     }
@@ -513,6 +545,8 @@ struct Protocol<'a, W, P, C, L> {
     ck: &'a mut C,
     staging: &'a L,
     cfg: SyncConfig,
+    /// [`CheckpointConfig::barrier_frames`].
+    barrier_frames: u32,
     /// Read after each step's committed read for that step's file.
     clock: &'a dyn Clock,
     staged: Staged,
@@ -627,6 +661,17 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
     /// transaction the PASSIVE retook still held ([`Self::truncate_held`]).
     async fn checkpoint(&mut self, truncate: bool) -> Result<CheckpointOutcome, Fault> {
         let before = self.header()?;
+        if self.backlog()? > self.barrier_frames {
+            if !self.copy_backlog().await? {
+                return Ok(CheckpointOutcome::LockBusy);
+            }
+            // A writer restarted the WAL after the read moved: the move's seal staged every
+            // frame and the position is pinned to the new hold, so the next sync follows it, as
+            // after a PASSIVE overtaken at its bump.
+            if self.header()? != before {
+                return Ok(CheckpointOutcome::Overtaken);
+            }
+        }
         let barrier = self.ck.begin_barrier();
         if barrier == Err(SourceError::Busy) {
             return Ok(CheckpointOutcome::LockBusy);
@@ -715,16 +760,67 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
         Ok(true)
     }
 
+    /// Frames of the WAL that SQLite has not copied into the database file: what a PASSIVE
+    /// under the barrier would copy, with every writer waiting.
+    fn backlog(&mut self) -> Result<u32, Fault> {
+        let committed = self.wal.committed().map_err(Fault::from_source)?;
+        Ok(committed
+            .end()
+            .frame_count()
+            .saturating_sub(committed.backfilled()))
+    }
+
+    /// Moves the read to the committed end under a barrier of its own, then copies the frames
+    /// below it with the barrier released while the application writes on. The PASSIVE under
+    /// the next barrier then copies only what was committed meanwhile. `false` when the
+    /// barrier or the copy was refused.
+    async fn copy_backlog(&mut self) -> Result<bool, Fault> {
+        let barrier = self.ck.begin_barrier();
+        if barrier == Err(SourceError::Busy) {
+            return Ok(false);
+        }
+        let barrier = barrier.map_err(Fault::from_source)?;
+        let moved = self.seal_and_renew().await;
+        let released = self.ck.end_barrier(barrier);
+        let moved = moved?;
+        released.map_err(Fault::from_source)?;
+        if moved {
+            match self.ck.checkpoint(CheckpointMode::Backlog) {
+                Ok(_) => {}
+                // Another connection holds the checkpoint lock. The PASSIVE under the barrier
+                // would copy the whole backlog once it let go: ask again later instead.
+                Err(SourceError::Busy) => return Ok(false),
+                Err(err) => return Err(Fault::from_source(err)),
+            }
+        }
+        Ok(true)
+    }
+
+    /// The seal and the move of the read, both under the barrier: the new hold begins at
+    /// `synced == committed`, which is what makes it a proof, as for the retake in
+    /// [`Self::seal_and_checkpoint`]. `false` when the seal fell short of the committed end
+    /// and the read stays where it was.
+    async fn seal_and_renew(&mut self) -> Result<bool, Fault> {
+        self.step(Step::Incremental(self.position())).await?;
+        if !matches!(self.staged.reached, Reached::Through(_)) {
+            return Ok(false);
+        }
+        let renewed = self.ck.renew_read();
+        self.release_read_lock();
+        if renewed != Err(SourceError::ReadTxLost) {
+            self.take_read_lock(renewed.unwrap_or_else(|_err| self.wal.epoch()));
+        }
+        renewed.map_err(Fault::from_source)?;
+        Ok(true)
+    }
+
     /// The seal and the PASSIVE, both under the barrier.
     ///
     /// The read transaction the checkpoint call retakes is the proof of continuity from here
-    /// on, and it is sound only because the barrier keeps writers out from the seal's
-    /// committed read until that retake: the hold begins at `synced == committed`. So the
-    /// position is pinned to it as the call returns, on every answer but a lost retake, and
-    /// stays pinned through whatever fails later (a busy bump, a release that failed, a step
-    /// over the new generation). A writer that restarts the WAL after the barrier is released
-    /// is then followed by the next sync; before, a fault in between left the position
-    /// unpinned and that restart cost a snapshot of the whole database.
+    /// on, sound only because the barrier keeps writers out from the seal's committed read
+    /// until that retake. So the position is pinned to it as the call returns, on every
+    /// answer but a lost retake, and stays pinned through any later fault: a writer that
+    /// restarts the WAL after the barrier is released is then followed, not snapshotted.
     async fn seal_and_checkpoint(&mut self) -> Result<CheckpointRun, Fault> {
         self.step(Step::Incremental(self.position())).await?;
         let sealed = matches!(self.staged.reached, Reached::Through(_));
@@ -773,6 +869,7 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
     ck: &mut C,
     staging: &L,
     cfg: &SyncConfig,
+    policy: &CheckpointConfig,
     clock: &dyn Clock,
 ) -> Result<Checkpointed, CheckpointFailed> {
     let staging = Staging(staging);
@@ -783,6 +880,7 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
         ck,
         staging: &staging,
         cfg: *cfg,
+        barrier_frames: policy.barrier_frames(),
         clock,
         staged: Staged {
             reached: Reached::Through(proof),
@@ -796,8 +894,10 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
         CheckpointMode::Passive => protocol.checkpoint(false).await,
         CheckpointMode::Truncate => protocol.checkpoint(true).await,
         // The policy decides PASSIVE or TRUNCATE; only the cure after a failed WAL sync runs FULL,
-        // outside the protocol.
-        CheckpointMode::Full => Err(BugSite::FullCheckpointInProtocol.hit()),
+        // outside the protocol, and only the protocol itself copies a backlog.
+        CheckpointMode::Full | CheckpointMode::Backlog => {
+            Err(BugSite::FullCheckpointInProtocol.hit())
+        }
     };
     let staged = protocol.staged;
     match result {

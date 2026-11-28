@@ -312,7 +312,7 @@ fn a_snapshot_held_at_the_witness_cap_runs_once_there_is_room() {
         );
         let token = crate::witness::Witnessed::made_here(
             key,
-            crate::witness::ByteTally::new(),
+            crate::store::Seeing::new(),
             checksum,
             ts(T0),
         );

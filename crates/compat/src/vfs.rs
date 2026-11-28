@@ -136,7 +136,6 @@ pub fn build_vfs_reader(into: &Path) -> Result<PathBuf, CompatError> {
     }
 }
 
-/// The compiler and linker flags for one SQLite, and which source named it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SqliteFlags {
     from: &'static str,
@@ -183,7 +182,6 @@ fn homebrew() -> Option<SqliteFlags> {
     })
 }
 
-/// `pkg-config`'s answer for `sqlite3`, when the tool and the package are there.
 fn pkg_config() -> Option<SqliteFlags> {
     Some(SqliteFlags {
         from: "pkg-config sqlite3",

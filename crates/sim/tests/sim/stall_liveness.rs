@@ -1,7 +1,6 @@
 //! Liveness at the end of a run: once every injected fault has healed (the stores' and the
 //! SQLite source failures still queued), no task may stay stalled on a retried fault that the
-//! world no longer imposes. Before this check the simulator accepted any stall: a degraded
-//! state ended its idle judgment, and a stale one raised no event at all.
+//! world no longer imposes.
 //!
 //! With the defect "a success keeps a stall" planted
 //! (`docs/planted-bugs/success-keeps-a-stall.patch`), 2 of seeds 1 to 3000 failed on it unaided
@@ -51,11 +50,10 @@ fn a_stall_ends_with_the_fault_that_caused_it() {
 /// newest file it does not, and a restart with staging lost then boots over that belief. The
 /// boot's look at the replica's newest file must not fail on the missing file: it would read the
 /// same file at every retry and the drain would never end. The read outage's length picks which
-/// upload the size mismatch lands on, so only some lengths leave the believed newest file missing,
-/// and which ones moves whenever the boot's reads change (the sliced read-back moved them from
-/// 138 to 40..=47). The scenario therefore runs at every fourth length from 0 to 252 (the lengths that matter
-/// have come in runs of eight) and the engine must drain at each, so the plant is caught
-/// wherever those runs fall.
+/// upload the size mismatch lands on, and which lengths leave the believed newest file missing
+/// moves whenever the boot's reads change. The scenario therefore runs at every fourth length from
+/// 0 to 252 (the lengths that matter come in runs of eight) and must drain at each, so the plant
+/// is caught wherever those runs fall.
 #[test]
 fn a_boot_over_a_believed_newest_file_the_replica_lacks_still_drains() {
     use lsr_core::StoreOp;

@@ -18,8 +18,7 @@
 //! **Signals** reach the child through [`Child::forward`]. The waiting thread first waits for
 //! the exit without reaping (`waitid` with `WNOWAIT`), marks the child gone, and only then
 //! reaps it, so a signal is never sent to a process id that may have been reused. Both calls
-//! are `rustix`'s (Apache-2.0 WITH LLVM-exception, Apache-2.0 or MIT), already in the lock file
-//! through `tempfile`, because sending a signal to another process needs `unsafe` otherwise.
+//! are `rustix`'s, because sending a signal to another process needs `unsafe` otherwise.
 //!
 //! **How the child ended** ([`ChildEnd`]) decides whether the run is clean, as Go decides it:
 //! an exit of 0 is clean; so is a death by any signal once a shutdown begun by a signal has

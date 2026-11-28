@@ -1,6 +1,5 @@
 //! Page hashing and integrity checking of database files.
 
-use std::fmt::Write as _;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -23,17 +22,8 @@ pub struct PageDigest {
     pub page_hashes: Vec<String>,
 }
 
-/// Lowercase hex of a SHA-256 digest.
 fn sha256_hex(data: &[u8]) -> String {
-    let digest = Sha256::digest(data);
-    let mut out = String::with_capacity(64);
-    for byte in digest.iter() {
-        // Writing to a String cannot fail.
-        if write!(out, "{byte:02x}").is_err() {
-            break;
-        }
-    }
-    out
+    hex::encode(Sha256::digest(data))
 }
 
 /// The page size recorded in a SQLite header (offset 16, big-endian; 1 means 65536).

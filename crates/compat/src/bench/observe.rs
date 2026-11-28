@@ -166,7 +166,6 @@ impl<'a> Observer<'a> {
     }
 }
 
-/// How many of the newest level-0 files [`Observer::tail_marker`] reads at most.
 const TAIL_FILES: usize = 16;
 
 fn parse_marker(page: &[u8]) -> Result<u64, CompatError> {

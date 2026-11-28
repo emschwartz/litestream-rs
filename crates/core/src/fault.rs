@@ -17,9 +17,9 @@
 //! puts the task that failed in a degraded state: it retries with the doubling
 //! wait, capped at [`MAX_BACKOFF`] as Go's sync loop is, the other tasks keep
 //! running, and every retry that fails is reported. [`Response::Stop`] stops
-//! the whole engine for a person, as every persistent fault did before.
-//! [`Responses::GO_LIKE`] (the default) keeps trying everywhere except on a
-//! other writer; [`Responses::STRICT`] stops on every cause.
+//! the whole engine for a person.
+//! [`Responses::GO_LIKE`] (the default) keeps trying everywhere except on
+//! another writer; [`Responses::STRICT`] stops on every cause.
 //!
 //! What keeping trying never does, whatever the configuration, follows from
 //! the code rather than from a check of the response: the engine has one
@@ -189,7 +189,7 @@ pub enum BugSite {
     /// An upload had bytes to send and no open upload to send them to.
     UploadNeverOpened,
     /// The checkpoint protocol was asked for a FULL checkpoint, which only the cure after a
-    /// failed WAL sync runs.
+    /// failed WAL sync runs, or for a backlog copy, which only the protocol itself runs.
     FullCheckpointInProtocol,
     /// The decoder took no byte of a non-empty chunk.
     DecoderStalled,
@@ -732,8 +732,8 @@ pub struct Responses {
 }
 
 impl Responses {
-    /// Go's behaviour (the default): keep trying on every cause, stop on a
-    /// other writer.
+    /// Go's behaviour (the default): keep trying on every cause, stop on
+    /// another writer.
     pub const GO_LIKE: Self = Self::all(Response::KeepTrying);
 
     /// Stop on every cause.

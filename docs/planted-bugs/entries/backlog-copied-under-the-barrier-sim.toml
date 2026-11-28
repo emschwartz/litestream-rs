@@ -1,0 +1,11 @@
+# The same plant as backlog-copied-under-the-barrier, against the simulator: the barrier oracle
+# finds the frames a backlog adds to the PASSIVE under the barrier.
+name = "backlog-copied-under-the-barrier-sim"
+fix = "claude/snapshot-hold"
+package = "lsr-sim"
+patch = "backlog-copied-under-the-barrier"
+test_bin = "sim"
+tests = [
+    "barrier::a_backlog_a_reader_held_back_is_not_copied_under_the_barrier",
+]
+unaided = 50

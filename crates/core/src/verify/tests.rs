@@ -719,7 +719,7 @@ fn a_dropped_finding_still_counts_towards_worst() {
     assert_eq!(worst, Some(Severity::Unrestorable));
 }
 
-// Review (review-core2): failing tests that demonstrate defects. Each pins
+// Failing tests that demonstrate defects. Each pins
 // "worst is Unrestorable" to "restore(Latest) fails".
 
 fn restore_outcome(

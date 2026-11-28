@@ -52,7 +52,6 @@ fn base_pages(dir: &Path) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// The checksum of a whole database.
 fn checksum(pages: &[Vec<u8>]) -> DbChecksum {
     (1_u32..)
         .zip(pages)
@@ -146,7 +145,6 @@ enum Restored {
     Refused(String),
 }
 
-/// Go's restore of the replica's latest state.
 fn go_restore(dir: &Path) -> Restored {
     let go = must(Resource::GoBuilds, || {
         go_binary(GoVersion::Head).map_err(|e| e.to_string())
@@ -164,7 +162,6 @@ fn go_restore(dir: &Path) -> Restored {
     if !output.status.success() {
         return Restored::Refused(String::from_utf8_lossy(&output.stderr).into_owned());
     }
-    // SQLite opens what Go wrote: the pages make a database, not just bytes.
     hash_pages(&out).unwrap();
     Restored::Pages(
         std::fs::read(&out)

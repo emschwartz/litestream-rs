@@ -1,0 +1,16 @@
+diff --git a/crates/replica/src/config.rs b/crates/replica/src/config.rs
+index bfd9915fd..60a07fa90 100644
+--- a/crates/replica/src/config.rs
++++ b/crates/replica/src/config.rs
+@@ -177,7 +177,10 @@ impl Config {
+             bytes_per_tick: self
+                 .snapshot_read_limit
+                 .map_or(default.bytes_per_tick, |limit| {
+-                    crate::pace::slice_bytes(limit, default.bytes_per_tick)
++                    {
++                        let _ = limit;
++                        default.bytes_per_tick
++                    }
+                 }),
+         }
+     }

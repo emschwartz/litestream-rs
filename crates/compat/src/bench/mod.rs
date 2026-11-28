@@ -55,7 +55,6 @@ use crate::error::CompatError;
 use crate::replicator::wait_until;
 use crate::s3::{MinioEnv, S3Replica};
 
-/// Bytes in a GiB.
 const GIB: u64 = 1 << 30;
 
 /// An integer as a float; exact below 2^53, far above any figure here.
@@ -65,12 +64,10 @@ fn to_f64(n: u64) -> f64 {
     f64::from(hi) * 4_294_967_296.0 + f64::from(lo)
 }
 
-/// Bytes as MiB.
 fn mib(bytes: u64) -> f64 {
     to_f64(bytes) / 1_048_576.0
 }
 
-/// A duration in seconds.
 fn secs(d: Duration) -> f64 {
     d.as_secs_f64()
 }
@@ -91,7 +88,6 @@ struct Rig {
 }
 
 impl Rig {
-    /// A fresh directory for one run.
     fn run_dir(&self, tag: &str) -> Result<PathBuf, CompatError> {
         let dir = self.out.join("runs").join(tag);
         drop(fs::remove_dir_all(&dir));
@@ -99,7 +95,6 @@ impl Rig {
         Ok(dir)
     }
 
-    /// The replica of run `tag`: a prefix of its own in the bucket.
     fn replica(&self, tag: &str) -> Result<S3Replica, CompatError> {
         S3Replica::new(&self.env, &format!("bench-{tag}-{}", std::process::id()))
     }
@@ -123,7 +118,6 @@ impl Rig {
         Ok(process)
     }
 
-    /// Waits until the replica holds its boot snapshot.
     fn wait_snapshot(&self, process: &mut Managed, s3: &S3Replica) -> Result<(), CompatError> {
         wait_until("the boot snapshot", plan::BOOT_LIMIT, || {
             process.ensure_running()?;
@@ -277,10 +271,7 @@ fn report(rig: &Rig, arms: [&Program; 2], series: &[Series]) -> Result<(), Compa
 
 fn sha256_of(path: &Path) -> Result<String, CompatError> {
     let bytes = fs::read(path).map_err(CompatError::io(path))?;
-    Ok(Sha256::digest(&bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+    Ok(hex::encode(Sha256::digest(&bytes)))
 }
 
 /// Copies `from` beside the results, so a rebuild cannot swap an arm, and returns the program.

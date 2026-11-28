@@ -13,7 +13,7 @@ use lsr_config::{
 use lsr_core::{
     Interval, L0Retention, Maintenance, OtherWriter, Response, Responses, RetentionMode,
 };
-use lsr_replica::{IfReplicationStops, MaxUnreplicatedAge, NonZeroDuration, ReaderTracking};
+use lsr_replica::{IfReplicationStops, MaxUnreplicatedAge, NonZeroDuration};
 use lsr_store_s3::{Provider, UrlStyle};
 use tempfile::TempDir;
 
@@ -98,7 +98,6 @@ fn an_entry_with_no_settings_gets_go_s_defaults() {
     assert_eq!(config.checkpoint.interval, Some(Duration::from_secs(60)));
     assert_eq!(config.checkpoint.min_pages, NonZeroU32::new(1000));
     assert_eq!(config.checkpoint.truncate_pages, NonZeroU32::new(121_359));
-    assert_eq!(config.readers, ReaderTracking::Untracked);
     assert_eq!(config.maintenance, Maintenance::go_default());
     assert_eq!(
         config.sync_limits.wal_bytes_per_step,
@@ -180,10 +179,6 @@ fn truncate_page_n_acts_as_go() {
     assert_eq!(
         one(&db_with("")).config().checkpoint.truncate_pages,
         lsr_replica::Config::default().checkpoint.truncate_pages
-    );
-    assert_eq!(
-        one(&db_with("")).config().readers,
-        ReaderTracking::Untracked
     );
 }
 
@@ -416,6 +411,38 @@ fn if_replication_stops_defaults_to_hold_start_and_the_bound_to_ten_minutes() {
         assert!(
             problems.iter().any(|p| p.path.to_string() == path),
             "{head}: {problems:#?}"
+        );
+    }
+}
+
+/// `snapshot-read-limit` (issue 315): a byte size a second, no limit unless stated, never
+/// zero; Go ignores the section, so the key is read only here.
+#[test]
+fn snapshot_read_limit_is_a_byte_size_off_by_default() {
+    let config = |head: &str| one(&format!("{head}{}", db_with(""))).config().clone();
+    assert_eq!(config("").snapshot_read_limit, None);
+    for (value, want) in [
+        ("30MB", 30_000_000),
+        ("512KiB", 524_288),
+        ("1048576", 1_048_576),
+    ] {
+        let got = config(&format!("litestream-rs:\n  snapshot-read-limit: {value}\n"));
+        assert_eq!(
+            got.snapshot_read_limit.map(|l| l.get()),
+            Some(want),
+            "{value}"
+        );
+    }
+    for value in ["0", "fast", "-1MB"] {
+        let problems = refused(&format!(
+            "litestream-rs:\n  snapshot-read-limit: {value}\n{}",
+            db_with("")
+        ));
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.path.to_string() == "litestream-rs.snapshot-read-limit"),
+            "{value}: {problems:#?}"
         );
     }
 }

@@ -99,8 +99,7 @@ fn a_restored_database_with_no_wal_snapshots_with_no_retry() {
 /// A disk that lies about the engine's WAL fsync from the start of a run, as a quarter of
 /// swarm runs draw, lets a power loss take frames the engine staged, so the next boot
 /// snapshots for `LocalRewound`. That lie justifies the snapshot as surely as one an
-/// operation starts mid-run. The needless-snapshot check was told only of the second kind and
-/// failed runs with the first (seeds 0x110 and 0x1e850a among them).
+/// operation starts mid-run.
 #[test]
 fn a_disk_lying_from_the_start_justifies_a_local_rewind() {
     use lsr_sim::run::run_ops;

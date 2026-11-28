@@ -71,7 +71,7 @@ impl CrashLaw {
 /// under [`CrashLaw::Blocks`] each such entry independently, on a coin; under
 /// [`CrashLaw::AllOrNothing`] a deletion stays done and any other change (a create, a rename's
 /// new name) is undone. A change not kept puts back what the entry durably held. The one
-/// directory-entry rule of the simulated disk, whichever double applies it.
+/// directory-entry rule of the simulated disk.
 pub fn entry_kept(law: CrashLaw, deleted: bool, rng: &mut Rng) -> bool {
     match law {
         CrashLaw::AllOrNothing => deleted,
@@ -109,7 +109,6 @@ fn at(offset: u64) -> usize {
     usize::try_from(offset).unwrap_or(usize::MAX)
 }
 
-/// The length a crash keeps (module doc).
 fn crash_len(synced: usize, now: usize, block: usize, rng: &mut Rng) -> usize {
     if now < synced {
         return if rng.coin() { now } else { synced };

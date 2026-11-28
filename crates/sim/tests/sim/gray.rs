@@ -230,7 +230,7 @@ fn a_latency_tail_charges_the_run_and_reaches_its_tail() {
 /// inside one tick, and the engine's age trip comes in a tick whose hung calls carried its
 /// clock past the ten-minute bound. The failure that justifies the trip came after the tick
 /// began, so the fail-stop judge dates the tick where its reads ended; dated at its start, it
-/// called the trip one with no failure after the bound (found by swarm seed 0xf4401).
+/// called the trip one with no failure after the bound.
 #[test]
 fn an_age_trip_inside_a_hung_tick_is_dated_where_the_tick_ended() {
     let ops = [
@@ -270,8 +270,7 @@ fn an_age_trip_inside_a_hung_tick_is_dated_where_the_tick_ended() {
 /// A drain outlives its grace because calls hung before it, while the app holds a spilled
 /// transaction. The operator runs the engine until it is idle and asks again, but with the
 /// write lock held the engine's checkpoint is deferred every second and it is never idle:
-/// the harness waited for an idle tick that could not come (found by nightly seed
-/// 0x126d69288c4d). A deferred checkpoint is as idle as the engine gets until the app lets go.
+/// the harness waited for an idle tick that could not come. A deferred checkpoint is as idle as the engine gets until the app lets go.
 #[test]
 fn a_drain_past_its_grace_under_a_spill_is_asked_again() {
     use lsr_core::{SourceError, SourceOp};

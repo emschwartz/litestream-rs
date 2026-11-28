@@ -1,5 +1,5 @@
-# The library's TRUNCATE default left off under the default reader setting (claude/truncate-default).
+# The library's TRUNCATE default left off in the default configuration (claude/truncate-default).
 name = "truncate-default-off-replica"
 fix = "claude/truncate-default"
 package = "lsr-replica"
-tests = ["the_default_configuration_truncates_the_wal_past_the_threshold", "every_reader_setting_truncates_at_go_s_threshold"]
+tests = ["the_default_configuration_truncates_the_wal_past_the_threshold", "the_default_truncates_at_go_s_threshold"]

@@ -156,7 +156,6 @@ fn yaml_style_float(s: &str) -> bool {
     }
 }
 
-/// What a node is, for a type error; the text only when the key is not secret.
 fn found(node: &Node, secret: bool) -> Found {
     match &node.kind {
         NodeKind::Scalar { text, .. } => Found::Scalar((!secret).then(|| text.clone())),
@@ -172,7 +171,6 @@ pub(crate) fn wrong(expected: Expected, node: &Node, secret: bool) -> ProblemKin
     }
 }
 
-/// The scalar's text and resolution, or a type error.
 fn scalar(
     node: &Node,
     expected: Expected,

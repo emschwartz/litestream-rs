@@ -47,7 +47,6 @@ fn boots_and_snapshots(rig: &Rig<Sqlite>, from: usize) -> Vec<Option<SnapshotCau
         .collect()
 }
 
-/// The application's own view of the WAL: SQLite's frame count and how many are backfilled.
 fn app_wal(rig: &mut Rig<Sqlite>) -> (i64, i64) {
     match rig.query("PRAGMA wal_checkpoint(NOOP)").unwrap()[..] {
         [_busy, log, backfilled] => (log, backfilled),
@@ -205,7 +204,6 @@ fn close_while_down(placement: Placement, app_first: bool) {
     }
     rig.restart().unwrap();
     let from = rig.ticks().len();
-    // The boot's first tick, before or after the application's write.
     rig.tick().unwrap();
     if !app_first {
         rig.insert(1500).unwrap();

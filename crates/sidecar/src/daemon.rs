@@ -43,8 +43,8 @@ use lsr_core::Clock;
 use lsr_replica::StartOptions;
 use lsr_replica::{
     Config, DynStore, FinalRetention, FinalSnapshot, FinalSnapshotFailure, Gate, IfMissing,
-    IfReplicationStops, Replicator, RestoreError, Runtime, StartError, StopOutcome, Trip, lock,
-    restore_if_missing,
+    IfReplicationStops, Replicator, RestoreError, Runtime, StartError, StopOutcome, Trip,
+    Unfinished, lock, restore_if_missing,
 };
 
 use crate::exec::ChildEnd;
@@ -104,9 +104,7 @@ impl Finished {
         let dbs = self.dbs.iter().all(|(_, end)| match end {
             End::Stopped(StopOutcome::Drained { .. }) | End::NeverAppeared => true,
             End::Stopped(
-                StopOutcome::DeadlineReached { .. }
-                | StopOutcome::Stopped(_)
-                | StopOutcome::Gone(_),
+                StopOutcome::DeadlineReached(_) | StopOutcome::Stopped(_) | StopOutcome::Gone(_),
             )
             | End::DidNotStart
             | End::SnapshotNotWritten { .. }
@@ -383,6 +381,19 @@ impl Daemon {
                     ("endpoint", config.endpoint().url().as_str().into()),
                 ];
                 self.log.info("replicating to", &fields);
+                // A large part size or concurrency is visible here, where it is set.
+                let fields = [
+                    ("part_size", config.part_size().get().into()),
+                    (
+                        "concurrency",
+                        u64::try_from(config.concurrency().get())
+                            .unwrap_or(u64::MAX)
+                            .into(),
+                    ),
+                    ("max_buffered_bytes", config.max_buffered().into()),
+                ];
+                self.log
+                    .info("multipart upload may hold in memory", &fields);
             }
         }
     }
@@ -568,7 +579,6 @@ impl Daemon {
         self.stop_app
     }
 
-    /// The daemon's clock, read now.
     #[must_use]
     pub(crate) fn now(&self) -> lsr_ltx::Timestamp {
         self.clock.now()
@@ -598,10 +608,10 @@ impl Daemon {
                 self.log
                     .info("database drained", &[at, ("txid", txid.into())]);
             }
-            End::Stopped(StopOutcome::DeadlineReached {
+            End::Stopped(StopOutcome::DeadlineReached(Unfinished {
                 unsynced_wal_bytes,
                 staged_not_uploaded,
-            }) => {
+            })) => {
                 let replicated = replicated.map_or_else(|| "none".to_owned(), |t| t.to_string());
                 let fields = [
                     at,
@@ -644,7 +654,6 @@ impl Daemon {
         }
     }
 
-    /// The log.
     #[must_use]
     pub(crate) fn log(&self) -> &Logger {
         &self.log
@@ -841,6 +850,43 @@ mod tests {
         }
     }
 
+    /// An S3 replica logs the most memory one buffered upload may hold, so a large part size
+    /// or concurrency is visible when the daemon starts (`docs/decisions/D309.md`).
+    #[test]
+    fn an_s3_replica_logs_what_a_buffered_upload_may_hold() {
+        let lines = Lines::default();
+        let text = "dbs:\n  - path: /data/a.db\n    replica:\n      type: s3\n      bucket: b\n      path: p\n      \
+                    region: us-east-1\n      access-key-id: AKID\n      secret-access-key: SECRET\n      \
+                    part-size: 100MiB\n      concurrency: 10\n";
+        let loaded = GoConfig::parse(text, Expand::Off, &ProcessEnv).unwrap();
+        let plan = lsr_config::plan(&loaded.config, &ProcessEnv).unwrap();
+        let log = Arc::new(Logger::to(
+            lsr_config::LogLevel::Info,
+            lsr_config::LogFormat::Text,
+            Runtime::system().clock,
+            Box::new(lines.clone()),
+        ));
+        let empty = GoConfig::parse("dbs: []\n", Expand::Off, &ProcessEnv).unwrap();
+        let none = lsr_config::plan(&empty.config, &ProcessEnv).unwrap();
+        let daemon = Daemon::start(
+            &none,
+            false,
+            log,
+            Started::default(),
+            Board::default(),
+            Mode::Serving,
+        );
+        daemon.initialized(plan.dbs().first().unwrap());
+        let out = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            out.contains("msg=\"multipart upload may hold in memory\""),
+            "{out}"
+        );
+        assert!(out.contains("part_size=104857600"), "{out}");
+        assert!(out.contains("concurrency=10"), "{out}");
+        assert!(out.contains("max_buffered_bytes=1153433600"), "{out}");
+    }
+
     /// A drain cut by its deadline says in words that the replica lacks the newest commits,
     /// and names the newest transaction the replica holds, so an operator knows what a restore
     /// lacks.
@@ -864,10 +910,10 @@ mod tests {
             Board::default(),
             Mode::Serving,
         );
-        let end = End::Stopped(StopOutcome::DeadlineReached {
+        let end = End::Stopped(StopOutcome::DeadlineReached(Unfinished {
             unsynced_wal_bytes: 115_009_832,
             staged_not_uploaded: 0,
-        });
+        }));
         daemon.ended(Path::new("/data/big.db"), &end, lsr_ltx::Txid::new(0xa67));
         let out = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
         assert!(
@@ -990,7 +1036,7 @@ mod tests {
     }
 
     /// Under `-once` no waiter runs, so a start that meets the application writing, or a
-    /// locked meta directory, is a failed start: not clean, as before either was retried.
+    /// locked meta directory, is a failed start: not clean.
     #[test]
     fn without_a_waiter_a_transient_start_failure_is_a_failed_start() {
         let dir = tempfile::tempdir().unwrap();

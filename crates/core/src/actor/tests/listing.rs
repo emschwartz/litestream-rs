@@ -98,16 +98,13 @@ const CHECK: i64 = 15;
 /// level-0 delete it may plan spends it, so one more follows; each window
 /// boundary that comes before the interval is up wakes one, and the
 /// compaction it plans is followed by one more. The constant covers the
-/// other levels' compactions and the snapshot. Listing once per upload makes
-/// about one a second: 600 here, 9450 calls in all on the old code.
+/// other levels' compactions and the snapshot.
 fn listing_bound() -> u32 {
     let passes = 2 * (SECONDS / CHECK) + 2 * (SECONDS / WINDOW) + 8;
     u32::try_from(passes).unwrap() * WHOLE
 }
 
-/// The defect: every upload made maintenance list the whole replica on the
-/// next tick, ten LIST calls a second for a writer committing once a second.
-/// Now an upload makes the next listing due at the earlier of the next
+/// An upload makes the next listing due at the earlier of the next
 /// compaction window and the level-0 retention check interval, and
 /// compaction and retention still run on their schedule.
 #[test]
@@ -240,10 +237,8 @@ fn long_history(files: u64, maintenance: Maintenance) -> (Rig, Actor, i64) {
 }
 
 /// LIST requests and listed entries an hour of a steady writer may cost over a long history.
-/// Before maintenance listed only what a check reads, this hour cost 10,773 requests and
-/// 2.95 million entries at 2,900 level-1 files, and 25,410 requests and 17.9 million at
-/// 20,000 (issue 324). After: 610 requests and 161,000 entries at 2,900
-/// files, 679 and 230,000 at 20,000. A pass lists only what its decision reads; a retention
+/// Measured: 610 requests and 161,000 entries at 2,900 level-1 files, 679 and 230,000 at
+/// 20,000 (issue 324). A pass lists only what its decision reads; a retention
 /// check lists level 0, a level-1 tail and level 9 fresh (a delete is never decided from a
 /// carried listing, which costs about 95 requests an hour); whole listings stay to boot, faults
 /// and one every [`FULL_LISTING_INTERVAL`], about 30 requests each at 20,000 files.
@@ -308,7 +303,7 @@ fn an_hour_stays_within_the_bounds(hour: &Hour) {
     }
 }
 
-/// The defect (issue 324): with a week of retention, 20,000 level-1 files, every check listed
+/// Issue 324: with a week of retention, 20,000 level-1 files, every check listed
 /// all of them again, 21 requests a pass, 14 passes a minute.
 #[test]
 fn an_hour_of_uploads_over_20000_level_one_files_lists_a_bounded_number_of_requests() {
@@ -533,14 +528,12 @@ fn a_fault_drops_the_remembered_files_and_the_next_pass_lists_the_whole_replica(
     let (mut rig, mut actor) = caught_up();
     let at = until_a_whole_listing(&mut rig, &mut actor, T0 + 1000);
     let mut at = at;
-    // Short passes now.
     let mut short = false;
     for _ in 0..120 {
         short |= one_second(&mut rig, &mut actor, at).short;
         at += 1000;
     }
     assert!(short, "no short pass before the fault");
-    // The replica refuses uploads for a while: the upload task faults.
     rig.remote
         .refuse_uploads
         .store(true, std::sync::atomic::Ordering::SeqCst);

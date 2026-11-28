@@ -10,6 +10,10 @@
 //! counts set: `busy` in the run) from one that never ran because another connection held the
 //! checkpoint lock (`SQLITE_BUSY` with counts of -1: [`SourceError::Busy`]); the pragma reports
 //! both as `busy = 1`.
+//!
+//! A backlog copy is a PASSIVE on the writer connection too, after [`Checkpointer::renew_read`]
+//! moved the read to the WAL's end under the barrier: it copies everything below that read with
+//! no lock of ours held, so no application writer waits for it.
 
 use std::ffi::c_int;
 use std::io;
@@ -17,12 +21,11 @@ use std::io;
 use crate::capi::Handle;
 use crate::error::{rc_error, source_error};
 use crate::{Sqlite, ffi};
-use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, SourceError};
+use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, ReadLockHold, SourceError};
 
-/// SQLite's result code and its two frame counts.
 fn wal_checkpoint(conn: Handle<'_>, mode: CheckpointMode) -> (c_int, c_int, c_int) {
     let mode = match mode {
-        CheckpointMode::Passive => ffi::SQLITE_CHECKPOINT_PASSIVE,
+        CheckpointMode::Passive | CheckpointMode::Backlog => ffi::SQLITE_CHECKPOINT_PASSIVE,
         CheckpointMode::Truncate => ffi::SQLITE_CHECKPOINT_TRUNCATE,
         CheckpointMode::Full => ffi::SQLITE_CHECKPOINT_FULL,
     };
@@ -96,7 +99,13 @@ impl Checkpointer for Sqlite {
 
     fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointRun, SourceError> {
         let mut inner = self.lock();
-        let (rc, log, checkpointed, one_sqlite, lost) = if mode == CheckpointMode::Truncate {
+        let (rc, log, checkpointed, one_sqlite, lost) = if mode == CheckpointMode::Backlog {
+            let (rc, log, checkpointed) = wal_checkpoint(inner.free_writer()?, mode);
+            if rc & 0xff == ffi::SQLITE_LOCKED {
+                return Err(SourceError::Busy);
+            }
+            (rc, log, checkpointed, true, false)
+        } else if mode == CheckpointMode::Truncate {
             let shm = inner.shm_path();
             let alone = descriptors_on(&shm) == Some(1);
             let (rc, log, checkpointed) = wal_checkpoint(inner.free_writer()?, mode);
@@ -126,6 +135,15 @@ impl Checkpointer for Sqlite {
         })
     }
 
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError> {
+        let mut inner = self.lock();
+        inner.end_read()?;
+        inner
+            .begin_read()
+            .map_err(|_lost| SourceError::ReadTxLost)?;
+        Ok(inner.epoch)
+    }
+
     fn bump_seq(&mut self) -> Result<(), SourceError> {
         self.lock()
             .free_writer()?
@@ -144,7 +162,6 @@ mod tests {
 
     use super::*;
 
-    /// SQLite's authorizer callback: refuses ROLLBACK, allows everything else.
     #[expect(
         unsafe_code,
         reason = "SQLite calls the authorizer through a C function pointer"
@@ -182,7 +199,6 @@ mod tests {
         assert_eq!(rc, ffi::SQLITE_OK);
     }
 
-    /// A database in WAL mode under a temporary directory, and our handle on it.
     fn open() -> (tempfile::TempDir, std::path::PathBuf, Sqlite) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
@@ -193,7 +209,6 @@ mod tests {
         (dir, path, sqlite)
     }
 
-    /// The sequence number another connection reads.
     fn seq(path: &std::path::Path) -> Option<i64> {
         Connection::open(path)
             .unwrap()
@@ -234,6 +249,41 @@ mod tests {
         sqlite.end_barrier(barrier).unwrap();
         sqlite.bump_seq().unwrap();
         assert_eq!(seq(&path), Some(1));
+    }
+
+    /// A backlog copy runs on the writer and keeps the read: it copies only below the read, so a
+    /// read moved to the WAL's end first lets it copy everything with no lock of ours held.
+    #[test]
+    fn a_backlog_copy_keeps_the_read_and_copies_below_it() {
+        let (_dir, path, mut sqlite) = open();
+        let app = Connection::open(&path).unwrap();
+        for _ in 0..4 {
+            app.execute("INSERT INTO t (v) VALUES (randomblob(3000))", [])
+                .unwrap();
+        }
+        let held = sqlite.lock().epoch;
+        let run = sqlite.checkpoint(CheckpointMode::Backlog).unwrap();
+        assert!(run.checkpointed < run.log, "{run:?}");
+        assert_eq!(run.epoch, held, "the copy kept the read");
+        let renewed = sqlite.renew_read().unwrap();
+        assert_ne!(renewed, held);
+        let run = sqlite.checkpoint(CheckpointMode::Backlog).unwrap();
+        assert_eq!((run.busy, run.checkpointed), (false, run.log), "{run:?}");
+        assert_eq!(run.epoch, renewed);
+        app.execute("INSERT INTO t (v) VALUES (1)", []).unwrap();
+    }
+
+    /// A backlog copy while a lock is outstanding would run inside the lock's transaction:
+    /// refused, as every other call on the writer is.
+    #[test]
+    fn a_backlog_copy_under_a_lock_is_refused() {
+        let (_dir, _path, mut sqlite) = open();
+        let barrier = sqlite.begin_barrier().unwrap();
+        assert_eq!(
+            sqlite.checkpoint(CheckpointMode::Backlog),
+            Err(SourceError::Io(io::ErrorKind::InvalidInput))
+        );
+        sqlite.end_barrier(barrier).unwrap();
     }
 
     #[test]

@@ -30,13 +30,13 @@ use base64::engine::general_purpose::STANDARD;
 use lsr_core::Clock;
 use lsr_ltx::Timestamp;
 use md5::{Digest as _, Md5};
-use percent_encoding::percent_decode_str;
+use percent_encoding::{AsciiSet, percent_decode_str, utf8_percent_encode};
 
 use crate::config::{S3Config, UrlStyle};
 use crate::fault::{Shape, error_response};
 use crate::request::HttpRequest;
-use crate::response::{hex, quoted_md5};
-use crate::sigv4::PayloadHash;
+use crate::response::quoted_md5;
+use crate::sigv4::{PayloadHash, UNRESERVED};
 use crate::transport::{HttpResponse, Transport, TransportError};
 
 /// S3's smallest part, the last one excepted.
@@ -71,9 +71,7 @@ struct State {
     uploads: BTreeMap<String, Pending>,
     next_upload: u64,
     denied_deletes: BTreeSet<String>,
-    /// Keys a DeleteObjects was refused for, as it refused them.
     refused_deletes: u64,
-    /// Answers a conditional write with 501, as a provider without them.
     no_conditional_writes: bool,
     /// Lists in Cloudflare R2's order: a name that is the start of others after all of them.
     r2_order: bool,
@@ -206,10 +204,9 @@ impl FakeS3 {
     }
 
     /// How many parts arrived for an upload that was already completed or aborted, or never
-    /// begun; each was answered 404 `NoSuchUpload`. S3 may keep a part that is on its way
-    /// while the upload is aborted, so a client that ends an upload with a part still on
-    /// the wire can leave storage behind; one that waits for its parts first sends none of
-    /// these.
+    /// begun; each was answered 404 `NoSuchUpload`. S3 may keep a part still on its way when
+    /// the upload is aborted, so a client that does not wait for its parts can leave storage
+    /// behind.
     #[must_use]
     pub fn parts_after_the_end(&self) -> u64 {
         self.state().parts_after_the_end
@@ -416,7 +413,7 @@ impl FakeS3 {
         if let (true, Some((last, _))) = (more, page.last()) {
             xml.push_str(&format!(
                 "<NextContinuationToken>{}</NextContinuationToken>",
-                hex(last.as_bytes())
+                hex::encode(last)
             ));
         }
         for (key, object) in &page {
@@ -543,29 +540,10 @@ fn whole_seconds(at: Timestamp) -> Timestamp {
 
 /// A HEAD's `Last-Modified` is an HTTP-date (`Fri, 20 Nov 2026 13:49:45 GMT`).
 fn http_date(at: Timestamp) -> String {
-    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let iso = whole_seconds(at).to_string();
-    let field = |from: usize, to: usize| iso.get(from..to).unwrap_or("00");
-    // 1970-01-01 was a Thursday.
-    let days = at.unix_millis().div_euclid(86_400_000);
-    let weekday = usize::try_from(days.saturating_add(4).rem_euclid(7))
-        .ok()
-        .and_then(|day| DAYS.get(day));
-    let month = field(5, 7)
-        .parse::<usize>()
-        .ok()
-        .and_then(|month| MONTHS.get(month.saturating_sub(1)));
-    format!(
-        "{}, {} {} {} {} GMT",
-        weekday.unwrap_or(&"Thu"),
-        field(8, 10),
-        month.unwrap_or(&"Jan"),
-        field(0, 4),
-        field(11, 19),
-    )
+    jiff::Timestamp::from_millisecond(at.unix_millis())
+        .unwrap_or(jiff::Timestamp::UNIX_EPOCH)
+        .strftime("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string()
 }
 
 fn object_headers(object: &Object, length: usize) -> Vec<(&str, String)> {
@@ -691,7 +669,6 @@ struct Joined {
     etag: String,
 }
 
-/// The `(part number, ETag)` pairs a CompleteMultipartUpload body lists.
 fn parse_parts(body: &[u8]) -> Vec<(u16, String)> {
     let text = String::from_utf8_lossy(body);
     text.split("<Part>")
@@ -725,7 +702,7 @@ fn join_parts(
             .get(number)
             .ok_or_else(|| invalid("InvalidPart"))?;
         let digest = Md5::digest(part);
-        if hex(&digest) != *etag {
+        if hex::encode(digest) != *etag {
             return Err(invalid("InvalidPart"));
         }
         let is_last = position.saturating_add(1) == listed.len();
@@ -735,7 +712,11 @@ fn join_parts(
         body.extend_from_slice(part);
         digests.extend_from_slice(&digest);
     }
-    let etag = format!("\"{}-{}\"", hex(&Md5::digest(&digests)), listed.len());
+    let etag = format!(
+        "\"{}-{}\"",
+        hex::encode(Md5::digest(&digests)),
+        listed.len()
+    );
     Ok(Joined { body, etag })
 }
 
@@ -777,28 +758,17 @@ fn r2_key(key: &str) -> Vec<u8> {
 }
 
 fn decode_token(token: &str) -> Option<String> {
-    let bytes: Option<Vec<u8>> = token
-        .as_bytes()
-        .chunks(2)
-        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
-        .collect();
-    String::from_utf8(bytes?).ok()
+    String::from_utf8(hex::decode(token).ok()?).ok()
 }
 
 /// Go's `url.QueryEscape` with `/` kept, which is how MinIO writes keys under
 /// `encoding-type=url`: a space is `+`, a literal `+` is `%2B`.
 fn url_encode(key: &str) -> String {
-    let mut out = String::new();
-    for byte in key.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
-                out.push(char::from(byte));
-            }
-            b' ' => out.push('+'),
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
+    const KEPT: &AsciiSet = &UNRESERVED.remove(b'/');
+    // A `%20` in the output is always an encoded space: a literal `%` encodes as `%25`.
+    utf8_percent_encode(key, KEPT)
+        .to_string()
+        .replace("%20", "+")
 }
 
 fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
@@ -850,5 +820,16 @@ fn entity_text(entity: &str) -> String {
         ("quot", None) => "\"".to_owned(),
         ("apos", None) => "'".to_owned(),
         (other, None) => format!("&{other};"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn last_modified_is_an_http_date_to_the_second() {
+        let at = Timestamp::parse_rfc3339("2026-11-20T13:49:45.678Z").unwrap();
+        assert_eq!(http_date(at), "Fri, 20 Nov 2026 13:49:45 GMT");
     }
 }

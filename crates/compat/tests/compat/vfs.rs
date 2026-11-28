@@ -70,7 +70,6 @@ mod live {
         }) else {
             return;
         };
-        // The reference: the newest transaction restored by Rust, checked against the source.
         let reference = dir.join("reference.db");
         restore_replica(&written.fixture.replica, RestoreTarget::Latest, &reference)
             .expect("sink")

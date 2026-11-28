@@ -1,0 +1,7 @@
+name = "version-ignores-the-commit"
+fix = "claude/cli-version"
+package = "lsr-cli"
+bin = "lsr"
+tests = [
+    "render::tests::the_version_names_the_commit_or_says_development_build",
+]

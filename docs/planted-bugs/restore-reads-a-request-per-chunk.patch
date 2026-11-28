@@ -1,13 +1,13 @@
-diff --git a/crates/core/src/ltx_read.rs b/crates/core/src/ltx_read.rs
---- a/crates/core/src/ltx_read.rs
-+++ b/crates/core/src/ltx_read.rs
-@@ -252,8 +252,8 @@
-         store: &S,
-         mut on_event: impl FnMut(Event<'_>) -> Result<(), E>,
-     ) -> Result<Verified, ReadFault<E>> {
--        let mut stream = store.read_stream(self.key, self.offset);
-         loop {
-+            let mut stream = store.read_stream(self.key, self.offset);
-             match self.next(&mut *stream, &mut on_event).await? {
-                 Next::Event(()) => {}
-                 Next::End(verified) => return Ok(verified),
+diff --git a/crates/core/src/restore/window.rs b/crates/core/src/restore/window.rs
+index cf000e399..c07b41ec4 100644
+--- a/crates/core/src/restore/window.rs
++++ b/crates/core/src/restore/window.rs
+@@ -30,7 +30,7 @@ pub(super) fn stream<'s, S: ObjectStore>(
+ ) -> Box<dyn ReadStream + 's> {
+     let width = store.batch_width(BatchKind::Spans).get();
+     if width < 2 || info.size < SPAN_BYTES.saturating_mul(2) {
+-        return store.read_stream(info.key, 0);
++        return Box::new(Window::new(store, info.key, info.size, 1, 4 * 1024 * 1024));
+     }
+     Box::new(Window::new(store, info.key, info.size, width, SPAN_BYTES))
+ }

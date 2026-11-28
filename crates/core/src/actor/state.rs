@@ -46,10 +46,10 @@ pub enum Task {
     Upload,
     /// Deleting staged level-0 files the replica's level 1 covers.
     Prune,
-    /// Listing the replica for maintenance, and a failed job whose level
-    /// keeps no wait of its own (a retention delete). A job whose level does
-    /// keep one waits there, not here, so one failing level starves no other, but its persistent failure is
-    /// still this task's degraded state.
+    /// Listing the replica for maintenance, and a failed job whose level keeps no wait of
+    /// its own (a retention delete). A job whose level does keep one waits there, so one
+    /// failing level starves no other, but its persistent failure is still this task's
+    /// degraded state.
     Maintenance,
 }
 
@@ -109,12 +109,10 @@ pub(super) struct Retry {
 }
 
 impl Retry {
-    /// Failures in a row so far.
     pub(super) fn failures(&self) -> u32 {
         self.attempts.map_or(0, NonZeroU32::get)
     }
 
-    /// Whether the task may run at `now`.
     pub(super) fn ready(&self, now: Timestamp) -> bool {
         self.until.is_none_or(|until| now >= until)
     }
@@ -261,7 +259,6 @@ impl Tasks {
         *self.get_mut(to) = std::mem::take(self.get_mut(from));
     }
 
-    /// Whether any task is degraded.
     pub(super) fn any_degraded(&self) -> bool {
         Task::ALL
             .iter()
@@ -436,11 +433,10 @@ impl Maintain {
 
 impl Actor {
     /// Switches retention on or off while the actor runs, as Go's
-    /// `Store.SetRetentionEnabled` does (`store.go:573-581`). Compaction and
-    /// snapshots are unaffected. The next maintenance tick lists the replica
-    /// again, so switching it on resumes deletes under the usual rules at once
-    /// rather than at the last wait's end. A restart takes the setting from
-    /// the [`super::ActorConfig`] it is given.
+    /// `Store.SetRetentionEnabled` does (`store.go:573-581`). Compaction and snapshots are
+    /// unaffected. The next maintenance tick lists the replica again, so switching it on
+    /// resumes deletes at once rather than at the last wait's end. A restart takes the setting
+    /// from the [`super::ActorConfig`] it is given.
     pub fn set_retention(&mut self, retention: RetentionMode) {
         let maintenance = self.kept.cfg.maintenance.clone();
         self.kept.cfg.maintenance = maintenance.with_retention(retention);

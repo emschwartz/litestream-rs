@@ -61,14 +61,16 @@ pub enum SourceOp {
     Checkpoint,
     /// `Checkpointer::bump_seq`.
     BumpSeq,
-    /// The write lock Go takes for a TRUNCATE (`db.go:2759-2771`). Nothing calls it: the
-    /// engine's copy after a TRUNCATE takes no lock (docs/decisions/D190.md), and the
-    /// `Checkpointer` trait no longer has the method. Kept so recorded histories still read.
+    /// The write lock Go takes for a TRUNCATE (`db.go:2759-2771`). No longer called, since the
+    /// engine takes no lock after a TRUNCATE (docs/decisions/D190.md); kept so recorded histories
+    /// still read.
     BeginWriteLock,
-    /// The release of that write lock (Go `db.go:2795`). Nothing calls it either.
+    /// The release of that write lock (Go `db.go:2795`).
     EndWriteLock,
     /// `WalSource::sync`.
     Sync,
+    /// `Checkpointer::renew_read`.
+    RenewRead,
 }
 
 /// One-shot errors, consumed oldest first by the next call of their operation.
@@ -544,9 +546,11 @@ impl FakeWal {
         script: Option<CheckpointScript>,
     ) -> CheckpointRun {
         let mut state = lock(&self.state);
-        // A TRUNCATE runs on the writer connection and keeps the read transaction.
+        // A TRUNCATE and a backlog copy run on the writer connection and keep the read
+        // transaction.
         let truncate = mode == CheckpointMode::Truncate;
-        if !truncate {
+        let held = truncate || mode == CheckpointMode::Backlog;
+        if !held {
             state.read_mark = None;
         }
         let effect = script.map_or(CheckpointEffect::Natural, |s| s.effect);
@@ -584,7 +588,7 @@ impl FakeWal {
         }
         let log = state.mx_frame;
         let checkpointed = state.backfilled;
-        if !truncate {
+        if !held {
             state.epoch = state.epoch.next();
             state.take_read_lock();
         }
@@ -692,6 +696,8 @@ pub enum CheckpointCall {
     Checkpoint(CheckpointMode),
     /// `bump_seq`.
     BumpSeq,
+    /// `renew_read`.
+    RenewRead,
 }
 
 /// Records its calls and applies scripted checkpoint outcomes to a [`FakeWal`].
@@ -772,6 +778,15 @@ impl Checkpointer for FakeCheckpointer {
             return Err(SourceError::Busy);
         }
         Ok(self.wal.checkpoint_run(mode, script))
+    }
+
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError> {
+        self.enter(CheckpointCall::RenewRead, SourceOp::RenewRead)?;
+        let mut state = lock(&self.wal.state);
+        state.read_mark = None;
+        state.epoch = state.epoch.next();
+        state.take_read_lock();
+        Ok(state.epoch)
     }
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {

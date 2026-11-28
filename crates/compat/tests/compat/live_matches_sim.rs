@@ -38,9 +38,9 @@ use std::time::Duration;
 use lsr_core::conformance::block_on;
 use lsr_core::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, Level, MemStore,
-    ObjectStore, PageLimit, PageSource, Position, PositionSource, Probes, ReadLen, SourceError,
-    StepEnd, SyncConfig, Synced, SyncedThrough, Verdict, WalSource, WalView, checkpoint,
-    recover_traced, sync_step,
+    ObjectStore, PageLimit, PageSource, Position, PositionSource, Probes, ReadLen, ReadLockHold,
+    SourceError, StepEnd, SyncConfig, Synced, SyncedThrough, Verdict, WalSource, WalView,
+    checkpoint, recover_traced, sync_step,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp};
 use lsr_sim::{OtherProcessMode, ReaderId, SimCheckpointer, SimPages, SimSource, SimSqlite};
@@ -160,6 +160,8 @@ enum Call {
     Passive,
     Truncate,
     Full,
+    Backlog,
+    RenewRead,
     BumpSeq,
 }
 
@@ -226,9 +228,16 @@ impl Checkpointer for RealCk {
             CheckpointMode::Passive => Call::Passive,
             CheckpointMode::Truncate => Call::Truncate,
             CheckpointMode::Full => Call::Full,
+            CheckpointMode::Backlog => Call::Backlog,
         };
         self.record(call, Some(run));
         Ok(run)
+    }
+
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError> {
+        let hold = self.live.renew_read()?;
+        self.record(Call::RenewRead, None);
+        Ok(hold)
     }
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {
@@ -285,11 +294,17 @@ impl Checkpointer for ModelCk {
             CheckpointMode::Passive => Call::Passive,
             CheckpointMode::Truncate => Call::Truncate,
             CheckpointMode::Full => Call::Full,
+            CheckpointMode::Backlog => Call::Backlog,
         };
         let event = self.next(call);
         let run = self.ck.checkpoint(mode)?;
         same_run(call, &run, event.run);
         Ok(run)
+    }
+
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError> {
+        self.next(Call::RenewRead);
+        self.ck.renew_read()
     }
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {
@@ -418,6 +433,7 @@ impl<S: WalSource, P: PageSource, C: Checkpointer> Engine<S, P, C> {
             &mut self.ck,
             &self.staging,
             &self.cfg,
+            &lsr_core::CheckpointConfig::default(),
             &lsr_core::FakeClock::new(Timestamp::from_unix_millis(self.now)),
         ))
         .expect("checkpoint");

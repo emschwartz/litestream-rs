@@ -5,7 +5,6 @@
 use super::*;
 use crate::maintain::retain::short_level_zero;
 
-/// What `short_level_zero` says about `view`, from a fresh state.
 fn short(
     view: &Inventory,
     known: &[FileInfo],
@@ -72,9 +71,9 @@ fn check_short(data: &[u8], weird: bool, which: usize) {
         inventory = inventory.with_skipped(l, count);
     }
     let mut b = Bytes { data, at: 7 };
-    // The shape the first version of this test never drew: the newest file of a level 1 to 8 is
-    // younger than the newest level-0 file (a Go compaction stamped at compaction time), which
-    // lifts the whole rules' anchor above what level 0 and the snapshots alone show.
+    // The newest file of a level 1 to 8 may be younger than the newest level-0 file (a Go
+    // compaction stamped at compaction time), which lifts the whole rules' anchor above what
+    // level 0 and the snapshots alone show.
     let mut sane = listing.sane;
     if b.percent(40) {
         let n = u8::try_from(1 + b.below(8)).unwrap_or(1);
@@ -218,7 +217,7 @@ fn a_pinned_restore_point_leaves_level_zero_to_the_whole_listing() {
     assert!(zero.keys.is_empty());
 }
 
-/// The reviewer's case: the newest level 1 file (a Go compaction stamped at compaction time) is
+/// The newest level 1 file (a Go compaction stamped at compaction time) is
 /// younger than the newest level-0 file, so the whole rules' anchor is that file's time and the
 /// floor is 20. Level-0 files 18 to 21 straddle the floor and the level 1 files under it go
 /// with rule 2, so the whole rules keep them. The short rule reads no snapshot and no floor, and

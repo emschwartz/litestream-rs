@@ -28,6 +28,7 @@ use clap::{Arg, ArgAction, ArgMatches};
 
 use lsr_config::{ReplicaProblem, S3Overrides, S3Url, s3_config};
 use lsr_core::Depth;
+use lsr_sidecar::goflag;
 use lsr_store_s3::{ConfigError, Endpoint, Region, S3Config};
 use thiserror::Error;
 
@@ -242,7 +243,7 @@ pub const DAEMON_USAGE: &str =
 pub const DAEMON_SUMMARY: &str = "Go's replicate daemon: every database in litestream.yml (default $LITESTREAM_CONFIG, else /etc/litestream.yml), or DB_PATH alone to REPLICA_URL (file:// or s3://, as Go), until a signal; lsr replicate -h lists the flags";
 
 /// `lsr config check`'s usage line.
-pub const CONFIG_CHECK_USAGE: &str = "lsr config check <file>";
+pub const CONFIG_CHECK_USAGE: &str = "lsr config check <file> | lsr config check -config <file>";
 
 /// One line for the help text.
 pub const CONFIG_CHECK_SUMMARY: &str = "read a Go litestream.yml as the daemon would and print every refusal and warning a start would; writes nothing and touches no bucket, but scans a dir entry as a start does";
@@ -395,6 +396,12 @@ pub enum UsageError {
         /// The flag.
         flag: &'static str,
     },
+    /// `lsr config check` takes the file once: as an argument or as `-config`.
+    #[error(
+        "config check takes the file as an argument or as -config, not both: {}",
+        CONFIG_CHECK_USAGE
+    )]
+    ConfigCheckBoth,
     /// `lsr config check` takes exactly one file.
     #[error(
         "config check takes one file, not {found} arguments: {}",
@@ -822,14 +829,9 @@ fn parse_own(command: CommandName, rest: &[String]) -> Result<Command, UsageErro
     })
 }
 
-/// `config check <file>`.
+/// `config check <file>`, or `config check -config <file>` as every other command takes it
+/// (`--config` too, by Go's flag rules); both together are refused.
 fn parse_config(rest: &[String]) -> Result<Command, UsageError> {
-    let check = clap::Command::new("check")
-        .no_binary_name(true)
-        .disable_help_flag(true)
-        .disable_version_flag(true)
-        .disable_help_subcommand(true)
-        .arg(Arg::new("file").required(true));
     match rest.split_first() {
         None => Err(UsageError::NoCommand),
         Some((word, _)) if is_help(word) => Ok(Command::Help),
@@ -838,14 +840,17 @@ fn parse_config(rest: &[String]) -> Result<Command, UsageError> {
                 return Ok(Command::Help);
             }
             let found = args.len();
-            let matches = check
-                .try_get_matches_from(args)
-                .map_err(|_refused| UsageError::ConfigCheckArguments { found })?;
-            let file = matches
-                .get_one::<String>("file")
-                .cloned()
-                .unwrap_or_default();
-            Ok(Command::ConfigCheck(PathBuf::from(file)))
+            let set = inspect::scan(&[goflag::value("config")], args)?
+                .ok_or(UsageError::ConfigCheckArguments { found })?;
+            let flag = set.value("config");
+            match (set.positional(), flag) {
+                ([file], None) => Ok(Command::ConfigCheck(PathBuf::from(file))),
+                ([], Some(file)) if !file.is_empty() => {
+                    Ok(Command::ConfigCheck(PathBuf::from(file)))
+                }
+                ([_, ..], Some(_)) => Err(UsageError::ConfigCheckBoth),
+                _ => Err(UsageError::ConfigCheckArguments { found }),
+            }
         }
         Some((other, _)) => Err(UsageError::UnknownCommand {
             name: format!("config {other}"),

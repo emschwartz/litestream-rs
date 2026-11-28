@@ -31,7 +31,6 @@ fn config(dir: &Path) -> String {
     )
 }
 
-/// `replicate -once` with `flags` in `dir`, by `binary`: its exit code and standard error.
 fn once(binary: &Path, dir: &Path, flags: &[&str]) -> (Option<i32>, String) {
     std::fs::write(dir.join("litestream.yml"), config(dir)).unwrap();
     let output = Command::new(binary)
@@ -176,7 +175,6 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
-/// Go's restore of `dir`'s replica, as rows.
 fn go_restores(go: &Path, dir: &Path) -> Vec<Vec<u8>> {
     let out = dir.join("restored.db");
     let output = Command::new(go)

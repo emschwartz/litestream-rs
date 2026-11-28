@@ -58,7 +58,7 @@ use lsr_core::{
     CheckpointConfig, ConfigError as MaintenanceError, Interval, L0Retention, Maintenance,
     RetentionMode,
 };
-use lsr_replica::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
+use lsr_replica::{Config, NonZeroDuration, SyncLimits};
 use lsr_store_s3::{S3Config, S3Credentials};
 
 use crate::config::{DbConfig, DbSource, GoConfig};
@@ -310,7 +310,6 @@ pub use dir::DirProblem;
 pub use replica::ReplicaProblem;
 pub use s3::{S3Overrides, S3Url, s3_config};
 
-/// Collects problems and notes during one mapping.
 #[derive(Default)]
 struct Found {
     problems: Vec<MapProblem>,
@@ -392,7 +391,6 @@ fn path_meta(
     }
 }
 
-/// One database's plan, once its meta directory and replica are known.
 fn one(
     entry: &KeyPath,
     path: PathBuf,
@@ -424,7 +422,6 @@ pub fn default_meta(database: &Path) -> Option<PathBuf> {
     Some(parent.join(format!(".{name}-litestream")))
 }
 
-/// The replicator settings an entry gives every database it names.
 fn settings(
     config: &GoConfig,
     db: &DbConfig,
@@ -445,12 +442,12 @@ fn settings(
         maintenance: maintenance?.clone(),
         sync_limits: sync_limits?,
         responses: config.rust().responses(),
-        readers: ReaderTracking::Untracked,
         shutdown_grace,
         app_autocheckpoint: config.rust().app_autocheckpoint(),
         verify_interval: config.validation_interval().and_then(positive),
         if_replication_stops: config.rust().if_replication_stops(),
         max_unreplicated_age: config.rust().max_unreplicated_age(),
+        snapshot_read_limit: config.rust().snapshot_read_limit(),
         write_behind: more_than_one_core(),
     })
 }
@@ -594,7 +591,6 @@ fn l0_check(value: GoDuration, found: &mut Found) -> Option<Interval> {
     every
 }
 
-/// Refuses two plans on one database, one replica or one meta directory.
 fn distinct(dbs: &[DbPlan], found: &mut Found) {
     for (index, db) in dbs.iter().enumerate() {
         let earlier = dbs.iter().take(index);

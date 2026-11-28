@@ -1,9 +1,0 @@
-# An upload whose parts hold their bytes keeps the configured number in flight whatever the part
-# size, so a large part size with ten at once holds ten parts again.
-name = "held-budget-ignored"
-fix = "plant"
-package = "lsr-store-s3"
-tests = [
-    "part_plan::tests::large_parts_are_cut_to_what_the_budget_holds",
-    "part_plan::tests::the_width_is_the_most_within_the_setting_that_the_budget_holds",
-]

@@ -1,0 +1,9 @@
+# The replicator thread builds its page source with no read limit whatever
+# `snapshot_read_limit` says, so a boot copy, a snapshot and a verify read at the disk's speed (issue 315).
+name = "snapshot-read-limit-ignored"
+fix = "plant"
+package = "lsr-replica"
+test_bin = "replica"
+tests = [
+    "snapshot_limit::a_read_limit_holds_the_boot_copy_to_its_rate",
+]

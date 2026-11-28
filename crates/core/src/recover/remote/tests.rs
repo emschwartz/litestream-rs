@@ -24,7 +24,6 @@ fn recover(
 }
 
 const PS: PageSize = PageSize::MIN;
-/// A WAL frame: its 24-byte header and one page.
 const FRAME: u64 = 24 + 512;
 
 /// The replica's newest staged file for transaction 2, loaded against `wal`.
@@ -45,7 +44,6 @@ fn newest_staged(store: &MemStore, wal: &FakeWal) -> NewestStagedFile {
     })
 }
 
-/// One store holding `bytes` as transaction 2.
 fn holding(bytes: &[u8]) -> MemStore {
     let store = MemStore::new();
     crate::conformance::block_on(put(&store, 2, bytes));

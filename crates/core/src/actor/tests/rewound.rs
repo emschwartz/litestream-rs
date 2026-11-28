@@ -40,7 +40,6 @@ fn a_staged_snapshot_of_a_rewound_database_is_uploaded_after_a_restart() {
     );
     let dropped_before = rig.staging.deleted().len();
 
-    // The process stops here, before the upload.
     let mut next = Actor::new(cfg());
     let boot = rig.tick(&mut next, T0 + 3);
     assert_eq!(

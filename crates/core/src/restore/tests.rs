@@ -20,6 +20,7 @@ use crate::store::WriteMode;
 use crate::store::{StoreOp, Upload};
 
 mod tail;
+mod window;
 
 fn txid(n: u64) -> Txid {
     Txid::new(n).unwrap()
@@ -238,12 +239,9 @@ fn a_checksum_chain_break_is_reported_and_publishes_nothing() {
     assert_eq!(sink.published(), None);
 }
 
-/// Review: an overlapping file's pre-apply checksum cannot be compared, so only
-/// the database's own checksum after the last file can catch a tracked chain
-/// whose pages do not add up. Go's restore checks it (the merged snapshot's
-/// post-apply, ltx decoder.go Close) and PLAN.md says the rolling checksum is
-/// verified before the rename; here the restore publishes a database whose
-/// checksum is not the one Restored::post_apply reports.
+/// An overlapping file's pre-apply checksum cannot be compared, so only the database's own
+/// checksum after the last file can catch a chain whose pages do not add up. Go checks it (ltx
+/// decoder.go Close) and PLAN.md says it is verified before the rename.
 #[test]
 fn an_overlapping_file_whose_pages_miss_its_post_apply_is_rejected() {
     let ps = size(512);
@@ -549,8 +547,8 @@ fn a_store_error_other_than_not_found_ends_the_restore_without_retry() {
 
 /// A listing that misses a file a writer was putting in place (a directory read racing a
 /// rename on a file replica) shows a gap the replica does not have. Seen on the LazyFS rig:
-/// "gap: the history reaches 0bf8 and resumes at 0bfa" while 0bf9 was being uploaded; the
-/// same restore run again a moment later succeeded. A gap plans again on a fresh listing.
+/// "gap: the history reaches 0bf8 and resumes at 0bfa" while 0bf9 was uploading. A gap plans
+/// again on a fresh listing.
 #[test]
 fn a_gap_from_a_listing_that_raced_a_writer_is_listed_again() {
     let store = Wrapped::new(four_file_replica());
@@ -978,10 +976,9 @@ fn a_sink_that_cannot_reset_ends_the_restore() {
     assert_eq!(sink.published(), None);
 }
 
-/// The one slow test (seconds): a snapshot must hold every page, so crossing
-/// the lock page means encoding and decoding a gigabyte of 512-byte pages.
-/// Page size 512 puts the lock page at 2,097,153: a database of 2,097,154
-/// pages crosses it, and the snapshot holds every page but that one.
+/// The one slow test (seconds): a snapshot holds every page, so crossing the lock page means
+/// a gigabyte of 512-byte pages. At that size the lock page is 2,097,153, and a database of
+/// 2,097,154 pages crosses it; the snapshot holds every page but that one.
 #[test]
 fn the_lock_page_is_never_written_and_reads_as_zeros() {
     let ps = size(512);
@@ -1326,4 +1323,156 @@ fn a_step_opens_at_most_sixteen_files() {
         };
         assert_eq!(last.header().txids(), range(40, 40));
     });
+}
+
+/// A file of 64 KiB pages that do not compress: one random page, its first byte the page's seed.
+fn incompressible(
+    commit: u32,
+    min: u64,
+    max: u64,
+    pages: impl Iterator<Item = (u32, u8)>,
+) -> Vec<u8> {
+    let ps = size(65536);
+    let mut rng = 0x2545_f491_4f6c_dd1d_u64;
+    let noise: Vec<u8> = (0..ps.bytes()).map(|_| xorshift(&mut rng)).collect();
+    let header = Header::new(HeaderFields {
+        tracked: false,
+        page_size: ps,
+        commit,
+        txids: range(min, max),
+        timestamp: Timestamp::from_unix_millis(i64::try_from(max).unwrap() * 1000),
+        pre_apply: None,
+        wal: None,
+        node_id: 0,
+    })
+    .unwrap();
+    let mut encoder = Encoder::new(Vec::new(), header).unwrap();
+    for (pgno, seed) in pages {
+        let mut page = noise.clone();
+        page[0] = seed;
+        encoder
+            .write_page(PageNo::new(pgno, ps).unwrap(), &page)
+            .unwrap();
+    }
+    encoder.finish(None).unwrap().0
+}
+
+/// Pages of the floor's size: a base big enough to look for a whole copy after it.
+const BIG: u32 = 260;
+
+/// A level-9 snapshot, a one-page change, the level-0 file at 3 (`third`, pages of seed 3), and
+/// a one-page change after it; returns the store and the size of each file in order.
+fn whole_copy_replica(third: impl Iterator<Item = u32>) -> (MemStore, [u64; 4]) {
+    let store = MemStore::new();
+    let files = [
+        (9, 1, incompressible(BIG, 1, 1, (1..=BIG).map(|p| (p, 1)))),
+        (0, 2, incompressible(BIG, 2, 2, [(5, 2)].into_iter())),
+        (0, 3, incompressible(BIG, 3, 3, third.map(|p| (p, 3)))),
+        (0, 4, incompressible(BIG, 4, 4, [(9, 4)].into_iter())),
+    ];
+    let mut sizes = [0; 4];
+    for ((level, t, bytes), size) in files.iter().zip(&mut sizes) {
+        put(&store, *level, *t, *t, bytes);
+        *size = u64::try_from(bytes.len()).unwrap();
+    }
+    assert!(
+        sizes[0] >= crate::plan::WHOLE_BASE_MIN_BYTES,
+        "the base reaches the floor"
+    );
+    (store, sizes)
+}
+
+/// The seed of every page of the database the replica above restores to at 4.
+fn whole_copy_seeds(db: &Database) -> Vec<u8> {
+    let mut want = vec![3; usize::try_from(BIG).unwrap()];
+    want[8] = 4;
+    assert_eq!(seeds(db), want);
+    want
+}
+
+#[test]
+fn a_whole_database_copy_after_the_snapshot_is_the_start_and_nothing_before_it_is_read() {
+    let (store, sizes) = whole_copy_replica(1..=BIG);
+    let (result, sink) = run(&store, RestoreTarget::Txid(txid(4)));
+    let restored = result.unwrap();
+    whole_copy_seeds(&sink.published().unwrap());
+    assert_eq!(restored.bytes_read(), sizes[2] + sizes[3]);
+    assert_eq!(restored.files(), 2);
+    assert_eq!(restored.reached(), txid(4));
+}
+
+#[test]
+fn a_large_file_missing_a_page_is_not_a_start_and_costs_only_the_bytes_up_to_the_gap() {
+    let (store, sizes) = whole_copy_replica((1..=BIG).filter(|&p| p != 100));
+    let (result, sink) = run(&store, RestoreTarget::Txid(txid(4)));
+    let restored = result.unwrap();
+    let db = sink.published().unwrap();
+    let mut want = vec![3; usize::try_from(BIG).unwrap()];
+    want[99] = 1;
+    want[8] = 4;
+    assert_eq!(seeds(&db), want);
+    assert_eq!(restored.files(), 4);
+    let listed: u64 = sizes.iter().sum();
+    let wasted = restored.bytes_read() - listed;
+    assert!(
+        wasted > 0 && wasted < sizes[2] / 2,
+        "{wasted} of {}",
+        sizes[2]
+    );
+}
+
+#[test]
+fn a_large_file_missing_its_last_page_is_read_through_and_not_a_start() {
+    let (store, sizes) = whole_copy_replica(1..BIG);
+    let (result, sink) = run(&store, RestoreTarget::Txid(txid(4)));
+    let restored = result.unwrap();
+    let mut want = vec![3; usize::try_from(BIG).unwrap()];
+    want[usize::try_from(BIG - 1).unwrap()] = 1;
+    want[8] = 4;
+    assert_eq!(seeds(&sink.published().unwrap()), want);
+    assert_eq!(restored.bytes_read(), sizes.iter().sum::<u64>() + sizes[2]);
+}
+
+#[test]
+fn a_whole_copy_whose_header_disagrees_with_its_name_is_rejected() {
+    let (store, _) = whole_copy_replica(1..=BIG);
+    put(
+        &store,
+        0,
+        3,
+        3,
+        &incompressible(BIG, 2, 3, (1..=BIG).map(|p| (p, 3))),
+    );
+    let (result, sink) = run(&store, RestoreTarget::Txid(txid(4)));
+    let (at, fault) = file_fault(result);
+    assert_eq!(at, key(0, 3, 3));
+    assert!(
+        matches!(fault, FileFault::RangeMismatch { header } if header == range(2, 3)),
+        "{fault:?}"
+    );
+    assert!(sink.published().is_none());
+}
+
+#[test]
+fn whole_pages_run_from_one_with_none_missing_and_skip_the_lock_page() {
+    let ps = size(512);
+    let page = |n| PageNo::new(n, ps).unwrap();
+    let mut pages = WholePages::default();
+    assert!(pages.reach(DbPages::EMPTY, ps));
+    assert!(!pages.take(page(2), ps), "page 1 comes first");
+    assert!(pages.take(page(1), ps));
+    assert!(!pages.take(page(3), ps), "page 2 is missing");
+    assert!(pages.take(page(2), ps));
+    assert!(pages.reach(DbPages::new(2), ps));
+    assert!(!pages.reach(DbPages::new(3), ps));
+    let lock = lsr_ltx::lock_page(ps);
+    let mut pages = WholePages {
+        last: Some(page(lock - 1)),
+    };
+    assert!(
+        pages.reach(DbPages::new(lock), ps),
+        "the lock page is never held"
+    );
+    assert!(pages.take(page(lock + 1), ps));
+    assert!(pages.reach(DbPages::new(lock + 1), ps));
 }

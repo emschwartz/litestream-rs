@@ -208,6 +208,7 @@ const SETS: &[(&str, &str)] = &[
         "rust.max-unreplicated-age",
         "`Config.max_unreplicated_age`.",
     ),
+    ("rust.snapshot-read-limit", "`Config.snapshot_read_limit`."),
 ];
 
 fn sets(tag: &str, name: &str) -> Option<String> {

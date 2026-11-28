@@ -71,8 +71,6 @@ pub(super) const NAPKIN: &str = "napkin (written before timing):
     page cache at about 2 GB/s (0.5 s), one GET per file at about 1 ms each: floor about 1.5 s;
     peak memory: a streaming decoder needs a few MiB, one buffered file needs its size";
 
-// ---- snapshot-impact (issue 315): what a full copy does to an application beside it ----
-
 /// The database: 16 GiB, twice the 8 GiB box's memory (4,194,304 pages, 16,777,216 rows).
 pub(super) const IMPACT_DB_MIB: u64 = 16 * 1024;
 /// The hot set: 1 GiB of leaf pages, one row each (262,144 pages), a seventh of the memory.
@@ -127,7 +125,7 @@ pub(super) struct ArmDef {
 /// the paced arm takes half the rate B's calibration copy read at (a quarter and an eighth were
 /// dropped before any counted run: see the frame's last paragraph);
 /// [`read-twice`] is the known-bad control and must lose to B clearly.
-pub(super) const ARMS: [ArmDef; 5] = [
+pub(super) const ARMS: [ArmDef; 7] = [
     ArmDef {
         label: "A",
         patch: None,
@@ -147,9 +145,21 @@ pub(super) const ARMS: [ArmDef; 5] = [
         idle: false,
     },
     ArmDef {
-        label: "fadvise",
-        patch: Some("fadvise-dontneed"),
-        pace_divisor: None,
+        label: "pace-1/4",
+        patch: Some("read-pace"),
+        pace_divisor: Some(4),
+        idle: false,
+    },
+    ArmDef {
+        label: "pace-1/8",
+        patch: Some("read-pace"),
+        pace_divisor: Some(8),
+        idle: false,
+    },
+    ArmDef {
+        label: "pace-1/16",
+        patch: Some("read-pace"),
+        pace_divisor: Some(16),
         idle: false,
     },
     ArmDef {
@@ -161,7 +171,7 @@ pub(super) const ARMS: [ArmDef; 5] = [
 ];
 
 /// The patches the arms run, each [`crates/compat/bench-patches/<name>.patch`].
-pub(super) const PATCHES: [&str; 3] = ["read-pace", "fadvise-dontneed", "read-twice"];
+pub(super) const PATCHES: [&str; 2] = ["read-pace", "read-twice"];
 
 /// The environment variable the [`read-pace`] patch reads its rate from, in MiB a second.
 pub(super) const PACE_ENV: &str = "LSRBENCH_PACE_MIB_S";
@@ -181,9 +191,6 @@ pub(super) const IMPACT_FRAME: &str = "frame of snapshot-impact (written before 
       passes) still pass through the cache. It helps if the kernel keeps twice-referenced pages (the hottest tenth
       is re-read every few seconds) and the disk queue was the cost; it does little if volume was.
       It costs a copy twice as long, so a read transaction held that much longer.
-    fadvise(DONTNEED) on the pages the copy read (fadvise-dontneed, through SQLite's own descriptor,
-      in runs of 1 MiB) attacks the volume: the copy leaves nothing behind. It also drops hot pages the
-      copy happens to read (about one page in sixteen is hot), which the application must read again.
     read-twice (control): reads every page twice, one full sweep before the copy. It must lose to B
       clearly: if it does not, the harness cannot see this axis and nothing else is believed.
   primary metric: application p99 read latency during the copy (from lsr's start to the snapshot's
@@ -197,7 +204,7 @@ pub(super) const IMPACT_FRAME: &str = "frame of snapshot-impact (written before 
     times B's. A remedy below the bar on p99 but above it on copy time trades a longer read
     transaction for latency and is reported as that trade, with the WAL it grew.
   arms: A (no copy), B (lsr takes the boot snapshot of an empty replica), pace-1/2,
-    fadvise, read-twice; A is also run against itself (the gate). Rounds: one run of every
+    read-twice; A is also run against itself (the gate). Rounds: one run of every
     arm per round, the order rotated each round, cold page cache before every run (drop_caches), the
     hot set warmed and referenced twice, MinIO emptied after. A's window is as long as the copy of B's
     calibration run. The rates of the paced arms are fixed from that calibration run and recorded.
@@ -220,9 +227,6 @@ pub(super) const IMPACT_FRAME: &str = "frame of snapshot-impact (written before 
     paced copy: wall time is 34.4 GB / rate, so 2 times B if reading is what B waited on. WAL growth is the application's
       0.1 MB/s times the copy: about 60 MB for a 10 minute copy, small beside the database; the cost of
       throttling at this write rate is time (the read transaction, a stale replica), not disk.
-    fadvise: the copy's cache footprint of the database reads falls from 34.4 GB to about 1 MiB (the
-      staging file and MinIO's writes are not advised); syscall cost 1 call per 256 pages is noise. Prediction: p99 within 2 times A; the hot pages
-      it drops cost a burst of misses at its start.
     read-twice: 3 times the bytes read of B (a full sweep first) and 1.5 to 2 times the copy time;
       p99 not better than B.
   changed before any counted run (2026-11-24): the first calibration on the box (4 dedicated cores,
@@ -234,6 +238,16 @@ pub(super) const IMPACT_FRAME: &str = "frame of snapshot-impact (written before 
     the gate is 6 pairs, rounds are 4 to 6, and the copy limit is 60 minutes. Fewer rounds mean wider
     intervals; the gate still stops the run if the box cannot see the SESOI. Only calibration runs
     (unmeasured) had happened; no arm's counted number was seen before this change.
+  changed for the rate-cap run (2026-11-27; the page-cache advice measured no benefit, see docs/decisions/D298.md
+    on claude/snapshot-cache, and is not in the engine): the arms are A, B and the paced arms pace-1/2, 1/4,
+    1/8 and 1/16 (--arms), 10 rounds (--rounds 10) after a passing gate, on a 4 GiB dedicated box with an 8 GiB
+    database and a 512 MiB hot set; a second invocation puts the hot set near the box's free memory (--hot-mib)
+    to see whether eviction shows at all. Metrics read: application p50 and p99 and commit p50 and p99 during
+    the copy, WAL growth, copy wall time, application and system refaults. The bar above stands.
+    The first A/A gate on the box failed (half width 51%): the application's read lateness is its
+    timer wake-up (p50 0.07 ms, p99 0.07 to 0.24 ms between idle runs, measured with a sleep loop), so the
+    reader and writer threads now busy-wait their last 300 microseconds before a due time. This takes
+    about a core of the four in every arm; the copy competes with it for CPU.
   confounders accepted and named: MinIO runs on the same disk and in the same page cache (its writes
     of the replica are part of what a copy does here, in every arm that copies); one machine, one disk
     type; a hot set with a 90/10 skew, not the embedder's; uniform random reads within each tier.

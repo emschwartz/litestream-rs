@@ -45,7 +45,6 @@ pub const TAIL_COMMITS: u32 = 40;
 /// a level-1 compaction (every 30 s) and a level-2 one (every 5 minutes) come due inside it.
 pub const TAIL_GAP: Duration = Duration::from_secs(10);
 
-/// Pages each of the tail's commits writes.
 const TAIL_COMMIT_PAGES: u8 = 2;
 
 /// The most frames the WAL may hold once one of the tail's commits reached the replica, with
@@ -62,7 +61,6 @@ pub fn wal_bound() -> u32 {
 /// it, whatever the clock says: a backstop for an engine that ticks without time passing.
 const TAIL_TICKS: u32 = 2_000;
 
-/// Files put in the recorder's events from `from` on.
 fn puts_since(events: &[RecorderEvent], from: usize) -> u64 {
     let puts = events
         .iter()
@@ -76,14 +74,11 @@ fn puts_since(events: &[RecorderEvent], from: usize) -> u64 {
 /// the commit's (module doc).
 #[derive(Debug)]
 pub(super) struct Before {
-    /// The replica's newest transaction then.
     frontier: Option<Txid>,
-    /// Each file staged then, with the digest of its bytes.
     staged: Vec<(FileKey, u64)>,
 }
 
 impl Before {
-    /// From the replica's newest transaction and the staged files with their digests.
     pub(super) const fn new(frontier: Option<Txid>, staged: Vec<(FileKey, u64)>) -> Self {
         Self { frontier, staged }
     }
@@ -159,7 +154,6 @@ impl Runner {
         );
     }
 
-    /// What one tick may cost, from the run's configuration.
     fn allowance(&self) -> Allowance {
         let limits = self.limits();
         Allowance {
@@ -205,6 +199,19 @@ impl Runner {
                     .saturating_mul(self.allowance().written(crate::cost::Store::Staging)),
             );
             within(Bound::BarrierWaitMicros, held.wait_micros, limit)?;
+            // Each barrier's PASSIVE may copy twice the run's passive threshold, and never under
+            // 64 frames (docs/decisions/D307.md), plus one commit of the application's made
+            // inside the tick (counted before it lands); never the backlog of a snapshot that
+            // held checkpoints back.
+            let per_barrier = u64::from(super::PASSIVE_PAGES)
+                .saturating_mul(2)
+                .max(64)
+                .saturating_add(self.max_tx_pages.max(self.in_tick_pages));
+            within(
+                Bound::BarrierCopiedFrames,
+                held.copied_frames,
+                held.holds.saturating_mul(per_barrier),
+            )?;
         }
         if done {
             within(Bound::BarrierHeldAfterTick, u64::from(held.open), 0)?;
@@ -223,7 +230,6 @@ impl Runner {
         Spare::boot(&Profile::DEFAULT, (files, bytes))
     }
 
-    /// The newest transaction the bucket holds at any level.
     fn replica_frontier(&self) -> Option<Txid> {
         self.w
             .remote_raw
@@ -233,7 +239,6 @@ impl Runner {
             .max()
     }
 
-    /// Every staged file at any level, with the digest of its bytes.
     fn staged_digests(&self) -> Vec<(FileKey, u64)> {
         self.w
             .staged_files()
@@ -287,7 +292,6 @@ impl Runner {
             .saturating_add(Duration::from_secs(1))
     }
 
-    /// The healthy tail (module doc).
     pub(super) fn healthy_tail(&mut self) -> Result<(), Violation> {
         self.tail = true;
         // A level-9 snapshot goes up while the tail commits: every run's tail meets a job

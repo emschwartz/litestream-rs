@@ -19,7 +19,6 @@ use crate::workload::SplitMix;
 pub(super) const PAGE_SIZE: u32 = 4096;
 /// Bytes in a row's payload: four rows fill a page.
 const PAYLOAD: usize = 1000;
-/// Rows a preload commits at once.
 const PRELOAD_CHUNK: u32 = 5000;
 /// Commits of a large preload between two WAL truncations (about 200 MiB of WAL).
 const CHECKPOINT_EVERY_CHUNKS: u32 = 40;

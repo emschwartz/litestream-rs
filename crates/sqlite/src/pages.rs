@@ -169,7 +169,6 @@ impl FileHandle {
         }
     }
 
-    /// The file's length in bytes.
     #[expect(unsafe_code, reason = "a call through the VFS's xFileSize")]
     fn size(&self) -> Result<u64, c_int> {
         let mut size: i64 = 0;

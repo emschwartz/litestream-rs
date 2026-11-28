@@ -39,6 +39,10 @@ enum Situation {
     SnapshotRequested,
     /// Enough frames are waiting that the engine's next tick runs a PASSIVE checkpoint.
     PassiveDue,
+    /// More frames are waiting than the barrier's PASSIVE may copy (64 at the run's passive
+    /// threshold): the next tick moves the read to the WAL's end under the barrier, renewing it,
+    /// and copies the backlog with no barrier held.
+    BacklogDue,
     /// The TRUNCATE threshold is low, a reader held off the PASSIVE checkpoint that tried first,
     /// and the reader is gone: the next tick runs the barrier's PASSIVE and then the TRUNCATE,
     /// whose call no lock keeps the application's commit out of.
@@ -57,6 +61,14 @@ impl Situation {
             Self::PassiveDue => {
                 let mut ops = vec![Op::Tick];
                 ops.extend((0..6).map(|_| commit(2)));
+                ops
+            }
+            Self::BacklogDue => {
+                // Settled first and the commits synced by two ticks of their own (a tick syncs
+                // at most the run's cap), so the armed tick is the checkpoint's.
+                let mut ops = vec![Op::Tick, Op::Settle];
+                ops.extend((0..36).map(|_| commit(2)));
+                ops.extend([Op::Tick, Op::Tick]);
                 ops
             }
             Self::TruncateDue => vec![
@@ -89,7 +101,7 @@ impl Situation {
                 Op::Tick,
                 Op::Tick,
             ],
-            Self::SnapshotRequested | Self::PassiveDue | Self::TruncateDue => {
+            Self::SnapshotRequested | Self::PassiveDue | Self::BacklogDue | Self::TruncateDue => {
                 vec![Op::Tick, Op::Tick]
             }
         }
@@ -99,7 +111,9 @@ impl Situation {
     fn truncate_pages(self) -> Option<NonZeroU32> {
         match self {
             Self::TruncateDue => NonZeroU32::new(2),
-            Self::SnapshotRequested | Self::PassiveDue | Self::TornWalBoot => None,
+            Self::SnapshotRequested | Self::PassiveDue | Self::BacklogDue | Self::TornWalBoot => {
+                None
+            }
         }
     }
 }
@@ -161,6 +175,7 @@ const fn situation(call: SourceOp, action: Action) -> Situation {
         (SourceOp::ReadPage, _) => Situation::SnapshotRequested,
         (SourceOp::Checkpoint, Action::Commit) => Situation::TruncateDue,
         (SourceOp::PageCount, _) => Situation::TornWalBoot,
+        (SourceOp::RenewRead, _) => Situation::BacklogDue,
         (
             SourceOp::Open
             | SourceOp::Len
@@ -226,11 +241,8 @@ fn point(call: SourceOp, action: Action) -> Coverage {
 
 /// One scenario for every app action point the gate requires (`docs/decisions/D256.md`).
 ///
-/// A random history reaches a point only when it arms the app's action in the one tick that
-/// makes the engine's call, so the rarest points ran about once per 10,000 seeds and dozens ran
-/// 1 to 3 times per 1,000: a soak shorter than the nightly left some at zero by chance. Every
-/// point is the same kind of mark, so every one has a scenario, and a new call or action has
-/// one from the start.
+/// Random histories reach the rarest points too seldom (see the module docs), so every point
+/// has a scenario, and a new call or action has one from the start.
 #[must_use]
 pub fn coverage() -> Vec<Coverage> {
     SOURCE_OPS

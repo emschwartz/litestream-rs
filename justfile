@@ -2,7 +2,7 @@
 default: check
 
 # The land gate: format, lints, tests. A branch lands only when this is green.
-check: fmt-check clippy test test-opt doctest features upstream-test-map-fresh evidence-fresh planted-bugs-names planted-bugs-judge-test
+check: fmt-check clippy test test-opt doctest features upstream-test-map-fresh evidence-fresh planted-bugs-apply planted-bugs-names planted-bugs-judge-test
 
 fmt-check:
     cargo fmt --all -- --check
@@ -174,9 +174,8 @@ shuttle iterations="200":
         cargo test --locked -p lsr-replica --test replica shuttle::
 
 # Every planted-bug patch, and every benchmark arm's patch (crates/compat/bench-patches), still
-# applies to the tree. Seconds; nightly in CI, not in check, so a
-# moved line near a planted site does not block a land. Whether the planted defect is caught is
-# `planted-bugs`'s question.
+# applies to the tree. Seconds, no build; in check, so CI fails the pull request that moves a line
+# a patch needs. Whether the planted defect is caught is `planted-bugs`'s question.
 planted-bugs-apply:
     #!/usr/bin/env bash
     set -euo pipefail

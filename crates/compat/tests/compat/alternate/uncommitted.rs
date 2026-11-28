@@ -58,7 +58,6 @@ pub struct Tail {
     pub taken: State,
 }
 
-/// Both copies of the wal-index header, read through the held descriptor.
 fn headers(held: &Held) -> Option<[u8; 2 * INDEX_HEADER]> {
     let mut bytes = [0; 2 * INDEX_HEADER];
     held.shm().read_exact_at(&mut bytes, 0).ok()?;

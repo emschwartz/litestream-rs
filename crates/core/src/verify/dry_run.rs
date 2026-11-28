@@ -81,7 +81,6 @@ impl DatabaseSink for DigestSink<'_> {
     }
 }
 
-/// A store that counts the files opened and bytes returned by reads.
 struct Counting<'a, S> {
     inner: &'a S,
     files: AtomicUsize,

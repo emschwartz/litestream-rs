@@ -12,13 +12,12 @@ default = ["bundled"]
 # SQLite compiled from libsqlite3-sys's bundled source. Turn it off (`default-features = false`)
 # to link the application's own SQLite, which must be one of the builds lsr-sqlite lists.
 bundled = ["lsr-sqlite/bundled"]
-# `Replicator::app_connection` on a rusqlite connection (any rusqlite from 0.39 to 0.43).
+# `Replicator::app_connection` on a rusqlite connection.
 rusqlite = ["dep:rusqlite", "lsr-sqlite/rusqlite"]
-# `Runtime::fake`: a clock that moves when a test says so, and a park that waits on it.
+# `Runtime::fake`: a clock that moves only when a test says so.
 testing = ["lsr-core/testing"]
-# Test builds only (`just check` turns it on through --all-features): every thread `stack::spawn`
-# starts gets half its shipped stack, so the suites prove the shipped size has twice the depth
-# they reach. A release build refuses it.
+# Test builds only: threads get half their shipped stack, so the suites prove 2x headroom.
+# A release build refuses it.
 test-half-stack = []
 
 [dependencies]
@@ -26,14 +25,15 @@ lsr-core.workspace = true
 lsr-ltx.workspace = true
 lsr-sqlite.workspace = true
 lsr-store-fs.workspace = true
+percent-encoding.workspace = true
 rusqlite = { workspace = true, optional = true }
 thiserror.workspace = true
 
 [dev-dependencies]
 lsr-replica = { workspace = true, features = ["rusqlite", "testing"] }
+proptest.workspace = true
 tempfile.workspace = true
 
-# Schedule exploration, compiled only under `--cfg shuttle` (`just shuttle`).
 [target.'cfg(shuttle)'.dev-dependencies]
 shuttle.workspace = true
 

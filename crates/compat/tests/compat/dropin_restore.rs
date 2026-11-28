@@ -54,7 +54,6 @@ const FLAGS: &[(u32, &str)] = &[
     (1, "-no-expand-env"),
 ];
 
-/// The positional arguments.
 const SOURCES: &[(u32, &str)] = &[
     (4, "@DB@"),
     (4, "@URL@"),
@@ -148,7 +147,6 @@ fn failure(stderr: &str, stdout: &str) -> Failure {
     Failure::Other
 }
 
-/// The paths one side's directory holds.
 struct Layout {
     dir: PathBuf,
     config: PathBuf,
@@ -215,7 +213,6 @@ fn line(tokens: &[&str], at: &Layout, replica: &Path, txid: &str) -> Vec<String>
     out
 }
 
-/// One side's exit code, standard error and standard output.
 type Ran = (Option<i32>, String, String);
 
 fn run(binary: &Path, args: &[String], dir: &Path) -> Ran {
@@ -313,7 +310,6 @@ struct Rig {
     latest: String,
 }
 
-/// What one side did: its run and its directory afterwards.
 struct Side {
     ran: Ran,
     after: BTreeMap<String, String>,
@@ -326,7 +322,6 @@ fn starting(rig: &Rig, case: &Case) -> BTreeMap<String, String> {
     after(dir.path())
 }
 
-/// Both sides' runs of one case, each in a directory of its own, and the line run.
 fn answers(rig: &Rig, case: &Case) -> (Vec<String>, Side, Side) {
     let replica = rig.staged.replica();
     let side = |binary: &Path| {
@@ -342,7 +337,6 @@ fn answers(rig: &Rig, case: &Case) -> (Vec<String>, Side, Side) {
     (args, go, lsr)
 }
 
-/// What a run ended as, for the tally.
 fn ending(side: &Side) -> String {
     let (code, stderr, stdout) = &side.ran;
     if *code != Some(0) {
@@ -359,7 +353,6 @@ fn ending(side: &Side) -> String {
     }
 }
 
-/// Compares one case and names how Go's run ended.
 fn compare(rig: &Rig, case: &Case) -> Result<String, TestCaseError> {
     let (args, go, lsr) = answers(rig, case);
     let ended = ending(&go);
@@ -451,7 +444,6 @@ const AIMED: &[(&str, &[&str], Option<Before>)] = &[
     ),
 ];
 
-/// Cases per aimed ending.
 const AIMED_CASES: u32 = 6;
 
 /// Cases for one aimed line: its tokens, the output as given or any, the database any.

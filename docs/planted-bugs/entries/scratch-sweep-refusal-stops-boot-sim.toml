@@ -1,6 +1,6 @@
 # As scratch-sweep-refusal-stops-boot, against the simulator's run.
 name = "scratch-sweep-refusal-stops-boot-sim"
-fix = "4d442fe"
+fix = "23671f6fb"
 package = "lsr-sim"
 test_bin = "sim"
 patch = "scratch-sweep-refusal-stops-boot"

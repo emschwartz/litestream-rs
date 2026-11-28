@@ -30,8 +30,8 @@
 //!   bundles; with default features off the application links its own, which must be one of the
 //!   builds `lsr-sqlite` lists as verified, or [`Replicator::start`] refuses it
 //!   ([`StartError::SqliteBuild`], `docs/decisions/D200.md`).
-//! - Each long read the application starts holds a [`ReaderGuard`] from [`Replicator::long_reader`];
-//!   under [`ReaderTracking::Tracked`] no TRUNCATE checkpoint runs while one lives.
+//! - Each long read the application starts may hold a [`ReaderGuard`] from
+//!   [`Replicator::long_reader`]; no TRUNCATE checkpoint runs while one lives.
 //! - [`Replicator::health`] can be read at any time: one lock, no I/O.
 //! - [`Replicator::stop`] runs at shutdown, after the application's connections close, and reports
 //!   whether everything committed reached the replica ([`StopOutcome`]). The replicator's own
@@ -131,6 +131,7 @@ mod health;
 #[doc(hidden)]
 pub mod local;
 mod meta;
+mod pace;
 mod readers;
 mod replicator;
 mod restore;
@@ -141,7 +142,7 @@ pub mod stack;
 mod store;
 mod thread;
 
-pub use config::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
+pub use config::{Config, NonZeroDuration, SyncLimits};
 pub use error::{RestoreError, StartError, TrustLocalError};
 pub use events::{ChannelSink, Event, EventReceiver, EventSink, TrustRecordUnusable};
 #[doc(hidden)]
@@ -173,7 +174,7 @@ pub use lsr_core::{
     InventoryError, L0Retention, Maintenance, MaxUnreplicatedAge, NoPlan, OtherWriter, PlanOutcome,
     Report, Response, Responses, RestoreError as EngineRestoreError, RestoreOptions, RestoreTarget,
     Restored, Severity, SinkOp, SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall, StopCause,
-    StoreError, Task, Trip, VerifyError, WhyBlocked, WorkCounts,
+    StoreError, Task, Trip, Unfinished, VerifyError, WhyBlocked, WorkCounts,
 };
 pub use lsr_ltx::{DbChecksum, Timestamp, Txid};
 pub use lsr_sqlite::{ConnectionSetup, Refusal, SetupError, ffi};

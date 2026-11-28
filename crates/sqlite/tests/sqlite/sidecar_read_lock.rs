@@ -224,7 +224,6 @@ fn read_marks_held(db: &Path) -> Vec<u64> {
     marks
 }
 
-/// A WAL-mode database with the application's table, every connection closed.
 fn create(db: &Path, page_size: u32) {
     let conn = Connection::open(db).unwrap();
     conn.pragma_update(None, "page_size", page_size).unwrap();
@@ -312,7 +311,6 @@ fn the_apps_autocheckpoint_stops_at_a_read_lock_in_another_process() {
     assert_eq!((run.busy, run.log, run.checkpointed), (false, last, last));
 }
 
-/// Every snapshot the ticks from the `from`th on decided, with its cause.
 fn snapshots_since(rig: &Rig<Sqlite>, from: usize) -> Vec<Option<SnapshotCause>> {
     rig.ticks()
         .iter()

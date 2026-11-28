@@ -154,4 +154,4 @@ pub use verify::{
     Compared, Depth, Finding, LevelSummary, LivePages, MAX_FINDINGS, Report, Severity, Verified,
     VerifyError, verify, verify_against,
 };
-pub use witness::{ByteTally, Witnessed, Witnesses};
+pub use witness::{Witnessed, Witnesses};

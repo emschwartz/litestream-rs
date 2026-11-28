@@ -38,8 +38,8 @@
 //!
 //! A token outlives its upload in [`Sent`]: once the replica has acknowledged this
 //! process's put of a file, the token says what the replica holds under that key, and the
-//! level-1 compaction that reads the staged copy compares it with the token where it once
-//! read the replica's copy back (`crate::maintain`, `docs/decisions/D236.md`).
+//! level-1 compaction that reads the staged copy compares it with the token instead of
+//! reading the replica's copy back (`crate::maintain`, `docs/decisions/D236.md`).
 
 use std::collections::BTreeMap;
 use std::io::{Read, Seek};
@@ -52,7 +52,7 @@ use crate::fault::{BugSite, Fault};
 use crate::layout::FileKey;
 use crate::pages::Seeding;
 use crate::recover::{BootWal, Compare, NewestStagedFile, Origin, Scanned};
-use crate::store::{ObjectStore, ReadLen, StoreError};
+use crate::store::{ObjectStore, ReadLen, Seeing, Seen, StoreError};
 use crate::upload::StagedPages;
 
 /// The most tokens held for pending staged files; at about 40 bytes a token
@@ -62,146 +62,10 @@ use crate::upload::StagedPages;
 /// keeps the frames), and the boot pass witnesses no more than this many.
 pub(crate) const MAX_WITNESSED: usize = 4096;
 
-/// How much of a file one store read asks for during the boot pass.
 const READ: ReadLen = ReadLen::CHUNK;
 
-/// The length of a byte stream and a digest of its raw bytes, kept as the stream passes.
-/// The file checksum covers an LTX file's decompressed content, not its LZ4 framing, so two
-/// files can verify to the same checksum and still differ in bytes; this tells them apart.
-///
-/// The digest reads the stream as little-endian words dealt round-robin to four independent
-/// multiply-and-rotate lanes, so a core runs about eight bytes a cycle where a byte-at-a-time
-/// FNV-1a runs at its multiply latency, one byte in four or five cycles (measured at
-/// 0.75 GB/s against more than 5 GB/s, `docs/decisions/D210.md`). The words are laid out by
-/// position in the stream, so any split of the same bytes into `add` calls gives the same
-/// digest; up to 31 bytes wait in `pending` for the next call. It is an equality check
-/// between two reads of one file, not a defence against an adversary, and it is never stored.
-///
-/// It is public for one use outside the engine: a store that lets go of bytes it was handed
-/// keeps a tally of them, and [`crate::Reread`] gives the bytes back only when a second read
-/// of them tallies the same.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ByteTally {
-    size: u64,
-    lanes: [u64; LANES],
-    pending: [u8; BLOCK],
-}
-
-/// Independent hash lanes; one block is a word for each.
-const LANES: usize = 4;
-/// Bytes of one word.
-const WORD: usize = 8;
-/// Bytes one round consumes.
-const BLOCK: usize = LANES * WORD;
-/// The stream length's low bits that count the bytes held back: a block is 32 bytes.
-const HELD_MASK: u64 = 0x1f;
-const _: () = assert!(BLOCK == 32);
-/// The lanes' start values: the first digits of pi, as in several well-known hashes.
-const SEEDS: [u64; LANES] = [
-    0x243f_6a88_85a3_08d3,
-    0x1319_8a2e_0370_7344,
-    0xa409_3822_299f_31d0,
-    0x082e_fa98_ec4e_6c89,
-];
-/// An odd multiplier with well-spread bits.
-const MULTIPLIER: u64 = 0x9e37_79b9_7f4a_7c15;
-
-impl Default for ByteTally {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ByteTally {
-    /// No bytes yet.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            size: 0,
-            lanes: SEEDS,
-            pending: [0; BLOCK],
-        }
-    }
-
-    /// The bytes held back since the last full block: the stream's length modulo a block.
-    fn held(&self) -> usize {
-        usize::try_from(self.size & HELD_MASK).unwrap_or(0)
-    }
-
-    /// How many bytes were taken in.
-    #[must_use]
-    pub const fn size(&self) -> u64 {
-        self.size
-    }
-
-    /// Takes in the next bytes of the stream.
-    pub fn add(&mut self, bytes: &[u8]) {
-        let held = self.held();
-        self.size = self
-            .size
-            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-        let mut rest = bytes;
-        if held != 0 {
-            let room = BLOCK.saturating_sub(held);
-            let (fill, after) = rest.split_at(room.min(rest.len()));
-            for (slot, byte) in self.pending.iter_mut().skip(held).zip(fill) {
-                *slot = *byte;
-            }
-            if fill.len() < room {
-                return;
-            }
-            self.lanes = round(self.lanes, &self.pending);
-            self.pending = [0; BLOCK];
-            rest = after;
-        }
-        let (blocks, tail) = rest.as_chunks::<BLOCK>();
-        for block in blocks {
-            self.lanes = round(self.lanes, block);
-        }
-        for (slot, byte) in self.pending.iter_mut().zip(tail) {
-            *slot = *byte;
-        }
-    }
-
-    /// The length and the digest, with the held bytes and the length folded in: what two reads
-    /// of one file are compared by, in eight bytes a token instead of the lanes and the buffer.
-    pub(crate) fn seal(&self) -> Sealed {
-        let mut digest = self.size;
-        for lane in self.lanes {
-            digest = (digest ^ lane).wrapping_mul(MULTIPLIER).rotate_left(29);
-        }
-        for byte in self.pending.iter().take(self.held()) {
-            digest = (digest ^ u64::from(*byte))
-                .wrapping_mul(MULTIPLIER)
-                .rotate_left(29);
-        }
-        Sealed {
-            size: self.size,
-            digest,
-        }
-    }
-}
-
-/// One round: a word into each lane.
-fn round(mut lanes: [u64; LANES], block: &[u8; BLOCK]) -> [u64; LANES] {
-    let (words, _) = block.as_chunks::<WORD>();
-    for (lane, word) in lanes.iter_mut().zip(words) {
-        *lane = (*lane ^ u64::from_le_bytes(*word))
-            .wrapping_mul(MULTIPLIER)
-            .rotate_left(31);
-    }
-    lanes
-}
-
-/// A [`ByteTally`] as the token keeps it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Sealed {
-    size: u64,
-    digest: u64,
-}
-
 /// Proof that a staged file's bytes were made by this process or matched the
-/// live WAL at boot: its key, its bytes (length and a digest of them) and its
+/// live WAL at boot: its key, its bytes (a [`Seen`]: length and CRC-64) and its
 /// trailer's file checksum.
 ///
 /// The fields are private and the constructor is this crate's, so a value
@@ -209,7 +73,7 @@ pub(crate) struct Sealed {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Witnessed {
     key: FileKey,
-    bytes: Sealed,
+    bytes: Seen,
     checksum: FileChecksum,
     /// The file's header timestamp: when it was staged, the clock fail-stop counts the oldest
     /// pending commit from (`crate::failstop`).
@@ -221,13 +85,13 @@ impl Witnessed {
     /// wrote them, `checksum` the encoder's trailer checksum.
     pub(crate) fn made_here(
         key: FileKey,
-        bytes: ByteTally,
+        bytes: Seeing,
         checksum: FileChecksum,
         stamp: Timestamp,
     ) -> Self {
         Self {
             key,
-            bytes: bytes.seal(),
+            bytes: bytes.seen(),
             checksum,
             stamp,
         }
@@ -242,7 +106,7 @@ impl Witnessed {
     /// The staged file's length in bytes, as it was when witnessed.
     #[must_use]
     pub(crate) const fn len(&self) -> u64 {
-        self.bytes.size
+        self.bytes.len()
     }
 
     /// The staged file it vouches for.
@@ -263,12 +127,12 @@ impl Witnessed {
 
     /// Whether a read of the file that verified whole, tallied as `bytes` and
     /// ending in `checksum`, read the bytes this token was minted for.
-    pub(crate) fn matches(&self, bytes: ByteTally, checksum: FileChecksum) -> bool {
-        self.matches_sealed(bytes.seal(), checksum)
+    pub(crate) fn matches(&self, bytes: Seeing, checksum: FileChecksum) -> bool {
+        self.matches_seen(bytes.seen(), checksum)
     }
 
-    /// [`Self::matches`] for a tally already sealed.
-    fn matches_sealed(&self, bytes: Sealed, checksum: FileChecksum) -> bool {
+    /// [`Self::matches`] for bytes already taken in whole.
+    fn matches_seen(&self, bytes: Seen, checksum: FileChecksum) -> bool {
         self.bytes == bytes && self.checksum == checksum
     }
 
@@ -276,7 +140,7 @@ impl Witnessed {
     fn of_read(key: FileKey, file: &Decoded) -> Self {
         Self {
             key,
-            bytes: file.bytes.seal(),
+            bytes: file.bytes.seen(),
             checksum: file.checksum,
             stamp: file.header.fields().timestamp,
         }
@@ -293,11 +157,9 @@ impl Witnessed {
             rest = rest.get(used..)?;
         }
         let verified = decoder.finish().ok()?;
-        let mut tally = ByteTally::new();
-        tally.add(bytes);
         Some(Self {
             key,
-            bytes: tally.seal(),
+            bytes: Seen::of(bytes),
             checksum: verified.trailer().file_checksum(),
             stamp: verified.header().fields().timestamp,
         })
@@ -502,7 +364,7 @@ struct StagedRead {
 /// checksum.
 struct Decoded {
     header: Header,
-    bytes: ByteTally,
+    bytes: Seeing,
     checksum: FileChecksum,
 }
 
@@ -689,7 +551,7 @@ async fn walk<S: ObjectStore>(
     mut on_event: impl FnMut(Event<'_>) -> Result<(), Fault>,
 ) -> Result<Option<Decoded>, Fault> {
     let mut decoder = Decoder::new();
-    let mut bytes = ByteTally::new();
+    let mut bytes = Seeing::new();
     let mut offset = 0_u64;
     loop {
         let chunk = match store.read(&key, offset, READ).await {

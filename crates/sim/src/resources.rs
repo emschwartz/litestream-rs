@@ -8,7 +8,9 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, Event, SourceError};
+use lsr_core::{
+    Barrier, CheckpointMode, CheckpointRun, Checkpointer, Event, ReadLockHold, SourceError,
+};
 use lsr_ltx::Timestamp;
 
 use crate::oracle::{Bound, Violation, within};
@@ -31,8 +33,7 @@ pub const WRITE_CHUNK_LIMIT: u64 = (1 << 20) + (1 << 16);
 /// Listing calls one tick may make: ten levels (`Level::ALL`) listed once each, three times
 /// over, so 30. A boot into a brand-new meta directory makes the three: its own listing, the page
 /// size's prefix, and the identity check's restore, which makes one attempt and lists once
-/// (`docs/decisions/D176.md`). Every other boot makes two (the first two). A restore that listed
-/// again on each retry made up to five.
+/// (`docs/decisions/D176.md`). Every other boot makes two (the first two).
 pub const LIST_CALLS_PER_TICK: u64 = 30;
 
 /// What the checkpointer was asked, by mode.
@@ -41,6 +42,7 @@ pub struct CheckpointTally {
     passive: Rc<Cell<u32>>,
     truncate: Rc<Cell<u32>>,
     full: Rc<Cell<u32>>,
+    backlog: Rc<Cell<u32>>,
 }
 
 impl CheckpointTally {
@@ -51,6 +53,7 @@ impl CheckpointTally {
             CheckpointMode::Passive => self.passive.get(),
             CheckpointMode::Truncate => self.truncate.get(),
             CheckpointMode::Full => self.full.get(),
+            CheckpointMode::Backlog => self.backlog.get(),
         }
     }
 
@@ -61,6 +64,7 @@ impl CheckpointTally {
             .get()
             .saturating_add(self.truncate.get())
             .saturating_add(self.full.get())
+            .saturating_add(self.backlog.get())
     }
 }
 
@@ -93,9 +97,15 @@ impl<C: Checkpointer> Checkpointer for CountingCheckpointer<C> {
             CheckpointMode::Passive => &self.tally.passive,
             CheckpointMode::Truncate => &self.tally.truncate,
             CheckpointMode::Full => &self.tally.full,
+            // Not a PASSIVE under the barrier, which the per-tick bound counts: the copy before it.
+            CheckpointMode::Backlog => &self.tally.backlog,
         };
         cell.set(cell.get().saturating_add(1));
         self.inner.checkpoint(mode)
+    }
+
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError> {
+        self.inner.renew_read()
     }
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {

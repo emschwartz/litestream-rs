@@ -58,7 +58,6 @@ fn bytes_at(rig: &Rig, level: Level) -> u64 {
     Rig::files(&rig.remote, level).iter().map(|f| f.size).sum()
 }
 
-/// What a restore to `target` leaves, every page.
 fn restored_pages(store: &MemStore, target: RestoreTarget) -> Vec<Vec<u8>> {
     let sink = MemSink::new();
     block_on(restore(store, target, sink.clone())).unwrap();
@@ -89,7 +88,6 @@ fn the_first_start_reads_each_page_once() {
         u64::from(PAGES - 1),
         "pages the file supplied (page 1 is in the WAL): one read each"
     );
-    // The level-0 file and the snapshot are the only uploads: the database's pages twice.
     let uploaded = bytes_at(&rig, Level::ZERO) + bytes_at(&rig, Level::SNAPSHOT);
     let held: u64 = Rig::files(&rig.remote, Level::ZERO)
         .iter()
@@ -102,7 +100,6 @@ fn the_first_start_reads_each_page_once() {
 
 /// A first start reads nothing of the snapshot's key before it writes it, as Go reads nothing:
 /// the listing it planned from shows every file this engine wrote, so the key holds nothing.
-/// Before, a one-byte read of the key (a not-found GET on S3) went out ahead of every merge.
 #[test]
 fn the_first_start_sends_no_read_ahead_of_the_snapshot() {
     let mut rig = quiet();
@@ -115,7 +112,6 @@ fn the_first_start_sends_no_read_ahead_of_the_snapshot() {
 
 /// A first start moves the database twice, to level 0 and to level 9: the levels between hold
 /// nothing (they start above the snapshot), and the only download is the snapshot's own check.
-/// Before, the level-0 file was carried into levels 1, 2 and 3 (five uploads, two downloads).
 #[test]
 fn the_first_start_uploads_the_database_twice_and_downloads_none() {
     let mut rig = quiet();
@@ -135,7 +131,6 @@ fn the_first_start_uploads_the_database_twice_and_downloads_none() {
         bytes_at(&rig, Level::ZERO) + bytes_at(&rig, Level::SNAPSHOT),
         "every uploaded byte is at level 0 or 9"
     );
-    // The one read is the snapshot's check after it was written.
     let reads = rig.remote.reads.lock().unwrap().clone();
     assert!(
         reads.iter().all(|key| key.level().is_snapshot()),
@@ -239,7 +234,6 @@ fn the_first_snapshot_starts_as_the_first_level_zero_file_is_confirmed() {
     );
 }
 
-/// A config that sends a quarter of a megabyte a tick.
 fn slow() -> ActorConfig {
     ActorConfig {
         upload: UploadConfig {
@@ -310,7 +304,6 @@ fn a_first_start_after_a_restore_does_not_hold_the_levels_or_write_another_snaps
     let mut now = T0;
     let first = written(&mut rig, &mut actor, &mut now, i64::MAX, &mut |_| {});
     assert_eq!(first, vec![0, 9], "the replica the restore starts from");
-    // The restart: no staging, a new engine, and a transaction too big for one slice.
     rig.staging = Counting::default();
     let pages: Vec<_> = (2..=4000).map(|n| (pg(n), noisy(n))).collect();
     rig.wal.append_tx(&pages, nz(4000));
@@ -359,7 +352,6 @@ fn a_refused_first_snapshot_lets_the_levels_run_and_is_retried() {
     assert_eq!(snapshot.key.range().max().get(), 1);
 }
 
-/// The pages the file holds, by its own trailer.
 fn page_count(rig: &Rig, info: &FileInfo) -> u32 {
     let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
     let bytes = block_on(rig.remote.inner.read(&info.key, 0, all)).unwrap();
@@ -409,7 +401,6 @@ fn the_snapshot_of_a_first_start_restores_the_database() {
     assert!(restored_pages(store, RestoreTarget::Txid(first.key.range().max())) == expected(1));
     let instant: CreatedAt = second.created_at().unwrap();
     assert!(restored_pages(store, RestoreTarget::AsOf(instant.at())) == expected(1));
-    // The snapshot alone: a replica holding nothing else restores the first state.
     let others: Vec<FileKey> = Level::ALL
         .iter()
         .flat_map(|level| Rig::files(&rig.remote, *level))

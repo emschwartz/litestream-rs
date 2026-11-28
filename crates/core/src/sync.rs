@@ -41,8 +41,8 @@ use crate::pages::{PageChecksumTable, snapshot_clears};
 use crate::position::{Continuity, LastPage, Position, ReachedEnd, ReadLockHold};
 use crate::publish::Writer;
 use crate::source::{CommittedRead, PageSource, WalSource};
-use crate::store::{ObjectStore, StoreError, Upload, WriteMode};
-use crate::witness::{ByteTally, Witnessed};
+use crate::store::{ObjectStore, Seeing, StoreError, Upload, WriteMode};
+use crate::witness::Witnessed;
 
 /// Go's default cap on the WAL bytes one file covers (`db.go:33-40`).
 const DEFAULT_CAP: u64 = 64 << 20;
@@ -170,10 +170,8 @@ impl PageFrom {
 /// the database grew by that no scanned frame holds ("grown pages": those above
 /// `prev_commit` that the map lacks), which come from the
 /// database file (Go `db.go:2504-2561`).
-///
-/// Every page of a database used to take a list entry of its own (32 bytes, 48 while it was
-/// sorted); the plan is a walk of the map and a counter instead, so it holds nothing that
-/// grows with the database (issue #64).
+/// Walks the map and a counter instead of a list of entries, so nothing it holds grows with the
+/// database (issue #64).
 #[derive(Clone, Copy)]
 pub(crate) struct Plan<'a> {
     map: &'a PageMap,
@@ -368,12 +366,10 @@ impl Start {
         })
     }
 
-    /// The commit size the file chains on from: none for a snapshot.
     fn prev_commit(&self) -> Option<u32> {
         self.held.map(|held| held.commit().get())
     }
 
-    /// Whether the file is a snapshot of every page.
     fn is_snapshot(&self) -> bool {
         self.held.is_none()
     }
@@ -452,7 +448,6 @@ fn page_fault<R: Read + Seek>(wal: &mut WalReader<R>, err: ReadPageError) -> Fau
     }
 }
 
-/// What a scan found.
 struct Scanned {
     map: PageMap,
     cursor: FrameCursor,
@@ -522,17 +517,15 @@ fn unscanned<R: Read + Seek>(wal: &mut WalReader<R>, start: &Start) -> Result<Sc
     })
 }
 
-/// What [`fill`] wrote: the last page, the bytes and the trailer's checksum.
 struct Filled {
     last: Option<LastPage>,
-    bytes: ByteTally,
+    bytes: Seeing,
     checksum: FileChecksum,
 }
 
 /// Where [`fill`] writes a file's bytes: a [`Writer`], which alone can publish
 /// them, or a test's recorder.
 trait FileSink {
-    /// Appends a chunk.
     fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send;
 }
 
@@ -542,7 +535,6 @@ impl<U: Upload> FileSink for Writer<U> {
     }
 }
 
-/// Encodes `plan` into `upload` in bounded chunks.
 async fn fill<R: Read + Seek, P: PageSource, U: FileSink>(
     upload: &mut U,
     header: Header,
@@ -553,7 +545,7 @@ async fn fill<R: Read + Seek, P: PageSource, U: FileSink>(
     map_store: fn(&StoreError) -> Fault,
 ) -> Result<Filled, Fault> {
     let mut filling = Filling::new(header, plan)?;
-    let mut bytes = ByteTally::new();
+    let mut bytes = Seeing::new();
     while !filling.whole() {
         filling.encode(plan, wal, db, pages, false)?;
         let out = filling.out();
@@ -1020,7 +1012,6 @@ fn commit_of<P: PageSource>(map: &PageMap, db: &mut P) -> Result<NonZeroU32, Fau
     }
 }
 
-/// The header of the file a scan calls for, with its clamped timestamp.
 fn created_at<R: Read + Seek>(
     start: &Start,
     scanned: &Scanned,

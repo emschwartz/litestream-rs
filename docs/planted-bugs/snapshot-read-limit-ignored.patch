@@ -1,0 +1,14 @@
+diff --git a/crates/replica/src/thread.rs b/crates/replica/src/thread.rs
+index 8fc8ff1d9..cdf2434fd 100644
+--- a/crates/replica/src/thread.rs
++++ b/crates/replica/src/thread.rs
+@@ -503,7 +503,8 @@ impl Worker {
+             .blocked
+             .is_none()
+             .then_some(self.config.snapshot_read_limit)
+-            .flatten();
++            .flatten()
++            .filter(|_| false);
+         let mut wal = sqlite.clone();
+         let mut db = Paced::new(sqlite.clone(), self.runtime.clone(), limit);
+         let mut ck = Guarded::new(

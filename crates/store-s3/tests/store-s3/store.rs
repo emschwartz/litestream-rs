@@ -5,7 +5,6 @@
 use crate::common;
 use crate::rig;
 
-// The helpers are test code only by cfg, which is what clippy.toml's allow-*-in-tests reads.
 #[cfg(test)]
 mod cases {
     use std::io;
@@ -217,6 +216,59 @@ mod cases {
         });
         let before = count(&wire, Shape::Get);
         assert_eq!(pieces(&store, k, 0, 3), [&b"abc"[..], b"def", b"ghi", b""]);
+        assert_eq!(count(&wire, Shape::Get), before + 2);
+        assert_eq!(sleeper.waits().len(), 1);
+    }
+
+    /// The pieces of a span, `len` bytes asked each time, until one comes back short.
+    fn span_pieces(
+        store: &impl ObjectStore,
+        k: FileKey,
+        span: (u64, u64),
+        len: u32,
+    ) -> Vec<Vec<u8>> {
+        let mut stream = store.read_span(k, span.0, span.1);
+        let len = ReadLen::new(len).unwrap();
+        let mut out = Vec::new();
+        loop {
+            let piece = block_on(stream.next(len)).unwrap();
+            let short = u64::try_from(piece.len()).unwrap() < len.get();
+            out.push(piece);
+            if short {
+                return out;
+            }
+        }
+    }
+
+    #[test]
+    fn a_span_is_one_get_however_many_pieces_it_hands_out() {
+        let h = FakeHarness::new();
+        let k = key(0, 1, 1);
+        put_through(&h.store, &k, b"abcdefghi").unwrap();
+        let before = count(&h.wire, Shape::Get);
+        assert_eq!(
+            span_pieces(&h.store, k, (1, 8), 3),
+            [&b"bcd"[..], b"efg", b"h"]
+        );
+        assert_eq!(count(&h.wire, Shape::Get), before + 1);
+    }
+
+    /// Through the retry layer a span cut short goes on from the bytes it handed out, to the
+    /// span's end and no further.
+    #[test]
+    fn a_span_cut_short_goes_on_from_where_it_stopped_under_retrying() {
+        let (wire, sleeper, store) = retried(FakeHarness::new());
+        let k = key(0, 1, 1);
+        put_through(&store, &k, b"abcdefghi").unwrap();
+        wire.push(Fault::TruncateBody {
+            on: Shape::Get,
+            keep: 2,
+        });
+        let before = count(&wire, Shape::Get);
+        assert_eq!(
+            span_pieces(&store, k, (1, 8), 3),
+            [&b"bcd"[..], b"efg", b"h"]
+        );
         assert_eq!(count(&wire, Shape::Get), before + 2);
         assert_eq!(sleeper.waits().len(), 1);
     }
@@ -656,12 +708,14 @@ mod cases {
     #[test]
     fn a_failed_part_leaves_its_id_for_the_next_begin_to_abort() {
         let h = FakeHarness::new();
-        h.wire.push(Fault::Status {
-            on: Shape::UploadPart,
-            status: 500,
-            code: Some("InternalError"),
-            retry_after: None,
-        });
+        for _ in 0..8 {
+            h.wire.push(Fault::Status {
+                on: Shape::UploadPart,
+                status: 500,
+                code: Some("InternalError"),
+                retry_after: None,
+            });
+        }
         let err = write_all(&h.store, &key(0, 1, 1), &body(PART), PART).unwrap_err();
         assert!(matches!(err, StoreError::Transient { .. }), "{err:?}");
         assert_eq!(h.store.pending_orphans(), 1);
@@ -871,8 +925,10 @@ mod cases {
         assert_eq!(wire.inner().open_uploads(), 0);
     }
 
+    /// A buffered part is held until its request succeeds, so a request that fails once is sent
+    /// again with the same bytes: the upload completes with one extra UploadPart and no restart.
     #[test]
-    fn a_failed_part_fails_the_upload_and_orphans_its_id() {
+    fn a_buffered_part_that_fails_once_is_sent_again_and_the_upload_completes() {
         let (wire, store) = store_with(3);
         wire.push(Fault::Pass {
             on: Shape::UploadPart,
@@ -883,12 +939,42 @@ mod cases {
             code: Some("InternalError"),
             retry_after: None,
         });
+        let bytes = body(PART * 5);
+        write_all(&store, &key(0, 1, 1), &bytes, PART).unwrap();
+        assert_eq!(
+            count(&wire, Shape::UploadPart),
+            6,
+            "five parts and one again"
+        );
+        assert_eq!(count(&wire, Shape::CreateMultipart), 1, "no restart");
+        assert_eq!(count(&wire, Shape::Complete), 1);
+        assert_eq!(wire.pauses(), [Duration::from_millis(100)]);
+        let stored = wire
+            .inner()
+            .body_of(&object_key(config().prefix(), &key(0, 1, 1)));
+        assert_eq!(stored.as_deref(), Some(&bytes[..]));
+    }
+
+    #[test]
+    fn a_failed_part_fails_the_upload_and_orphans_its_id() {
+        let (wire, store) = store_with(3);
+        wire.push(Fault::Pass {
+            on: Shape::UploadPart,
+        });
+        for _ in 0..8 {
+            wire.push(Fault::Status {
+                on: Shape::UploadPart,
+                status: 500,
+                code: Some("InternalError"),
+                retry_after: None,
+            });
+        }
         let err = write_all(&store, &key(0, 1, 1), &body(PART * 5), PART).unwrap_err();
         assert!(matches!(err, StoreError::Transient { .. }), "{err:?}");
         assert_eq!(
             count(&wire, Shape::UploadPart),
-            2,
-            "the part that failed, then nothing"
+            9,
+            "the first part, then the second part's eight tries, then nothing"
         );
         assert_eq!(count(&wire, Shape::Complete), 0);
         assert_eq!(store.pending_orphans(), 1);

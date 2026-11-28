@@ -127,7 +127,7 @@ pub enum OtherProcessMode {
 impl From<CheckpointMode> for OtherProcessMode {
     fn from(mode: CheckpointMode) -> Self {
         match mode {
-            CheckpointMode::Passive => Self::Passive,
+            CheckpointMode::Passive | CheckpointMode::Backlog => Self::Passive,
             CheckpointMode::Truncate => Self::Truncate,
             CheckpointMode::Full => Self::Full,
         }
@@ -206,7 +206,6 @@ struct Index {
     mx_frame: u32,
     backfilled: u32,
     db_size: u32,
-    // Frames in the file in this generation, spilled ones included.
     written: u32,
     // The checksum after `written` frames, and after `mx_frame`.
     running: WalChecksum,
@@ -237,7 +236,6 @@ impl Index {
 struct Overwrite {
     frame: u32,
     reads: u32,
-    // The page is inverted until the next read puts it back.
     flipped: bool,
 }
 
@@ -281,7 +279,6 @@ struct LostWriteback {
 }
 
 impl LostWriteback {
-    /// Puts back, in `durable`, every byte the failed sync covered and did not write.
     fn keep_lost(&self, durable: &mut [u8]) {
         let dirty = self
             .wal
@@ -303,7 +300,6 @@ struct State {
     // The database file as of its last fsync: a partial backfill's pages are not in it.
     db_durable: Vec<u8>,
     wal: Vec<u8>,
-    // The WAL as of its last fsync.
     durable: Vec<u8>,
     // Our sync of the WAL returns success and makes nothing durable: a disk that lies.
     our_sync_lies: bool,
@@ -331,7 +327,6 @@ struct State {
     ours_checkpoints: u32,
     writer_checkpoints: u32,
     rng: u64,
-    // When set, the values SQLite would draw at random are these instead.
     forced: Option<Salts>,
     epoch: ReadLockHold,
     next_reader: u32,
@@ -340,7 +335,6 @@ struct State {
     faults: Faults,
     app_autocheckpoint: Option<u32>,
     app_auto: AutoTally,
-    // The app's commit armed for the next barrier, and the one it made there.
     in_tick: Option<InTick>,
     in_tick_done: Option<InTickCommit>,
     // The engine's own commits (its sequence bumps) since the world last took them up, each
@@ -386,7 +380,6 @@ pub enum InTickSite {
     AtCall,
 }
 
-/// A commit armed by [`SimSqlite::arm_commit_in_tick`].
 struct InTick {
     pages: Vec<(PageNo, Vec<u8>)>,
     db_size: u32,
@@ -450,7 +443,6 @@ fn splitmix(state: &mut u64) -> u32 {
 }
 
 impl State {
-    /// [`SimSqlite::wal_header_salts`].
     fn wal_header_salts(&self) -> Option<(u32, u32)> {
         let wal = self.present.then_some(&self.wal)?;
         let word = |at: usize| {
@@ -468,13 +460,10 @@ impl State {
         self.index.mx_frame == 0 && self.wal_header_salts() != Some(index)
     }
 
-    /// The app commits `pages` leaving `db_size` pages, then runs its automatic
-    /// checkpoint.
     fn app_commit(&mut self, pages: &[(PageNo, Vec<u8>)], db_size: u32) -> Option<AppCommit> {
         self.commit_by(Conn::App, pages, db_size)
     }
 
-    /// A commit by `by`; only the app's connection runs automatic checkpoints.
     fn commit_by(
         &mut self,
         by: Conn,
@@ -494,7 +483,6 @@ impl State {
         Some(commit)
     }
 
-    /// Makes the armed in-tick commit if it is armed for `site`, and keeps what it made.
     fn commit_in_tick(&mut self, site: InTickSite) {
         if self.in_tick.as_ref().is_none_or(|armed| armed.site != site) {
             return;
@@ -630,7 +618,6 @@ impl State {
         self.durable.clone_from(&self.wal);
     }
 
-    /// Writes one frame after `written` in the current generation.
     fn put_frame(&mut self, pgno: u32, commit: u32, data: &[u8]) {
         let mut page = data.to_vec();
         page.resize(self.page_size.bytes(), 0);
@@ -655,7 +642,6 @@ impl State {
         self.index.pgnos.push(pgno);
     }
 
-    /// The start of a write transaction by `by`: the restart rule, then the writer's mark choice.
     fn start_write(&mut self, by: Conn) {
         let mark = self
             .readers
@@ -675,7 +661,6 @@ impl State {
         self.writer = Some(by);
     }
 
-    /// Frames by `by`; `commit` is the database size of a committing write.
     fn write(&mut self, by: Conn, pages: &[(PageNo, Vec<u8>)], commit: Option<u32>) -> bool {
         if pages.is_empty() || self.writer.is_some_and(|holder| holder != by) {
             return false;
@@ -847,12 +832,10 @@ impl State {
         }
     }
 
-    /// Page `pgno` as a new reader sees it.
     fn image_page(&self, pgno: u32) -> Vec<u8> {
         self.image_page_through(pgno, self.index.mx_frame)
     }
 
-    /// Page `pgno` as a reader whose snapshot ends after `frames` frames sees it.
     fn image_page_through(&self, pgno: u32, frames: u32) -> Vec<u8> {
         let newest = self
             .index
@@ -898,7 +881,6 @@ impl State {
         out.resize(start.saturating_add(size), 0);
     }
 
-    /// The automatic checkpoint, right after an app commit.
     fn autocheckpoint(&mut self) {
         let Some(at) = self.app_autocheckpoint else {
             return;
@@ -1042,7 +1024,6 @@ impl State {
         }
     }
 
-    /// A full backfill and a fresh, empty WAL with every connection closed.
     fn close_all(&mut self) -> bool {
         if !self.readers.is_empty() || self.writer.is_some() {
             return false;
@@ -1097,7 +1078,6 @@ impl State {
     fn process_crash(&mut self) {
         self.end(Conn::Ours);
         self.drop_writer(Conn::Writer);
-        // The gate's connection is our process's too.
         self.drop_writer(Conn::Gate);
         self.barrier = None;
         self.ours_checkpoints = 0;
@@ -2094,7 +2074,6 @@ impl WalSource for SimSource {
             if let Some(left) = left.checked_sub(1).filter(|left| *left > 0) {
                 state.faults.shm_forced = Some((read, left));
             }
-            // The forced numbers, under the hold the read is taken in now.
             return CommittedRead::new(read.end(), read.backfilled(), state.epoch)
                 .ok_or(SourceError::Busy);
         }
@@ -2278,9 +2257,9 @@ impl Checkpointer for SimCheckpointer {
         let mut state = lock(&self.state);
         state.app_call(Some(SourceOp::Checkpoint));
         state.writes_allowed()?;
-        // lsr-sqlite runs a TRUNCATE on the writer connection and leaves the read transaction
-        // alone.
-        if mode == CheckpointMode::Truncate {
+        // lsr-sqlite runs a TRUNCATE and a backlog copy on the writer connection and leaves the
+        // read transaction alone.
+        if matches!(mode, CheckpointMode::Truncate | CheckpointMode::Backlog) {
             state.faults.take(SourceOp::Checkpoint)?;
             if state.barrier.is_some() {
                 return Err(SourceError::Io(io::ErrorKind::InvalidInput));
@@ -2328,6 +2307,25 @@ impl Checkpointer for SimCheckpointer {
             epoch: state.epoch,
             one_sqlite: true,
         })
+    }
+
+    fn renew_read(&mut self) -> Result<ReadLockHold, SourceError> {
+        let mut state = lock(&self.state);
+        state.app_call(Some(SourceOp::RenewRead));
+        // lsr-sqlite ends the read transaction and begins it again; a begin that fails leaves it
+        // lapsed, for the next read to take again.
+        let injected = state.faults.take(SourceOp::RenewRead);
+        match injected {
+            Err(SourceError::ReadTxLost) => {
+                state.end(Conn::Ours);
+                return Err(SourceError::ReadTxLost);
+            }
+            Err(err) => return Err(err),
+            Ok(()) => {}
+        }
+        state.end(Conn::Ours);
+        state.begin(Conn::Ours);
+        Ok(state.epoch)
     }
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {

@@ -60,7 +60,7 @@ fn named(file: FileInfo) -> FileInfo {
     }
 }
 
-/// A write through [`Apart`]: what it commits is named as the course names it.
+/// A write through [`Apart`]; what it commits is named as the course names it.
 #[derive(Debug)]
 pub(super) struct ApartUpload<U>(U);
 
@@ -211,8 +211,7 @@ async fn raise<L: Role>(
         .map_err(|err| L::fault(&err))
 }
 
-/// Writes the course's file `file` at its level-0 key, with the created-at time it was
-/// staged under.
+/// Writes `file` at its level-0 key, keeping the created-at time it was staged under.
 async fn copy<L: Role>(course: &Apart<'_, L>, staging: &L, file: &FileInfo) -> Result<(), Fault> {
     let key = &file.key;
     let stamp = course

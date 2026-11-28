@@ -116,11 +116,11 @@ fn line(tokens: &[&str], config: &Path, missing: &Path) -> Vec<String> {
 /// The config every line reads: one database, no replica, so a start is refused at once.
 const CONFIG: &str = "dbs:\n  - path: /nonexistent/app.db\n";
 
-/// Runs one side. Standard input carries [`CONFIG`] too, so `-config -` ends the same way
-/// (an empty one would start both with no databases and run until killed).
 /// One side's exit code, standard error and standard output.
 type Ran = (Option<i32>, String, String);
 
+/// Runs one side. Standard input carries [`CONFIG`] too, so `-config -` ends the same way
+/// (an empty one would start both with no databases and run until killed).
 fn run(binary: &Path, args: &[String], dir: &Path) -> Ran {
     let mut child = Command::new(binary)
         .args(args)
@@ -145,7 +145,6 @@ fn run(binary: &Path, args: &[String], dir: &Path) -> Ran {
     )
 }
 
-/// Both sides' runs of one generated line, in a directory of their own.
 fn answers(go: &Path, lsr: &Path, tokens: &[&str]) -> (Vec<String>, Ran, Ran) {
     let dir = tempfile::tempdir().unwrap();
     let missing: PathBuf = dir.path().join("absent.yml");

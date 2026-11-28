@@ -27,7 +27,6 @@ fn in_db(line: &str) -> String {
 
 #[test]
 fn one_key_of_each_class() {
-    // Implemented.
     let loaded = parse(&in_replica("type: s3"));
     assert_eq!(
         loaded.config.dbs()[0].replica().unwrap().kind(),

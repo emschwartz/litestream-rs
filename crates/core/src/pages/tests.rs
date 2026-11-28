@@ -211,12 +211,10 @@ fn a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop() {
     assert_eq!(got.err(), Some(Fault::LocalIo));
 }
 
-/// A level-0 file for transaction `n` holding `pages` filled with `fill`.
 fn staged_file(n: u64, pages: &[u32], fill: u8) -> (FileKey, Vec<u8>) {
     staged_file_at(n, pages, fill, 4)
 }
 
-/// [`staged_file`] at a database size of `commit` pages.
 fn staged_file_at(n: u64, pages: &[u32], fill: u8, commit: u32) -> (FileKey, Vec<u8>) {
     use lsr_ltx::{Encoder, Header, HeaderFields, Timestamp, TxidRange};
     let txid = Txid::new(n).unwrap();
@@ -373,7 +371,6 @@ fn a_pending_file_that_ends_where_the_replicas_newest_ended_in_the_wal_is_quiet(
     let quiet: Vec<u64> = seeded.quiet.iter().map(|txid| txid.get()).collect();
     assert_eq!(quiet, vec![3, 4]);
 }
-/// Puts `files` in `store`.
 fn put_all(store: &crate::MemStore, files: Vec<(FileKey, Vec<u8>)>) {
     use crate::store::Upload;
     for (key, bytes) in files {

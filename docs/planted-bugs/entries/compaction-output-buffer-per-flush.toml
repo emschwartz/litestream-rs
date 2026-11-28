@@ -1,6 +1,6 @@
 # A compaction takes a new output buffer at every flush, which grows from empty by doubling, so it allocates large blocks per flush instead of one.
 name = "compaction-output-buffer-per-flush"
-fix = "e7aafe56e"
+fix = "efc92fe3f"
 package = "lsr-store-fs"
 test_bin = "store-fs"
 tests = [

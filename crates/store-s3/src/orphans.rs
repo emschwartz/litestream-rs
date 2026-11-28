@@ -2,11 +2,10 @@
 //!
 //! Dropping an upload does no I/O (the store contract), so a dropped or failed
 //! multipart upload's id lands here and is aborted later: at the start of the
-//! next `begin_upload`, or by `S3Store::abort_orphans`; a killed process's are found at the next
-//! boot by listing the bucket's open uploads (`remove_scratch`). The list holds
-//! at most 64 ids; a 65th pushes the oldest off, and the bucket's
-//! `AbortIncompleteMultipartUpload` rule is the backstop for what falls off
-//! (drop does no I/O, so a failed upload's id waits here). An id whose abort fails goes back, so an outage costs one
+//! next `begin_upload`, or by `S3Store::abort_orphans`; a killed process's are found at the
+//! next boot by listing the bucket's open uploads (`remove_scratch`). The list holds at most 64
+//! ids; a 65th pushes the oldest off, and the bucket's `AbortIncompleteMultipartUpload` rule is
+//! the backstop for what falls off. An id whose abort fails goes back, so an outage costs one
 //! request per attempt and never grows the list.
 
 use std::collections::VecDeque;
@@ -51,7 +50,7 @@ impl Orphans {
         std::mem::take(&mut *self.list())
     }
 
-    /// Puts ids not yet aborted back ahead of any that arrived meanwhile.
+    /// Puts unaborted ids back ahead of any that arrived meanwhile.
     fn restore(&self, rest: VecDeque<(FileKey, UploadId)>) {
         let mut list = self.list();
         for item in rest.into_iter().rev() {
@@ -77,15 +76,15 @@ impl<T: Transport> Inner<T> {
     }
 
     /// Aborts the multipart uploads of this store's own keys that a killed process left open,
-    /// and the ones this process dropped; how many. The ids a process keeps die with it, so
-    /// at boot the bucket's own listing is the only record: every upload open under the prefix
-    /// whose key is one of this store's object keys is ours. Only the replicating engine
-    /// uploads there, and a second engine on one replica is already a stop condition; if one
-    /// runs anyway, its upload's Complete finds no upload and fails, and is retried. At most
-    /// [`SWEEP_PAGES`] listing pages per call, so a boot's work is bounded; the rest go at
-    /// the next. The caller holds no upload of this store: the sweep waits for every part
-    /// this process started to end before it lists, and would wait for ever on a part whose
-    /// upload is alive and never collected.
+    /// and the ones this process dropped; returns how many. The ids a process keeps die with
+    /// it, so at boot the bucket's listing is the only record: every upload open under the
+    /// prefix whose key is one of this store's object keys is ours. Only the replicating
+    /// engine uploads there, and a second engine on one replica is already a stop condition;
+    /// if one runs anyway, its upload's Complete finds no upload and fails, and is retried.
+    /// At most [`SWEEP_PAGES`] listing pages per call bound a boot's work; the rest go at the
+    /// next. The caller holds no upload of this store: the sweep waits for every part this
+    /// process started to end before it lists, and would wait for ever on a part whose upload
+    /// is alive and never collected.
     ///
     /// The listing (one `GET ?uploads` per boot, and an abort per upload it finds) is a
     /// request Go does not make. Go hands multipart uploads to the SDK's uploader

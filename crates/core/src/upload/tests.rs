@@ -1081,7 +1081,6 @@ proptest! {
                 prop_assert_eq!(Some(at.range().max()), state.confirmed().map_or(Some(Txid::MIN), Txid::next));
                 prop_assert!(at.range().max().get() <= position);
             }
-            // The position never decreases.
             prop_assert!(after.confirmed() >= confirmed_before);
             confirmed_before = after.confirmed();
             // Whatever is visible is a contiguous prefix of the staged files, byte for byte.
@@ -1105,8 +1104,6 @@ proptest! {
         prop_assert_eq!(u64::try_from(files(&remote.inner).len()).unwrap(), position);
     }
 }
-
-// Review: failing tests (blind adversarial review of upload sequencing).
 
 /// What a store holds after it answers a commit with a checksum mismatch: the
 /// key is published, at the staged size, with other bytes.
@@ -1242,7 +1239,6 @@ fn a_staged_file_replaced_after_its_witness_is_refused_and_leaves_nothing_visibl
     assert_eq!(failed.state, state);
     assert!(files(&remote.inner).is_empty());
     assert_eq!(remote.log().aborts, 1);
-    // The bytes it was witnessed for go up.
     put_bytes(&staging, key(1), &encode(1));
     let put = block_on(upload_next(
         state,

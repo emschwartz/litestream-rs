@@ -168,7 +168,6 @@ impl ContiguousChain {
         })
     }
 
-    /// Adds a file if it keeps the invariants; reports whether it did.
     fn push(&mut self, next: FileInfo) -> bool {
         let range = next.key.range();
         let fits = touches(range.min(), self.reaches)
@@ -240,7 +239,29 @@ impl ContiguousChain {
     pub const fn reaches(&self) -> Txid {
         self.reaches
     }
+
+    /// The newest file after the base that may hold the whole database, judged by size alone:
+    /// at least three quarters of the base's bytes, with the base at least
+    /// [`WHOLE_BASE_MIN_BYTES`]. A file the writer made from the whole database (the copy taken
+    /// when the WAL no longer continues the replica) is as large as a snapshot, and so is every
+    /// merge of it, but nothing in its name says so. The size proves nothing: the restore reads
+    /// the file first and starts from it only when its pages are every page of its database.
+    pub(crate) fn whole_candidate(&self) -> Option<usize> {
+        let base = self.snapshot.size;
+        if base < WHOLE_BASE_MIN_BYTES {
+            return None;
+        }
+        self.files
+            .iter()
+            .rposition(|file| file.size.saturating_mul(4) >= base.saturating_mul(3))
+            .filter(|&index| index > 0)
+    }
 }
+
+/// The smallest base for which a restore looks for a whole-database copy later in its chain
+/// ([`ContiguousChain::whole_candidate`]). Below it the base costs a few reads, and a guess that
+/// turns out wrong would cost one read more than Go makes.
+pub(crate) const WHOLE_BASE_MIN_BYTES: u64 = 16 * 1024 * 1024;
 
 /// What the planner found. Exactly one variant is a plan; each other variant
 /// is a different reason there is no exact answer.
@@ -376,7 +397,6 @@ fn eligible(info: &FileInfo, target: RestoreTarget) -> bool {
     }
 }
 
-/// A file's created-at time, when known, with what it dates for its level.
 fn stamp_of(info: &FileInfo, created_at: Option<CreatedAt>) -> Option<Stamp> {
     created_at.map(|created_at| Stamp::of(info.key.level(), created_at))
 }
@@ -485,7 +505,6 @@ fn plan_unchecked(listed: Listed<'_>, target: RestoreTarget) -> PlanOutcome {
     extend_to(listed, chain, target)
 }
 
-/// [`chain`] extended over the eligible files toward [`target`], and what it reached.
 fn extend_to(listed: Listed<'_>, mut chain: ContiguousChain, target: RestoreTarget) -> PlanOutcome {
     let pool = || listed.files().filter(|info| eligible(info, target));
     extend(&mut chain, Sweep::new(listed, target));
@@ -778,10 +797,8 @@ fn is_usable_beyond(info: &FileInfo) -> bool {
     !info.key.level().is_snapshot() || is_snapshot_start(info)
 }
 
-/// The preference of a level 0-8 file at an extension step; larger is better.
 type Preference = (Txid, Level, Reverse<Txid>);
 
-/// Where an [`AsOfPlanner`] is.
 #[derive(Clone, Debug)]
 enum Pass {
     /// Walking the transaction-1 files for the first eligible one.
@@ -1006,8 +1023,6 @@ impl Step for AsOfPlanner<'_> {
     }
 }
 
-/// Whether a file is created strictly before [`instant`], once its exact
-/// created-at time is known.
 fn eligible_at(info: &FileInfo, instant: Timestamp, resolved: &ResolvedCreatedAt) -> Option<bool> {
     stamp_of(info, resolved.exact(info)).map(|stamp| stamp.before(instant))
 }

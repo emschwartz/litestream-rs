@@ -7,8 +7,7 @@
 //!
 //! A commit writes a scratch file next to the target (`<name>.<pid>-<n>.tmp`,
 //! created exclusively, so two uploads to one key never share bytes), sets
-//! its mtime to the created-at time as Go does (the created-at time is the file's mtime),
-//! fsyncs it, renames it into place and fsyncs the directory (a
+//! its mtime to the created-at time as Go does, fsyncs it, renames it into place and fsyncs the directory (a
 //! [`WriteMode::New`] upload hard-links it into place instead, which fails on
 //! a taken name, then removes the scratch name). Go sets the
 //! mtime after the rename; setting it first means no reader ever sees the file
@@ -35,8 +34,7 @@
 //!
 //! A delete removes its keys and then syncs each level directory it named, once per call, so
 //! a deleted file cannot come back after a power loss; a directory sync costs about 0.14 ms
-//! per call on ext4 (measured with the change that added it), and the engine deletes in
-//! batches.
+//! per call on ext4, and the engine deletes in batches.
 //!
 //! Directories are made durable too: a level directory the store creates, and
 //! each directory above it that it creates, has its parent fsynced before the
@@ -90,9 +88,8 @@ use lsr_core::{
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
-/// A stored file held open for a run of reads ([`ObjectStore::open`]): one descriptor for the
-/// whole file where a read by range opens it again for every chunk, so the kernel sees one
-/// reader going forward and reads ahead of it. It follows the file it opened, not the name.
+/// A stored file held open for a run of reads ([`ObjectStore::open`]). It follows the file it
+/// opened, not the name.
 #[derive(Debug)]
 struct Held<T> {
     file: T,
@@ -147,7 +144,6 @@ fn sync_file(file: &impl FsFile, path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Syncs the entries of directory `dir`, and notes it.
 fn sync_dir(fs: &impl Fs, dir: &Path) -> io::Result<()> {
     fs.sync_dir(dir)?;
     note(|| Step::SyncDir(dir.to_owned()));
@@ -162,7 +158,6 @@ const fn not_a_regular_file(key: FileKey) -> StoreError {
     }
 }
 
-/// Renames `from` over `to`, and notes it.
 fn rename(fs: &impl Fs, from: &Path, to: &Path) -> io::Result<()> {
     fs.rename(from, to)?;
     note(|| Step::Rename {
@@ -235,9 +230,8 @@ impl<F: Fs> FsStore<F> {
     }
 
     /// Has each upload write on a thread of its own, one block of [`BLOCK`] bytes behind the
-    /// caller, so the caller's reading and checking overlap the disk's writing. Off by default:
-    /// a library caller and the simulator get today's single thread. A write that fails
-    /// is reported by the next `write` or by `commit`, in block order (see
+    /// caller, so the caller's reading and checking overlap the disk's writing. Off by default.
+    /// A write that fails is reported by the next `write` or by `commit`, in block order (see
     /// `docs/decisions/D244.md`).
     #[must_use]
     pub const fn with_write_behind(mut self) -> Self {
@@ -313,7 +307,6 @@ impl<F: Fs> FsStore<F> {
     ) -> Result<(Vec<u8>, Meta), StoreError> {
         let fail = |err: io::Error| StoreError::from_io(StoreOp::Read, Some(*key), &err);
         let (mut file, meta) = self.open_file(key)?;
-        // Past the end is empty at every offset; seeking beyond i64::MAX fails.
         if offset >= meta.len() {
             return Ok((Vec::new(), meta));
         }
@@ -722,7 +715,6 @@ impl<F: Fs> FsUpload<F> {
                 })
             }
             Err(err) => {
-                // Best effort: a scratch file that survives is invisible anyway.
                 let _removed = self.fs.remove_file(&self.scratch);
                 Err(fail(err))
             }

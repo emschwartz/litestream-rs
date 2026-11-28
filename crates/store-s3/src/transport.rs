@@ -24,7 +24,6 @@ use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Arc, PoisonError};
-#[cfg(any(feature = "ureq", feature = "reqwest"))]
 use std::time::Duration;
 
 // Under `--cfg shuttle` (`just shuttle`) the batch runs on shuttle's scheduler, which explores
@@ -454,6 +453,13 @@ pub trait Transport: Send + Sync + 'static {
         self.send(request.into_buffered()?)
     }
 
+    /// Waits `wait` on the calling thread, between a part's attempts (`multipart.rs`). The
+    /// default waits for nothing, so the in-memory and fault-injecting transports stay
+    /// deterministic and a test records the waits instead; the socket clients sleep.
+    fn pause(&self, wait: Duration) {
+        let _ = wait;
+    }
+
     /// The lanes the parts of this store's uploads are sent on, at most `most` at once
     /// (`lanes.rs`). The default has no thread: a part is sent by the call that started it,
     /// so the in-memory and fault-injecting transports stay deterministic. The socket clients
@@ -467,14 +473,12 @@ pub trait Transport: Send + Sync + 'static {
 /// What a request whose send panicked ends as, whichever thread ran it.
 pub(crate) const PANICKED: TransportError = TransportError::Io(io::ErrorKind::Other);
 
-/// The stack of a batch worker thread: an HTTPS request through ureq and
-/// rustls needs 48 KiB (see `lsr-replica`'s `stack` module for how that was
-/// measured), and this is about five times that.
+/// The stack of a batch worker thread: an HTTPS request through ureq and rustls needs 48 KiB
+/// (see `lsr-replica`'s `stack` module), and this is about five times that.
 // Shuttle's threads have no stack size to set.
 #[cfg(not(shuttle))]
 pub(crate) const BATCH_STACK: usize = 256 * 1024;
 
-/// One result slot per request of a batch.
 type Slots = Vec<Option<Result<HttpResponse, TransportError>>>;
 
 /// Starts one batch helper in `scope`; `None` when the OS refuses the thread.
@@ -499,13 +503,10 @@ fn spawn_helper<'scope, F: FnOnce() + Send + 'scope>(
     Some(scope.spawn(work))
 }
 
-/// [`Transport::send_many`] for a blocking transport: the calling thread and
-/// up to `limit - 1` scoped threads (named `s3-batch`, `BATCH_STACK` each)
-/// take requests from one queue in order, so at most `limit` are in flight.
-/// Every thread is joined before this returns. A thread the OS refuses only
-/// narrows the batch, since the calling thread works the queue too. A request
-/// whose send panicked is reported in its slot as an I/O failure, whichever
-/// thread ran it, and the thread goes on to the next request.
+/// [`Transport::send_many`] for a blocking transport: the calling thread and up to `limit - 1`
+/// scoped threads (`s3-batch`, `BATCH_STACK` each) take requests from one queue in order. Every
+/// thread is joined before this returns. A thread the OS refuses only narrows the batch. A
+/// request whose send panicked is reported in its slot as an I/O failure, and the thread goes on.
 pub fn send_on_threads<T: Transport + ?Sized>(
     transport: &T,
     requests: Vec<HttpRequest>,
@@ -575,7 +576,6 @@ mod tests {
         let bounds = Bounds::new(Duration::from_secs(60));
         assert_eq!(bounds.stall(), Duration::from_secs(60));
         assert_eq!(bounds.cap(0), Duration::from_secs(60));
-        // 5 MiB at 16 KiB a second is 320 s.
         assert_eq!(bounds.cap(5 * 1024 * 1024), Duration::from_secs(380));
         let fast = bounds.with_floor(NonZeroU64::new(1_000_000).expect("nonzero"));
         assert_eq!(fast.cap(1_500_000), Duration::from_millis(61_500));
@@ -740,9 +740,8 @@ mod batch_tests {
     }
 }
 
-/// Schedule exploration of [`send_on_threads`] (`just shuttle`): shuttle runs the batch under
-/// many random interleavings of its threads, which the real-thread tests above sample only by
-/// luck. Each run checks the invariants the doc comment promises.
+/// Schedule exploration of [`send_on_threads`] (`just shuttle`): many random interleavings, which
+/// the real-thread tests above sample only by luck. Each run checks the invariants its doc promises.
 #[cfg(test)]
 #[cfg(shuttle)]
 #[expect(
@@ -756,7 +755,6 @@ mod shuttle_tests {
     use super::*;
     use crate::request::Method;
 
-    /// How many random schedules each test explores.
     fn iterations() -> usize {
         std::env::var("SHUTTLE_ITERATIONS")
             .ok()

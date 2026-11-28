@@ -9,17 +9,14 @@ use crate::actor::local::LocalTry;
 use crate::actor::parts::Course;
 use crate::source::{CheckpointEffect, CheckpointScript};
 
-/// The bound after which a failing boot is judged, in milliseconds.
 fn bound() -> i64 {
     i64::try_from(BOOT_UNDECIDED_BOUND.as_millis()).unwrap()
 }
 
-/// The replica answers nothing: the boot's first call to it fails.
 fn down(rig: &Rig) {
     *rig.remote.scratch_error.lock().unwrap() = Some(transient(StoreOp::List));
 }
 
-/// The replica answers again.
 fn up(rig: &Rig) {
     *rig.remote.scratch_error.lock().unwrap() = None;
 }
@@ -36,7 +33,6 @@ fn checkpointing() -> ActorConfig {
     }
 }
 
-/// Ticks from `from`, following the actor's own wakes, until `until`.
 fn run(rig: &mut Rig, actor: &mut Actor, from: i64, until: i64) -> Vec<Tick> {
     let mut seen = Vec::new();
     let mut now = from;
@@ -156,7 +152,6 @@ fn a_restart_during_an_outage_stages_and_checkpoints_from_local_state() {
         frames.push(rig.wal.committed_end().offset().frame_index());
     }
     no_stop(&seen);
-    // One file a commit, and the engine's own write after each checkpoint.
     assert!(all_staged(&rig).len() >= 23, "{:?}", all_staged(&rig));
     let checkpoints = seen
         .iter()
@@ -231,7 +226,6 @@ fn a_courses_truncate_takes_no_snapshot() {
         vec![2, 3],
         "level 0 is as the course found it"
     );
-    // A file a commit, and one a checkpoint's new generation.
     assert!(apart(&rig).len() >= 6, "{:?}", apart(&rig));
     assert_eq!(ranges(&rig.remote), vec![(1, 1)]);
     up(&rig);
@@ -243,7 +237,7 @@ fn a_courses_truncate_takes_no_snapshot() {
 }
 
 /// The local course begins only once boot attempts have failed for the bound: before it the
-/// engine has no position and stages nothing, as it did before the course existed.
+/// engine has no position and stages nothing.
 #[test]
 fn the_course_begins_at_the_bound_and_not_before() {
     let (mut rig, mut actor) = caught_up();
@@ -259,7 +253,6 @@ fn the_course_begins_at_the_bound_and_not_before() {
     assert!(is_local(&actor), "{tick:?}");
     assert_eq!(actor.kept.local, LocalTry::Spent);
     assert_eq!(actor.staged(), Txid::new(3));
-    // The tick is the failed boot attempt's, and the next one is due at once.
     assert!(
         matches!(
             tick,
@@ -363,7 +356,6 @@ fn staging_that_does_not_read_whole_begins_no_course() {
     assert!(!is_local(&actor));
     assert_eq!(actor.kept.local, LocalTry::Spent);
     assert_eq!(actor.staged(), None);
-    // Later attempts read staging no more.
     let reads = rig.staging.calls();
     run(
         &mut rig,
@@ -643,7 +635,6 @@ fn a_step_that_needs_a_snapshot_ends_the_course() {
     assert_eq!(actor.kept.tasks.get(Task::Sync).failures(), failures);
     assert_eq!(actor.kept.tasks.get(Task::Upload).failures(), 0);
     assert_eq!(all_staged(&rig), vec![2, 3], "no snapshot was staged");
-    // The course is not tried again.
     run(&mut rig, &mut actor, at + 2, at + 10 * bound());
     assert!(matches!(actor.engine.course, Course::Unbooted));
     up(&rig);
@@ -666,7 +657,6 @@ fn a_failed_attempt_that_left_the_newest_staged_file_gone_ends_the_course() {
     let (mut rig, mut actor, _) = restarted_down(go_like());
     let upload = *actor.kept.tasks.get(Task::Upload);
     let due = upload.until().unwrap().unix_millis();
-    // An attempt that fails with staging untouched keeps the course.
     let tick = rig.tick(&mut actor, due);
     assert!(is_local(&actor), "{tick:?}");
     let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(3).unwrap()));
@@ -894,7 +884,6 @@ fn a_due_boot_attempt_waits_its_turn_behind_the_courses_steps() {
     assert_eq!(rig.remote.scratch_calls.load(Ordering::SeqCst), scratch + 1);
 }
 
-/// The transactions of the files in the course's slot.
 fn apart(rig: &Rig) -> Vec<u64> {
     Rig::files(&rig.staging, Level::LOCAL_COURSE)
         .iter()
@@ -913,7 +902,6 @@ fn l0(n: u64) -> FileKey {
     FileKey::new(Level::ZERO, TxidRange::single(Txid::new(n).unwrap()))
 }
 
-/// The key of transaction `n`'s file in the course's slot.
 fn slot(n: u64) -> FileKey {
     FileKey::new(
         Level::LOCAL_COURSE,
@@ -938,7 +926,6 @@ fn staging_behind() -> Rig {
     rig
 }
 
-/// The transaction each batch of uploads in `seen` ended at.
 fn uploaded(seen: &[Tick]) -> Vec<u64> {
     seen.iter()
         .filter_map(|tick| match event(tick) {
@@ -1109,7 +1096,6 @@ fn a_course_begun_at_the_replicas_newest_file_keeps_its_files() {
     let seen = run(&mut rig, &mut actor, at + 600_000, at + 600_000);
     no_stop(&seen);
     assert_eq!(actor.kept.local, LocalTry::Spent);
-    // Two files, one a commit, in one batch that ends at the second.
     assert_eq!(uploaded(&seen), vec![5]);
     assert_eq!(restored(&rig), 5);
 }
@@ -1209,7 +1195,6 @@ fn a_course_goes_on_over_the_files_a_boot_moved_up() {
     rig.commit(4);
     rig.settle(&mut actor, at.saturating_add(1));
     assert_eq!((staged(&rig), apart(&rig)), (vec![2, 3], vec![4]));
-    // The replica holds transaction 1, below level 0's newest.
     assert_eq!(settled(&rig, &mut actor), Ok(()));
     assert_eq!((staged(&rig), apart(&rig)), (vec![2, 3, 4], vec![]));
     assert!(is_local(&actor));

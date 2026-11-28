@@ -705,8 +705,7 @@ struct Seen {
 /// a second client (its own connections) lists and reads right after each.
 /// Every stale answer is counted and printed as an `OBS consistency` table;
 /// nothing is asserted about the provider beyond the rounds running, since
-/// the table is the measurement (kk-review section 4e). A provider that
-/// keeps a listing stale shows here before the engine's boot meets it.
+/// the table is the measurement.
 pub fn consistency_probe(h: &RealHarness) {
     let reader = h.next_process();
     let one = ReadLen::new(1).unwrap();
@@ -818,18 +817,27 @@ pub fn dropped_multipart_is_invisible_then_aborted(h: &RealHarness) {
 
 /// A process killed mid-upload takes its ids with it; the next process's boot finds the
 /// upload in the bucket's listing and aborts it.
+/// The upload is begun as the engine begins a level-0 file (create-only, its length known) and
+/// has three parts on the wire when the process dies. On Tigris this is the evidence that the
+/// sweep sees such uploads: a drill's `aws s3api list-multipart-uploads`, which sends no
+/// `X-Tigris-Consistent`, never listed one (docs/limitations.md).
 pub fn a_killed_process_s_upload_is_aborted_at_the_next_boot(h: &RealHarness) {
+    let part = part(h);
+    let parts = 3_u64;
     block_on(async {
         let mut upload = h
             .store
-            .begin_upload(
+            .begin_sized_upload(
                 &h.key(0, 1, 1),
                 Timestamp::from_unix_millis(9),
-                lsr_core::WriteMode::Replace,
+                WriteMode::New,
+                Some(u64::try_from(part).unwrap().saturating_mul(parts)),
             )
             .await
             .unwrap();
-        upload.write(&body(part(h))).await.unwrap();
+        for _ in 0..parts {
+            upload.write(&body(part)).await.unwrap();
+        }
         // Dropped: its id lands in this process's memory only, which a kill loses.
         drop(upload);
     });
@@ -939,6 +947,7 @@ macro_rules! shared_cases {
                 created_at_of_an_overwritten_file_is_refused,
                 read_with_created_at_agrees_with_read_and_created_at,
                 read_stream_agrees_with_read,
+                read_span_agrees_with_read,
                 list_many_agrees_with_list,
                 created_at_many_agrees_with_created_at,
             );

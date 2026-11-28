@@ -172,7 +172,6 @@ fn default_paths_sit_under_the_home_variable() {
             profile: "default".to_owned()
         }
     );
-    // An override wins over the home directory's file.
     let dir = TempDir::new().unwrap();
     let other = write(&dir, "config", &CONFIG_FILE.replace("CONFID", "OVERID"));
     let resolved = chain(&[(HOME_VAR, s(home.path())), ("AWS_CONFIG_FILE", s(&other))])

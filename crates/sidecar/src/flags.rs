@@ -115,7 +115,7 @@ pub struct Flags {
 /// What the command line asks for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Parsed {
-    /// Run.
+    /// Run with these flags.
     Run(Flags),
     /// `-h` or `-help`: print the usage.
     Help,
