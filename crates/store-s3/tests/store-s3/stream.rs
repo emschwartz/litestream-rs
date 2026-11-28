@@ -127,6 +127,25 @@ mod cases {
         assert_eq!(ranges, [Some("bytes=2-5".to_owned())]);
     }
 
+    /// A span to the end of the object asks as a stream from its start does: `bytes=2-`, and no
+    /// `Range` at all from byte 0. It hands out every byte to the object's end.
+    #[test]
+    fn a_span_to_the_end_asks_for_the_rest_of_the_object() {
+        let reply = answer(
+            206,
+            &[("content-length", "7"), ("content-range", "bytes 2-8/9")],
+            b"cdefghi",
+        );
+        let (got, ranges) = span_pieces(2, lsr_core::SPAN_TO_END, vec![reply]);
+        let want = [Ok(b"cde".to_vec()), Ok(b"fgh".to_vec()), Ok(b"i".to_vec())];
+        assert_eq!(got, want);
+        assert_eq!(ranges, [Some("bytes=2-".to_owned())]);
+        let reply = answer(200, &[("content-length", "9")], b"abcdefghi");
+        let (got, ranges) = span_pieces(0, lsr_core::SPAN_TO_END, vec![reply]);
+        assert_eq!(got.len(), 4);
+        assert_eq!(ranges, [None]);
+    }
+
     /// A server that ignores the span's `Range` sends the whole object: the span is its bytes
     /// from the start to the end, and nothing past it.
     #[test]

@@ -310,6 +310,10 @@ pub(crate) mod cases {
         chain
     }
 
+    /// The HEADs a plan may send past the end of its chain: three batches of 16 (the
+    /// measured worst is 59 against 26 needed, so 33).
+    const GUESSED_PAST: usize = 48;
+
     /// The as-of rows: back by each age, then the oldest snapshot's instant.
     fn as_of_rows(rig: &Rig) -> Vec<Row> {
         let inventory = rig.inventory_with_created_at();
@@ -349,14 +353,16 @@ pub(crate) mod cases {
                     .filter(|f| !f.key.level().is_snapshot())
                     .count(),
             );
+            // The files the planner can touch, and the batch or two it reads past the end of the
+            // chain when it guesses the files after the one it needs (D316).
             assert!(
-                row.counts.head <= s + e,
-                "{what}: {} HEADs, S {s} + E {e}",
+                row.counts.head <= s + e + GUESSED_PAST,
+                "{what}: {} HEADs, S {s} + E {e} + {GUESSED_PAST}",
                 row.counts.head
             );
             if what.ends_with("oldest snapshot") {
                 assert!(
-                    row.counts.head < 2 * c + s + 10,
+                    row.counts.head < 2 * c + s + 10 + GUESSED_PAST,
                     "{what}: {} HEADs, C {c}",
                     row.counts.head
                 );

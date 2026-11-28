@@ -19,6 +19,8 @@ use crate::mem::wrapped::Wrapped;
 use crate::store::WriteMode;
 use crate::store::{StoreOp, Upload};
 
+mod created_ahead;
+mod lookahead;
 mod tail;
 mod window;
 

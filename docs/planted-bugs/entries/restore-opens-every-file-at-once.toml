@@ -1,0 +1,11 @@
+# A restore opens every remaining small file at once instead of at most 32 ahead. Pages and counts
+# stay right; the bound is the memory of the files open ahead, which would grow with the length of
+# the plan.
+name = "restore-opens-every-file-at-once"
+fix = "claude/small-restore"
+package = "lsr-core"
+tests = [
+    "restore::tests::lookahead::the_next_files_are_opened_before_the_first_is_read",
+    "restore::tests::lookahead::files_are_opened_no_further_ahead_than_the_depth",
+]
+unaided_miss = "the simulator's stores read lazily, so opening a file earlier or later changes when a request is sent and no byte or outcome, and no swarm seed can tell"

@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/restore/window.rs b/crates/core/src/restore/window.rs
+index a8f87f67a..728567049 100644
+--- a/crates/core/src/restore/window.rs
++++ b/crates/core/src/restore/window.rs
+@@ -103,7 +103,7 @@ impl<'s, S: ObjectStore> Lookahead<'s, S> {
+                 break;
+             };
+             self.ready.push_back(
+-                (info.size <= self.small).then(|| self.store.read_span(info.key, 0, SPAN_TO_END)),
++                (info.size <= u64::MAX).then(|| self.store.read_span(info.key, 0, SPAN_TO_END)),
+             );
+             self.opened = self.opened.saturating_add(1);
+         }

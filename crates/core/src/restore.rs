@@ -902,26 +902,29 @@ async fn apply_chain<S: ObjectStore, K: DatabaseSink>(
         Some(kept) => kept,
         None => start(store, &chain, sink, bytes_read).await?,
     };
-    for (index, info) in chain.files().iter().enumerate().skip(done) {
-        let before = *bytes_read;
-        match apply_file(store, info, Some(&last), sink, bytes_read).await {
-            Ok(verified) => last = verified,
-            // Nothing of the missing file reached the sink, which holds exactly the files
-            // before it; a file gone part-way leaves pages no file vouches for.
-            Err(Abort::Vanished(missing)) if *bytes_read == before => {
-                let Some(applied) = chain.first(index) else {
-                    return Err(Abort::Vanished(missing));
-                };
-                return Err(Abort::Kept(Box::new(Resume {
-                    applied,
-                    last,
-                    skipped,
-                    missing,
-                    target: rest,
-                    inside_file,
-                })));
+    {
+        let mut files = window::Lookahead::new(store, chain.files(), done);
+        while let Some((index, info, mut stream)) = files.next_file() {
+            let before = *bytes_read;
+            match apply_file(info.key, &mut *stream, Some(&last), sink, bytes_read).await {
+                Ok(verified) => last = verified,
+                // Nothing of the missing file reached the sink, which holds exactly the files
+                // before it; a file gone part-way leaves pages no file vouches for.
+                Err(Abort::Vanished(missing)) if *bytes_read == before => {
+                    let Some(applied) = chain.first(index) else {
+                        return Err(Abort::Vanished(missing));
+                    };
+                    return Err(Abort::Kept(Box::new(Resume {
+                        applied,
+                        last,
+                        skipped,
+                        missing,
+                        target: rest,
+                        inside_file,
+                    })));
+                }
+                Err(abort) => return Err(abort),
             }
-            Err(abort) => return Err(abort),
         }
     }
     let key = chain.files().last().map_or(chain.snapshot().key, |f| f.key);
@@ -956,7 +959,9 @@ async fn start<S: ObjectStore, K: DatabaseSink>(
         }
         sink.reset().map_err(sink_fault(SinkOp::Reset))?;
     }
-    let base = apply_file(store, chain.snapshot(), None, sink, bytes_read).await?;
+    let snapshot = chain.snapshot();
+    let mut stream = window::stream(store, snapshot);
+    let base = apply_file(snapshot.key, &mut *stream, None, sink, bytes_read).await?;
     Ok((1, 0, base))
 }
 
@@ -1054,19 +1059,16 @@ fn read_abort(key: FileKey, fault: ReadFault<RestoreError>) -> Abort {
     }
 }
 
-async fn apply_file<S: ObjectStore, K: DatabaseSink>(
-    store: &S,
-    info: &FileInfo,
+async fn apply_file<K: DatabaseSink>(
+    key: FileKey,
+    stream: &mut (dyn ReadStream + '_),
     previous: Previous<'_>,
     sink: &mut K,
     bytes_read: &mut u64,
 ) -> Result<Verified, Abort> {
-    let key = info.key;
     let mut read = LtxRead::new(key, chunk_len());
     let applied = read
-        .read_verified_from(&mut *window::stream(store, info), |event| {
-            on_event(key, previous, sink, event)
-        })
+        .read_verified_from(stream, |event| on_event(key, previous, sink, event))
         .await;
     *bytes_read = bytes_read.saturating_add(read.bytes_read());
     let verified = applied.map_err(|fault| read_abort(key, fault))?;

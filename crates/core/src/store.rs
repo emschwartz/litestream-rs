@@ -495,6 +495,9 @@ pub enum BatchKind {
     Spans,
 }
 
+/// The `end` of an [`ObjectStore::read_span`] that reads to the object's end.
+pub const SPAN_TO_END: u64 = u64::MAX;
+
 /// A backend holding a replica's LTX objects, keyed by [`FileKey`].
 ///
 /// Futures are `Send` and name no runtime; a backend may complete them
@@ -545,6 +548,11 @@ pub trait ObjectStore: Send + Sync {
     /// caller, a bounded number of pieces, so the spans download at once while the caller takes
     /// them in turn; the request may go out before the first piece is asked for. The default reads
     /// each piece with [`Self::read`]. A wrapper forwards it.
+    ///
+    /// An `end` of [`SPAN_TO_END`] is the rest of the object, as [`Self::read_stream`] reads it,
+    /// opened ahead the same way but with one piece of read-ahead: a restore opens its next small
+    /// files this way, so their round trips overlap instead of following one another (Go does
+    /// the same, `restoreOpenConcurrency` in `replica.go`).
     fn read_span(&self, key: FileKey, start: u64, end: u64) -> Box<dyn ReadStream + '_> {
         Box::new(Ranged {
             store: self,
@@ -919,11 +927,11 @@ pub trait ReadStream: Send {
 
 /// [`ObjectStore::read_stream`]'s and [`ObjectStore::read_span`]'s default: one
 /// [`ObjectStore::read`] a piece, none past `end`.
-struct Ranged<'a, S: ?Sized> {
-    store: &'a S,
-    key: FileKey,
-    offset: u64,
-    end: Option<u64>,
+pub(crate) struct Ranged<'a, S: ?Sized> {
+    pub(crate) store: &'a S,
+    pub(crate) key: FileKey,
+    pub(crate) offset: u64,
+    pub(crate) end: Option<u64>,
 }
 
 impl<S: ObjectStore + ?Sized> ReadStream for Ranged<'_, S> {

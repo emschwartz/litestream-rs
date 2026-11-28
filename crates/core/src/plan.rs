@@ -960,7 +960,10 @@ impl<'a> AsOfPlanner<'a> {
                 break;
             }
             let Some(admitted) = eligible_at(&info, self.instant, resolved) else {
-                return Resolve::Need(Need::one(info));
+                let ahead = self
+                    .expected_after(&info)
+                    .filter(|later| resolved.exact(later).is_none());
+                return Resolve::Need(Need::with_ahead(info, ahead));
             };
             #[cfg(any(test, feature = "testing"))]
             {
@@ -976,6 +979,40 @@ impl<'a> AsOfPlanner<'a> {
         }
         self.pass = Pass::Past;
         Resolve::Done(())
+    }
+
+    /// The files this pass would ask for after `first` if every one proves eligible, lazily: the
+    /// chain grown by the most preferred file that touches and passes its end, as
+    /// [`Self::extend`] grows it, from the files not yet touching. A store that runs a batch
+    /// reads them with `first`, so a chain of N files costs N over the batch width round trips
+    /// and not N. Only the files at the end, past the instant, are read for nothing: about a
+    /// batch or two.
+    fn expected_after(&self, first: &FileInfo) -> impl Iterator<Item = FileInfo> {
+        let mut reach = first.key.range().max();
+        let mut best: Option<&FileInfo> = None;
+        let mut rest = self.sweep.iter().skip(self.entered).copied();
+        let mut held: Option<&FileInfo> = None;
+        std::iter::from_fn(move || {
+            loop {
+                let Some(next) = held.take().or_else(|| rest.next()) else {
+                    // The sweep is spent: the best so far is the last of the chain.
+                    return best.take().copied();
+                };
+                if touches(next.key.range().min(), reach) {
+                    if passes(next, reach) && best.is_none_or(|b| preference(next) > preference(b))
+                    {
+                        best = Some(next);
+                    }
+                    continue;
+                }
+                // A file that does not touch the end ends the chain, unless the best so far
+                // extends it; the file is then judged against the longer chain.
+                let file = best.take()?;
+                reach = file.key.range().max();
+                held = Some(next);
+                return Some(*file);
+            }
+        })
     }
 
     /// Pass 3: what lies past the reach, by keys ([`bridges_nothing_past`]),

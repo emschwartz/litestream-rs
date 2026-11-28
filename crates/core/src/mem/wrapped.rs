@@ -10,7 +10,8 @@ use super::MemStore;
 use crate::layout::{CreatedAt, FileInfo, FileKey, Level};
 use crate::store::WriteMode;
 use crate::store::{
-    BatchKind, ListAt, Listing, ObjectStore, PageLimit, ReadLen, StoreError, Upload,
+    BatchKind, ListAt, Listing, ObjectStore, PageLimit, Ranged, ReadLen, ReadStream, StoreError,
+    Upload,
 };
 use std::num::NonZeroUsize;
 
@@ -50,6 +51,13 @@ pub(crate) struct Wrapped {
     pub(crate) width: usize,
     /// The size of each `list_many` batch asked of it, in order.
     pub(crate) batches: Mutex<Vec<usize>>,
+    /// Each span opened ([`ObjectStore::read_span`]): its key, start and end, and how many reads
+    /// had begun before it.
+    pub(crate) spans: Mutex<Vec<(FileKey, u64, u64, usize)>>,
+    /// The size of each `created_at_many` batch asked of it, in order.
+    pub(crate) created_batches: Mutex<Vec<usize>>,
+    /// Each file whose created-at time was asked, by a batch or alone, in order.
+    pub(crate) created_asked: Mutex<Vec<FileKey>>,
 }
 
 impl Wrapped {
@@ -104,6 +112,9 @@ impl Wrapped {
             put_after_miss: Mutex::new(None),
             width: 1,
             batches: Mutex::new(Vec::new()),
+            spans: Mutex::new(Vec::new()),
+            created_batches: Mutex::new(Vec::new()),
+            created_asked: Mutex::new(Vec::new()),
         }
     }
 
@@ -191,7 +202,29 @@ impl ObjectStore for Wrapped {
         read
     }
 
+    async fn created_at_many(&self, files: &[FileInfo]) -> Vec<Result<CreatedAt, StoreError>> {
+        assert!(files.len() <= self.width, "a batch wider than the store");
+        self.created_batches.lock().unwrap().push(files.len());
+        let mut out = Vec::with_capacity(files.len());
+        for file in files {
+            out.push(self.created_at(file).await);
+        }
+        out
+    }
+
+    fn read_span(&self, key: FileKey, start: u64, end: u64) -> Box<dyn ReadStream + '_> {
+        let begun = self.reads.load(Ordering::Relaxed);
+        self.spans.lock().unwrap().push((key, start, end, begun));
+        Box::new(Ranged {
+            store: self,
+            key,
+            offset: start,
+            end: Some(end),
+        })
+    }
+
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
+        self.created_asked.lock().unwrap().push(file.key);
         let doomed = self.vanish.lock().unwrap().remove(&file.key);
         if doomed {
             self.inner.delete(&[file.key]).await?;
