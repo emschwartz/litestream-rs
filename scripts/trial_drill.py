@@ -473,7 +473,10 @@ class S3:
         return [(k, int(s or 0)) for k, s in rows]
 
     def uploads(self, prefix: str) -> list[tuple[str, str]]:
-        return self._pages({"uploads": "", "prefix": prefix}, "Upload", ("Key", "UploadId"), "key-marker", ("NextKeyMarker", "NextUploadIdMarker"))
+        # No `prefix` parameter: MinIO answers a prefixed ListMultipartUploads with nothing even when uploads
+        # match (as lsr's own sweep knows, request.rs list_uploads), so the bucket's list is cut here.
+        rows = self._pages({"uploads": ""}, "Upload", ("Key", "UploadId"), "key-marker", ("NextKeyMarker", "NextUploadIdMarker"))
+        return [r for r in rows if r[0].startswith(prefix)]
 
     def delete(self, key: str) -> None:
         self.call("DELETE", key, {})
@@ -509,6 +512,16 @@ class Throttle(threading.Thread):
         self.asyncio, self.up, self.rate, self.next_free = asyncio, (host, port), rate, 0.0
         self.open: dict[str, float] = {}  # keys of multipart uploads begun and not completed or aborted
         self.parts = 0
+        # The kill trigger of phase 4. Armed, the proxy lets the first `gate_after` parts of an upload through
+        # and holds the next part's request for good: the upload is then open in the bucket with some parts
+        # landed, however fast the link is, and the drill kills lsr on a signal that cannot be missed (a poll
+        # of the listing, once a second, missed uploads that finish in under a second).
+        self.gate_after = 0
+        self.released = False
+        self.held = threading.Event()
+        self.held_key: str | None = None
+        self.parts_by_key: dict[str, int] = {}
+        self.aborted: set[str] = set()  # keys an AbortMultipartUpload was sent for
         self.mplog = None  # a file for the multipart requests, set by the drill
         self.recent: collections.deque = collections.deque(maxlen=40)  # the last requests seen, for a failure report
         self.loop = asyncio.new_event_loop()
@@ -517,8 +530,19 @@ class Throttle(threading.Thread):
 
     REQ = re.compile(rb"(POST|PUT|DELETE|GET|HEAD) /(\S+) HTTP/1\.[01]")
 
-    def observe(self, data: bytes) -> None:
-        """Multipart uploads in flight, read off the request lines: this MinIO never lists them."""
+    def arm(self, after: int) -> None:
+        """Holds the request of the part after `after` parts of one upload, other than a snapshot's."""
+        self.parts_by_key.clear()
+        self.held.clear()
+        self.held_key, self.released, self.gate_after = None, False, after
+
+    def disarm(self) -> None:
+        """Ends the hold; the held request is dropped, as the process that sent it is dead."""
+        self.gate_after, self.released = 0, True
+
+    def observe(self, data: bytes) -> bool:
+        """Multipart uploads in flight, read off the request lines. True when the request must be held."""
+        hold = False
         for m in self.REQ.finditer(data[:8192]):
             target = m.group(2).split(b"?", 1)
             verb, key, query = m.group(1), urllib.parse.unquote(target[0].decode(errors="replace")), (target[1] if len(target) > 1 else b"")
@@ -532,14 +556,24 @@ class Throttle(threading.Thread):
                 self.open[key] = time.monotonic()
             elif verb == b"PUT" and b"partNumber" in names:
                 self.parts += 1
+                n = self.parts_by_key[key] = self.parts_by_key.get(key, 0) + 1
+                if (self.gate_after and not self.held.is_set() and key in self.open
+                        and f"/{SNAPSHOT_LEVEL:04d}/" not in key and n > self.gate_after):
+                    self.held_key, hold = key, True
+                    self.held.set()
             elif verb in (b"POST", b"DELETE") and b"uploadId" in names:
                 self.open.pop(key, None)
+                if verb == b"DELETE":
+                    self.aborted.add(key)
+        return hold
 
     async def pump(self, r, w, limited: bool) -> None:
         try:
             while data := await r.read(65536):
-                if limited:
-                    self.observe(data)
+                if limited and self.observe(data):
+                    while not self.released:
+                        await self.asyncio.sleep(0.05)
+                    return
                 if limited and self.rate:
                     now = self.loop.time()
                     start = max(now, self.next_free)
@@ -994,6 +1028,10 @@ class Drill:
             return list(self.throttle.open)
         return [k for k, _ in self.s3.uploads(self.prefix + "/")]
 
+    def bucket_key(self, proxy_key: str) -> str:
+        """A key as the proxy reads it off a path-style request (with the bucket first) as the listing has it."""
+        return proxy_key.removeprefix(self.bucket + "/")
+
     def keyset(self) -> set:
         return {k for k, _ in self.s3.list(self.prefix + "/")}
 
@@ -1115,6 +1153,8 @@ class Drill:
             if instant_by_db.get(db):
                 ms = instant_by_db[db]
                 results.append(self.check_target(db, f"{tag}-instant", ["--timestamp", rfc3339(ms)], instant_ms=ms))
+                # The flag a deploy script passes: restore only when the replica has history, here at the instant.
+                results.append(self.check_target(db, f"{tag}-if-exists", ["-if-replica-exists", "--timestamp", rfc3339(ms)], instant_ms=ms))
         return results
 
 
@@ -1296,6 +1336,7 @@ def kill_and_restart(d: Drill, point: str, n: int, trigger_info: dict) -> dict:
     keys = d.keyset()
     dm.kill9()
     if d.throttle is not None:
+        d.throttle.disarm()
         d.throttle.open.clear()  # the killed process's uploads will never complete
     time.sleep(1.0)
     nd = Daemon(d, "lsr", f"lsr{n}")
@@ -1312,6 +1353,23 @@ def kill_and_restart(d: Drill, point: str, n: int, trigger_info: dict) -> dict:
     return out
 
 
+def check_orphan_swept(d: Drill, orphan: str, before: dict) -> dict:
+    """The killed process left `orphan`, a multipart upload with parts and no Complete. Its restart must
+    leave none open under the prefix (the boot's sweep lists and aborts them), and what lists them must
+    have been able to: an upload the listing never showed proves nothing."""
+    left = [k for k, _ in d.s3.uploads(d.prefix + "/")]
+    out = {"key": orphan.rsplit("/", 2)[-1], "listed_before_kill": before.get("listed_open"), "open_after_restart": len(left)}
+    if left:
+        d.fail(f"{len(left)} multipart upload(s) stayed open after the restart, e.g. {left[0]}")
+    if d.throttle is not None:
+        out["abort_seen_by_proxy"] = orphan in {d.bucket_key(k) for k in d.throttle.aborted}
+        if before.get("listed_open") and not out["abort_seen_by_proxy"]:
+            d.fail(f"the open upload {orphan} was gone after the restart but no abort for it was sent")
+        if not before.get("listed_open"):
+            d.fail("the bucket's listing did not show the held upload, so the restart's sweep could not be checked")
+    return out
+
+
 def p4_lsr_load(d: Drill) -> dict:
     a = d.args
     t_start = d.current.t0
@@ -1319,14 +1377,27 @@ def p4_lsr_load(d: Drill) -> dict:
     kills = []
     seen_l0: set = set()
     # 1. kill -9 during a large upload: the application commits one transaction of more than a part
-    (d.work / "burst").write_text("big")
 
     def multipart():
         return [k for k in d.inflight() if f"/{SNAPSHOT_LEVEL:04d}/" not in k] or None
 
-    ups = d.wait(multipart, 1800, "a multipart upload in flight (the burst's level 0 file)", every=0.2)
+    if d.throttle is not None:
+        # The proxy holds the request of the burst's third part, so the upload stays open however fast the
+        # link: some parts have landed, the rest never will, and Complete is never sent.
+        d.throttle.arm(2)
+        (d.work / "burst").write_text("big")
+        d.wait(d.throttle.held.is_set, 1800, "the burst's level 0 upload held at its third part", every=0.1)
+        ups = [d.throttle.held_key]
+        orphan = d.bucket_key(ups[0])
+        info = {"in_flight": ups[0].rsplit("/", 2)[-2:], "parts_landed": d.throttle.parts_by_key.get(ups[0], 0) - 1,
+                "listed_open": orphan in {k for k, _ in d.s3.uploads(d.prefix + "/")}}
+    else:
+        (d.work / "burst").write_text("big")
+        ups = d.wait(multipart, 1800, "a multipart upload in flight (the burst's level 0 file)", every=0.2)
+        orphan, info = d.bucket_key(ups[0]), {"in_flight": ups[0].rsplit("/", 2)[-2:]}
     seen_l0.update(k for k in d.keyset() if "/0000/" in k)
-    kills.append(kill_and_restart(d, "large-upload", 2, {"in_flight": ups[0].rsplit("/", 2)[-2:]}))
+    kills.append(kill_and_restart(d, "large-upload", 2, info))
+    kills[-1]["orphan"] = check_orphan_swept(d, orphan, info)
     # 2. kill -9 during a compaction: lsr reads its inputs (GETs) only when it compacts
     d.wait(lambda: (scrape(d) and True), 120, "lsr's metrics", every=1)
     gets0 = total(scrape(d), "litestream_replica_operation_total", "operation", "GET")
@@ -1479,8 +1550,6 @@ def p6_rollback(d: Drill) -> dict:
 def p7_summary(d: Drill) -> dict:
     """The run prefix is removed, multipart uploads included, and must list empty."""
     r = d.s3.purge(d.prefix + "/")
-    if d.args.store == "minio":
-        r["note"] = "this MinIO lists no multipart uploads, so none could be aborted or checked; a provider run does"
     d.cleanup_result = r
     if r["left_objects"] or r["left_uploads"]:
         d.fail(f"the run prefix is not empty after cleanup: {r}")
@@ -1546,6 +1615,58 @@ def run_drill(a: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- the canary
 
 
+def gate_canary() -> list[str]:
+    """The proxy's hold on an upload's third part: the first two parts reach the store, the third never
+    does, a snapshot's upload is never held, and an abort is recorded."""
+    import socket
+    sink = socket.socket()
+    sink.bind(("127.0.0.1", 0))
+    sink.listen(16)
+    got: list[bytes] = []
+
+    def accept() -> None:
+        while True:
+            try:
+                c, _ = sink.accept()
+            except OSError:
+                return
+            got.append(c.recv(4096))
+            c.close()
+
+    threading.Thread(target=accept, daemon=True).start()
+    proxy = Throttle("127.0.0.1", sink.getsockname()[1], 0)
+    proxy.start()
+    proxy.ready.wait()
+
+    def send(line: str) -> None:
+        with socket.create_connection(("127.0.0.1", proxy.port)) as c:
+            c.sendall(f"{line} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+            time.sleep(0.2)
+
+    bad: list[str] = []
+    base = "PUT /b/p/db/0000/a.ltx?uploadId=u&partNumber="
+    proxy.arm(2)
+    send("POST /b/p/db/0000/a.ltx?uploads")
+    send("POST /b/p/db/0009/s.ltx?uploads")
+    for n in range(1, 4):
+        send(base.replace("0000/a", "0009/s") + str(n))  # a snapshot's parts pass, however many
+    if proxy.held.is_set():
+        bad.append("the proxy held a snapshot's part")
+    for n in range(1, 4):
+        send(base + str(n))
+    seen = sum(1 for r in got if b"/0000/a.ltx" in r and b"partNumber" in r)
+    if not proxy.held.is_set() or proxy.held_key != "b/p/db/0000/a.ltx":
+        bad.append(f"the third part was not held: {proxy.held_key}")
+    if seen != 2:
+        bad.append(f"{seen} parts of the held upload reached the store, not 2")
+    proxy.disarm()
+    send("DELETE /b/p/db/0000/a.ltx?uploadId=u")
+    if "b/p/db/0000/a.ltx" not in proxy.aborted or "b/p/db/0000/a.ltx" in proxy.open:
+        bad.append("the abort was not recorded")
+    sink.close()
+    return [f"gate: {b}" for b in bad]
+
+
 def run_canary(_a: argparse.Namespace) -> int:
     """The checkers must catch damage: a database with a flipped payload byte, a stale state row and a
     state that never existed must each be reported, and the intact database must pass."""
@@ -1599,6 +1720,7 @@ def run_canary(_a: argparse.Namespace) -> int:
         plan = " ".join(str(r[-1]) for r in sqlite3.connect(db).execute("EXPLAIN QUERY PLAN " + RELOAD_BOUNDS))
         if re.search(r"\bSCAN t\b", plan):
             problems.append(f"the writer's restart reads the whole table: {plan}")
+        problems += gate_canary()
         if problems:
             print("canary FAILED:\n  " + "\n  ".join(problems))
             return 1
