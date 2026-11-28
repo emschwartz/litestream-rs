@@ -15,6 +15,8 @@ replace \| with \^ in put_uvarint
 replace \| with \^ in .*FileKey.*from_str
 # core plan.rs extend: `preference` ends in the file's own range, so two distinct files never tie and `>` vs `>=` cannot pick differently.
 replace > with >= in extend
+# core plan.rs AsOfPlanner::expected_after: same argument as extend, `preference` ends in the file's own range, so two distinct files never tie.
+replace > with >= in AsOfPlanner::expected_after
 # core plan.rs Sweep::next: `sweep_order` includes the key, unique per file, so `<` vs `<=` never meets a tie.
 replace < with <= in <impl Iterator for Sweep<'a>>::next
 # core pages.rs Seeding::add: a quiet mark at or below the confirmed transaction is trimmed before use (`observe_lag`), so `>` vs `>=` at it cannot be told apart.

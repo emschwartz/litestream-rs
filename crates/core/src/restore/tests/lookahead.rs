@@ -129,3 +129,14 @@ fn no_depth_opens_nothing_ahead() {
     assert!(ahead.next_file().is_none());
     assert!(store.spans.lock().unwrap().is_empty());
 }
+
+#[test]
+fn the_default_limit_is_a_megabyte() {
+    let store = wide(chain(0), 2);
+    let files = [info(1, 1), info(2, AHEAD_BYTES), info(3, AHEAD_BYTES + 1)];
+    let mut ahead = Lookahead::new(&store, &files, 0);
+    ahead.next_file().unwrap();
+    let opened: Vec<FileKey> = store.spans.lock().unwrap().iter().map(|s| s.0).collect();
+    assert_eq!(opened, [files[0].key, files[1].key]);
+    assert_eq!(AHEAD_BYTES, 1 << 20);
+}

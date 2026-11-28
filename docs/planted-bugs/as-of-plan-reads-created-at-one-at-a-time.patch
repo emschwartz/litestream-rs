@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/plan.rs b/crates/core/src/plan.rs
-index e3f88edc4..f61b4d5e0 100644
+index 2306caf9c..68c09e8a1 100644
 --- a/crates/core/src/plan.rs
 +++ b/crates/core/src/plan.rs
-@@ -905,7 +905,7 @@ impl<'a> AsOfPlanner<'a> {
-                     let ahead = rest
-                         .filter(|later| resolved.exact(later).is_none())
-                         .map(|later| **later);
--                    return Resolve::Need(Need::with_ahead(info, ahead));
-+                    let _ = ahead; return Resolve::Need(Need::one(info));
-                 }
-                 Some(true) => {
-                     self.chain = ContiguousChain::start(info);
+@@ -963,7 +963,7 @@ impl<'a> AsOfPlanner<'a> {
+                 let ahead = self
+                     .expected_after(&info)
+                     .filter(|later| resolved.exact(later).is_none());
+-                return Resolve::Need(Need::with_ahead(info, ahead));
++                let _ = ahead; return Resolve::Need(Need::one(info));
+             };
+             #[cfg(any(test, feature = "testing"))]
+             {
