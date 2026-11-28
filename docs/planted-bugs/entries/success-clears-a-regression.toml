@@ -1,0 +1,9 @@
+# An upload's success clears a regression's degradation and its count, so a listing that keeps
+# ending low re-sends with the first wait every round behind a clean health check. Only the
+# deleting job reaches it: under a hiding listing the refused put fails the step, so no
+# success comes between two regressions.
+name = "success-clears-a-regression"
+fix = "claude/issue-540"
+package = "lsr-core"
+tests = ["actor::tests::hidden_newest::a_job_that_keeps_deleting_the_newest_file_degrades_and_backs_off"]
+unaided_miss = "The simulator's store lists every object it holds and no scenario deletes the newest file round after round (issue #469), so no swarm run sees a regression twice before a listing shows the replica whole."

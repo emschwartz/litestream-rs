@@ -1130,6 +1130,12 @@ impl Actor {
                 self.engine.upload = UploadState::ListFirst { confirmed: None };
                 self.engine.maintain.level_one = None;
                 self.engine.maintain.stale = true;
+                // A regression seen again before a listing showed the replica whole waits
+                // longer than the last one, up to the cap: the files sent again in between
+                // did not make it (issue #540).
+                if let Waiter::Task(task) = waiter {
+                    self.kept.tasks.get_mut(task).resume_regressed();
+                }
                 waiter
             }
             Action::Rebuild => {
@@ -2599,6 +2605,7 @@ impl Actor {
         if let Some(tick) = self.listing_regressed(&inventory, now) {
             return Some(tick);
         }
+        self.listing_confirmed();
         if self.engine.maintain.read_back_owed
             && let Some(tick) = self.read_back_unit(env.remote, &inventory, now).await
         {
@@ -2655,6 +2662,16 @@ impl Actor {
     fn listing_regressed(&mut self, inventory: &Inventory, now: Timestamp) -> Option<Tick> {
         (inventory.newest() < self.engine.upload.confirmed())
             .then(|| self.fault(Task::Upload, Fault::RemoteRegressed, now))
+    }
+
+    /// A maintenance listing that did not end below what the uploader confirmed, with every
+    /// staged file confirmed: the files a regression made it send again are on the replica,
+    /// and the regression's degradation ends. Before the relist, or before what it found
+    /// missing was sent again, the listing proves nothing.
+    fn listing_confirmed(&mut self) {
+        if matches!(self.engine.upload, UploadState::At(_)) && self.uploads_idle() {
+            self.kept.tasks.get_mut(Task::Upload).listing_confirms();
+        }
     }
 
     /// The read-back a boot owes (see `maintain::audit`). `None` when every

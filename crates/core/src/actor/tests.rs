@@ -63,6 +63,11 @@ struct CountingUpload {
     created: Option<Timestamp>,
     /// What the next questions about the upload's parts are answered, in order.
     flights: Arc<std::sync::Mutex<std::collections::VecDeque<Flight>>>,
+    /// The upload's key, and where a commit records it as the store's newest file.
+    key: FileKey,
+    newest: Arc<std::sync::Mutex<Option<FileKey>>>,
+    /// The store a commit deletes its object from at once, when it does.
+    drops: Option<MemStore>,
 }
 
 impl CountingUpload {
@@ -97,6 +102,10 @@ impl Upload for CountingUpload {
 
     async fn commit(self) -> Result<FileInfo, StoreError> {
         let info = self.inner.commit().await?;
+        *self.newest.lock().unwrap() = Some(self.key);
+        if let Some(store) = self.drops {
+            store.delete(&[self.key]).await?;
+        }
         Ok(Self::answer(self.created, info))
     }
 
@@ -156,6 +165,17 @@ struct Counting {
     /// Keys every listing leaves out though the store holds them, as a
     /// listing that lags a write does.
     hidden: Arc<std::sync::Mutex<Vec<FileKey>>>,
+    /// While set, every listing leaves out the file committed last, as a listing that lags
+    /// each new write does.
+    hides_newest: Arc<AtomicBool>,
+    /// The key of the upload committed last.
+    newest: Arc<std::sync::Mutex<Option<FileKey>>>,
+    /// While set, every committed upload is deleted at once, as a job that keeps removing the
+    /// replica's newest file does.
+    drops_newest: Arc<AtomicBool>,
+    /// When non-zero, the most calls the store takes before the test fails: an engine that
+    /// spins on the store ends the test instead of hanging it.
+    request_cap: Arc<AtomicU32>,
     /// What every `remove_scratch` answers instead of sweeping, while set: a store that
     /// refuses the boot's first call.
     scratch_error: Arc<std::sync::Mutex<Option<StoreError>>>,
@@ -180,6 +200,11 @@ impl Counting {
 
     fn request(&self, request: Request, level: Level) {
         self.count();
+        let cap = self.request_cap.load(Ordering::SeqCst);
+        assert!(
+            cap == 0 || self.calls() <= cap,
+            "more than {cap} requests: an engine that spins on the store"
+        );
         self.requests.lock().unwrap().push((request, level));
     }
 
@@ -271,7 +296,10 @@ impl ObjectStore for Counting {
             })
             .copied()
             .collect();
-        let hidden = self.hidden.lock().unwrap().clone();
+        let mut hidden = self.hidden.lock().unwrap().clone();
+        if self.hides_newest.load(Ordering::SeqCst) {
+            hidden.extend(*self.newest.lock().unwrap());
+        }
         let listed = self.inner.list(level, after, limit);
         let entries = self.listed.clone();
         async move {
@@ -385,6 +413,11 @@ impl ObjectStore for Counting {
         let begun = self.inner.begin_sized_upload(key, created_at, mode, len);
         let created = self.commit_says_created.then_some(created_at);
         let flights = Arc::clone(&self.flights);
+        let (key, newest) = (*key, Arc::clone(&self.newest));
+        let drops = self
+            .drops_newest
+            .load(Ordering::SeqCst)
+            .then(|| self.inner.clone());
         async move {
             if refused {
                 return Err(StoreError::Transient {
@@ -397,6 +430,9 @@ impl ObjectStore for Counting {
                 inner,
                 created,
                 flights,
+                key,
+                newest,
+                drops,
             })
         }
     }
@@ -2456,6 +2492,7 @@ mod checkpoint_failed;
 mod create_only;
 mod degraded;
 mod first_start;
+mod hidden_newest;
 mod index_reset;
 mod lag;
 mod level_holes;

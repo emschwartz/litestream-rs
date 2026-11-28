@@ -1,9 +1,9 @@
 diff --git a/crates/core/src/actor/state.rs b/crates/core/src/actor/state.rs
-index a9ea49ed..c1ee1e72 100644
+index 747d8347b..3b52212ff 100644
 --- a/crates/core/src/actor/state.rs
 +++ b/crates/core/src/actor/state.rs
-@@ -201,7 +201,9 @@ impl Retry {
-     pub(super) fn succeed(&mut self) {
+@@ -240,7 +240,9 @@ impl Retry {
+         }
          let kept = self
              .degraded
 -            .filter(|was| outlasts_success(was.cause))

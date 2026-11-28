@@ -1,0 +1,7 @@
+# An upload refused as taken relists, and a listing that still hides the refused key plans the
+# same key again: refusal, read-back and relist repeat inside one tick with no wait.
+name = "taken-relist-trusts-a-listing-below-the-key"
+fix = "claude/issue-540"
+package = "lsr-core"
+tests = ["actor::tests::hidden_newest::a_listing_that_hides_the_newest_file_degrades_and_backs_off"]
+unaided_miss = "The simulator's store lists every object it holds (issue #469), so a relist after a refused create-only put always shows the refused key."

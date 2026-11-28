@@ -1,0 +1,16 @@
+diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
+index df2a4a6a1..e7450994b 100644
+--- a/crates/core/src/upload.rs
++++ b/crates/core/src/upload.rs
+@@ -871,11 +871,6 @@ async fn taken<L: Role, S: Role>(
+     // refusal, the read-back and the relist would repeat with no wait inside one tick (issue
+     // #540). The listing ends below a file the replica holds, which is a regression's
+     // signal and wait.
+-    if listed.state.confirmed() < Some(key.range().max())
+-        && !matches!(listed.did, Did::Diverged { .. })
+-    {
+-        return Err(fail(list_first(state), Fault::RemoteRegressed));
+-    }
+     Ok(Some(listed))
+ }
+ 

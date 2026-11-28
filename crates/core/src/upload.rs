@@ -59,7 +59,9 @@
 //!   that verifies whole with a different file checksum (a compare alone may be a read that
 //!   lied), is another writer's or an earlier run's: the replica is listed at once and judged by
 //!   the listing's rules above ([`Did::Diverged`], or
-//!   `Fault::RemoteAheadOfLocal` when the replica is ahead).
+//!   `Fault::RemoteAheadOfLocal` when the replica is ahead). A listing that still ends below
+//!   the refused key hides a file the bucket holds: `Fault::RemoteRegressed`, never a second
+//!   put of the key in the same step.
 //!
 //! A failure before the commit leaves the state alone (nothing could have been
 //! published). A failure of the commit itself gives [`UploadState::ListFirst`],
@@ -863,9 +865,18 @@ async fn taken<L: Role, S: Role>(
         return Ok(Some(already));
     }
     // The relist judges the refused key from a fresh listing and a byte compare.
-    list_step(list_first(state), staging, remote, newest_staged)
-        .await
-        .map(|(listed, _)| Some(listed))
+    let (listed, _) = list_step(list_first(state), staging, remote, newest_staged).await?;
+    // The bucket just refused the key as taken, yet the listing ends below it: a listing that
+    // hides the newest file. Taken as it stands, it would plan the same key again, and the
+    // refusal, the read-back and the relist would repeat with no wait inside one tick (issue
+    // #540). The listing ends below a file the replica holds, which is a regression's
+    // signal and wait.
+    if listed.state.confirmed() < Some(key.range().max())
+        && !matches!(listed.did, Did::Diverged { .. })
+    {
+        return Err(fail(list_first(state), Fault::RemoteRegressed));
+    }
+    Ok(Some(listed))
 }
 
 /// Why a second read of a staged file gave an upload no bytes.

@@ -359,7 +359,7 @@ Every policy written "retry" below also stalls: from the 8th failure in a row on
 | `StoreRefused` | keep trying | Retries the same step | The step succeeds |
 | `RemoteCorrupt` | keep trying | Retries the same step | The object verifies, or is repaired (MAINT-4) |
 | `OtherWriter` | **stop** | With `ContinueAndInterleaveHistories`: drops all engine state, boots again, and snapshots after the other writer's newest transaction | n/a under the default |
-| `RemoteRegressed` | keep trying | Lists the replica again, continues from what it holds now, and sends again the staged files it lacks | The relist succeeds |
+| `RemoteRegressed` | keep trying | Lists the replica again, continues from what it holds now, and sends again the staged files it lacks. A regression seen again before the cause clears waits twice as long as the last, up to 5 minutes, and uploads wait with it (`docs/decisions/D317.md`) | A maintenance listing, taken once every staged file is confirmed, does not end below what the engine confirmed. An upload's success alone does not clear it |
 | `WalCorrupt` | keep trying | Rescans. Nothing is staged past the bad frame | The frame verifies, or the WAL starts a new generation |
 | `WalTruncated` | keep trying | Rescans | The WAL covers its committed end again, or a new generation |
 | `WalUnlinked` | keep trying | Retries | Never by itself: the file is gone. An operator restarts the application and the replicator |

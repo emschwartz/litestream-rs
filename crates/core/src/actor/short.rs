@@ -86,6 +86,7 @@ impl Actor {
                 now,
             )));
         }
+        self.listing_confirmed();
         let decided = {
             let (cfg, state) = (&self.kept.cfg.maintenance, &self.engine.maintain.state);
             let mut step = |resolved: &ResolvedCreatedAt| {

@@ -187,6 +187,28 @@ impl Retry {
         })
     }
 
+    /// The failure count a regression's degradation carries across successes, taken up again
+    /// before the next regression's failure is counted, so its wait goes on doubling.
+    pub(super) fn resume_regressed(&mut self) {
+        if let Some(was) = self.degraded
+            && was.cause == DegradedCause::RemoteRegressed
+            && let Some(rounds) = NonZeroU32::new(was.retries)
+        {
+            self.attempts = self.attempts.max(Some(rounds));
+        }
+    }
+
+    /// A listing showed the replica holding everything this engine confirmed: a regression's
+    /// degradation, its count and its wait end.
+    pub(super) fn listing_confirms(&mut self) {
+        if self
+            .degraded
+            .is_some_and(|was| was.cause == DegradedCause::RemoteRegressed)
+        {
+            *self = Self::default();
+        }
+    }
+
     /// Forgets the wait and the count, not a degradation: a maintenance job
     /// whose level keeps its own wait failed.
     pub(super) const fn clear_wait(&mut self) {
@@ -199,8 +221,23 @@ impl Retry {
     /// match (shipping the file's bytes is the success, and the page stays
     /// reported until the table no longer holds it as mismatched,
     /// [`Tasks::page_matches_again`]) or by a store without create-only writes
-    /// (every later success is a replacing write, until the process restarts).
+    /// (every later success is a replacing write, until the process restarts),
+    /// or by a regression (until a listing shows the replica whole).
     pub(super) fn succeed(&mut self) {
+        // A regression outlasts the success too, with its count: an upload that succeeds after
+        // a listing that ended low proves nothing about the replica (a listing that hides the
+        // newest file, a job that keeps deleting it), so the next listing that ends low waits
+        // longer than the last instead of starting from the first wait again. Only a listing
+        // that shows the replica whole ends it ([`Self::listing_confirms`]).
+        if let Some(was) = self.degraded
+            && was.cause == DegradedCause::RemoteRegressed
+        {
+            *self = Self {
+                degraded: Some(was),
+                ..Self::default()
+            };
+            return;
+        }
         let kept = self
             .degraded
             .filter(|was| outlasts_success(was.cause))
