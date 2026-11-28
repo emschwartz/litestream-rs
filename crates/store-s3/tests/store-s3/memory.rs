@@ -35,9 +35,10 @@ use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::num::NonZeroUsize;
 use std::os::unix::fs::FileExt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
@@ -100,8 +101,61 @@ fn leak(name: &str) -> &'static str {
     Box::leak(name.to_owned().into_boxed_str())
 }
 
-/// Reads one request off `stream` and answers it from `fake`, then closes.
-fn serve_one(mut stream: TcpStream, port: u16, fake: &FakeS3) -> io::Result<()> {
+/// Holds the answer to the first span of a file until the other spans of the window have been
+/// requested and fully sent, so a restore's read-ahead is on the heap by construction: whether
+/// a decoder that keeps pace with the fetches ever lets the window fill is a matter of
+/// scheduling, and a gate that waits on it is flaky.
+struct SpanGate {
+    /// Spans answered besides the first, and whether the first was released by them.
+    state: Mutex<(usize, bool)>,
+    changed: Condvar,
+    /// Spans that must be answered ahead of the first: the window's width less one.
+    ahead: usize,
+}
+
+/// How long the first span waits for the others before the gate reports that they never came.
+/// A liveness backstop, never the thing the test waits on.
+const GATE_BACKSTOP: Duration = Duration::from_secs(30);
+
+impl SpanGate {
+    fn new(width: usize) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new((0, false)),
+            changed: Condvar::new(),
+            ahead: width - 1,
+        })
+    }
+
+    /// Called before the answer to the first span is written.
+    fn hold_first(&self) {
+        let guard = self.state.lock().unwrap();
+        let (mut guard, _) = self
+            .changed
+            .wait_timeout_while(guard, GATE_BACKSTOP, |(sent, _)| *sent < self.ahead)
+            .unwrap();
+        guard.1 = guard.0 >= self.ahead;
+    }
+
+    /// Called once the answer to another span is on the wire.
+    fn sent_ahead(&self) {
+        self.state.lock().unwrap().0 += 1;
+        self.changed.notify_all();
+    }
+
+    /// Whether the first span waited for a full window of the others.
+    fn window_filled(&self) -> bool {
+        self.state.lock().unwrap().1
+    }
+}
+
+/// Reads one request off `stream` and answers it from `fake`, then closes. A `gate` holds the
+/// answer to a ranged read from the start of the object until the other ranges are sent.
+fn serve_one(
+    mut stream: TcpStream,
+    port: u16,
+    fake: &FakeS3,
+    gate: Option<&SpanGate>,
+) -> io::Result<()> {
     let mut head = Vec::new();
     let mut buf = vec![0_u8; 64 * KIB];
     let end = loop {
@@ -140,11 +194,17 @@ fn serve_one(mut stream: TcpStream, port: u16, fake: &FakeS3) -> io::Result<()> 
         .unwrap_or_default();
     let mut headers = Vec::new();
     let mut declared = 0_usize;
+    let mut first_span = false;
+    let mut other_span = false;
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
         let (name, value) = (name.trim().to_ascii_lowercase(), value.trim().to_owned());
+        if name == "range" {
+            first_span = value.starts_with("bytes=0-");
+            other_span = !first_span;
+        }
         if name == "content-length" {
             declared = value.parse().unwrap_or(0);
         }
@@ -164,6 +224,9 @@ fn serve_one(mut stream: TcpStream, port: u16, fake: &FakeS3) -> io::Result<()> 
     let reply = fake
         .send(HttpRequest::from_wire(method, url, headers, body))
         .map_err(io::Error::other)?;
+    if let Some(gate) = gate.filter(|_| first_span && method == Method::Get) {
+        gate.hold_first();
+    }
     let mut out = format!("HTTP/1.1 {} {}\r\n", reply.status(), reason(reply.status()));
     for (name, value) in reply.headers() {
         if !name.eq_ignore_ascii_case("content-length") {
@@ -184,11 +247,20 @@ fn serve_one(mut stream: TcpStream, port: u16, fake: &FakeS3) -> io::Result<()> 
     if method != Method::Head {
         stream.write_all(reply.body())?;
     }
-    stream.flush()
+    stream.flush()?;
+    if let Some(gate) = gate.filter(|_| other_span && method == Method::Get) {
+        gate.sent_ahead();
+    }
+    Ok(())
 }
 
 /// Serves `fake` on a loopback port until the process ends. Returns the port.
 fn serve(fake: &Arc<FakeS3>) -> u16 {
+    serve_gated(fake, None)
+}
+
+/// [`serve`], holding the first span of a file as `gate` says.
+fn serve_gated(fake: &Arc<FakeS3>, gate: Option<Arc<SpanGate>>) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let fake = Arc::clone(fake);
@@ -196,10 +268,11 @@ fn serve(fake: &Arc<FakeS3>) -> u16 {
         exclude_thread();
         for stream in listener.incoming().flatten() {
             let fake = Arc::clone(&fake);
+            let gate = gate.clone();
             thread::spawn(move || {
                 exclude_thread();
                 // A client that hangs up early has nothing left to answer.
-                if let Err(_hung_up) = serve_one(stream, port, &fake) {}
+                if let Err(_hung_up) = serve_one(stream, port, &fake, gate.as_deref()) {}
             });
         }
     });
@@ -501,7 +574,7 @@ fn ltx_bytes(n: u64, commit: u32, pages: std::ops::RangeInclusive<u32>) -> Vec<u
 
 /// Restores a snapshot of `mib` MiB through the real client reading `spans` spans of a file at
 /// once, and returns the heap peak.
-fn restore_peak(mib: usize, spans: usize) -> usize {
+fn restore_peak(mib: usize, spans: usize, gate: Option<Arc<SpanGate>>) -> usize {
     let fake = fake();
     let pages = u32::try_from(mib * 256).unwrap();
     let bytes = ltx_bytes(1, pages, 1..=pages);
@@ -511,7 +584,11 @@ fn restore_peak(mib: usize, spans: usize) -> usize {
         bytes,
         &[("x-amz-meta-litestream-timestamp", &now().to_string())],
     );
-    let store = store_on(serve(&fake), PartSize::MIN.get().try_into().unwrap(), spans);
+    let store = store_on(
+        serve_gated(&fake, gate),
+        PartSize::MIN.get().try_into().unwrap(),
+        spans,
+    );
     let pages = Arc::new(AtomicU64::new(0));
     let sink = Discard {
         pages: Arc::clone(&pages),
@@ -540,8 +617,8 @@ fn restore_bound() -> usize {
 /// connection as the decoder takes it, never held whole.
 #[test]
 fn a_restore_through_the_real_client_holds_one_chunk() {
-    let few = restore_peak(72, 1);
-    let many = restore_peak(144, 1);
+    let few = restore_peak(72, 1, None);
+    let many = restore_peak(144, 1, None);
     eprintln!(
         "restore 72 MiB: {} KiB, 144 MiB: {} KiB (bound {} KiB)",
         few >> 10,
@@ -566,11 +643,13 @@ const SPAN: usize = 8 * MIB;
 
 /// A restore reading five spans at once holds the spans read ahead, each its 8 MiB and the
 /// mebibyte its thread is reading and the one being handed out, beside the chunk; and no more as
-/// the database doubles.
+/// the database doubles. The server holds the first span back until the other four are sent,
+/// so the window is full whatever the decoder's pace.
 #[test]
 fn a_restore_through_a_window_of_spans_holds_the_window() {
-    let few = restore_peak(72, 5);
-    let many = restore_peak(144, 5);
+    let (gate_few, gate_many) = (SpanGate::new(5), SpanGate::new(5));
+    let few = restore_peak(72, 5, Some(Arc::clone(&gate_few)));
+    let many = restore_peak(144, 5, Some(Arc::clone(&gate_many)));
     let bound = 5 * (SPAN + 2 * MIB) + restore_bound();
     eprintln!(
         "restore in spans 72 MiB: {} KiB, 144 MiB: {} KiB (bound {} KiB)",
@@ -580,6 +659,12 @@ fn a_restore_through_a_window_of_spans_holds_the_window() {
     );
     for peak in [few, many] {
         assert!(peak <= bound, "restore held {peak} bytes, over {bound}");
+    }
+    for gate in [&gate_few, &gate_many] {
+        assert!(
+            gate.window_filled(),
+            "the first span was never held behind a window of spans: fewer than five were open"
+        );
     }
     assert!(
         few >= 2 * SPAN,
