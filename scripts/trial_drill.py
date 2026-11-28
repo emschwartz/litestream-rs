@@ -1148,13 +1148,13 @@ class Drill:
             led = ledger_scan(self.work / f"ledger-{db}.log", set(), [])
             if latest:
                 results.append(self.check_target(db, f"{tag}-latest", [], expect_seq=led["last_ack"], vs_live=True))
+                # The flag a deploy script passes: restore only when the replica has history.
+                results.append(self.check_target(db, f"{tag}-if-exists", ["-if-replica-exists"], expect_seq=led["last_ack"], vs_live=True))
             if txids.get(db):
                 results.append(self.check_target(db, f"{tag}-txid", ["--txid", f"{txids[db]:016x}"], again_key=(db, "txid") if again else None))
             if instant_by_db.get(db):
                 ms = instant_by_db[db]
                 results.append(self.check_target(db, f"{tag}-instant", ["--timestamp", rfc3339(ms)], instant_ms=ms))
-                # The flag a deploy script passes: restore only when the replica has history, here at the instant.
-                results.append(self.check_target(db, f"{tag}-if-exists", ["-if-replica-exists", "--timestamp", rfc3339(ms)], instant_ms=ms))
         return results
 
 
