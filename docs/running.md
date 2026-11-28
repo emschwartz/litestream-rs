@@ -88,7 +88,7 @@ The first form is Go's and reads a bare URL as AWS S3. The second restores the r
 
 ## Log lines
 
-Logs go to standard error in Go's `slog` text format, `time=... level=... msg=...`. The lines worth knowing:
+Logs go to standard output, as Go's do, in Go's `slog` text format, `time=... level=... msg=...`. Set `logging.stderr: true` in the config to send them to standard error instead. The lines worth knowing:
 
 | Line | Meaning |
 |---|---|
@@ -147,9 +147,17 @@ The first says this database is the right one; the next start takes a snapshot a
 
 ## Moving from Go Litestream, and back
 
-Never let Go and `lsr` run on one bucket path at the same moment, not even for the seconds of a rolling deploy: restores can then come back wrong with no error ([#346](https://github.com/emschwartz/litestream-rs/issues/346)). Nothing enforces it, because the working folder's lock does not exclude Go, and an application that embeds the library while a Go sidecar still runs is the same overlap. To swap them: stop the one that is running, confirm its process has exited, then start the other.
+Never let Go and `lsr` run on one bucket path at the same moment, not even for the seconds of a rolling deploy: restores can then come back wrong with no error ([#346](https://github.com/emschwartz/litestream-rs/issues/346)). Nothing enforces it, because the working folder's lock does not exclude Go, and an application that embeds the library while a Go sidecar still runs is the same overlap. To swap them: stop the one that is running, confirm its process has exited, then start the other. Going back to Go also needs the application stopped ([below](#going-back-to-go)).
 
-With Go stopped, `lsr` reads the same config and the same working folder (`.<name>-litestream` beside the database) and continues from Go's files, with no snapshot when the WAL is intact. Before the swap, run `lsr config check` (it refuses settings for features `lsr` lacks), add the two optional permissions above if the keys can have them, and keep free disk about the size of the database beside it: a start that cannot continue from the WAL stages a compressed copy there first. To go back, stop `lsr`, confirm it has exited, and start Go v0.5.16 or later.
+With Go stopped, `lsr` reads the same config and the same working folder (`.<name>-litestream` beside the database) and continues from Go's files, with no snapshot when the WAL is intact. Before the swap, run `lsr config check` (it refuses settings for features `lsr` lacks), add the two optional permissions above if the keys can have them, and keep free disk about the size of the database beside it: a start that cannot continue from the WAL stages a compressed copy there first.
+
+### Going back to Go
+
+Go back only with the application stopped across the swap: stop the application, stop `lsr`, confirm it has exited, start Go v0.5.16 or later, and only then start the application.
+
+With the application running, Go can lose commits and report nothing. When the application restarts the WAL while no replicator runs (a checkpoint that completes, then a write, which SQLite's automatic checkpoint does on its own), Go continues from the start of the new WAL without a snapshot. The changes it had not copied from the old WAL never reach the replica. A restore, by Go or by `lsr`, then returns a database with later rows present and earlier ones missing, exits 0, and passes `integrity_check`.
+
+This is a defect in Go, seen at upstream 3e0fdc0 ([#542](https://github.com/emschwartz/litestream-rs/issues/542)). It is not limited to the swap: Go started after `lsr` was killed, or after a stop of its own during which the application wrote, resumes the same way. `lsr` takes a snapshot in that case.
 
 ### When the application runs under Go's -exec
 
